@@ -3131,6 +3131,12 @@
   boot_val => 'false',
 },
 
+{ name => 'wait_event_timing', type => 'bool', context => 'PGC_SUSET', group => 'STATS_CUMULATIVE',
+  short_desc => 'Collects timing statistics for wait events (count, duration, histogram).',
+  variable => 'wait_event_timing',
+  boot_val => 'false',
+},
+
 { name => 'transaction_buffers', type => 'int', context => 'PGC_POSTMASTER', group => 'RESOURCES_MEM',
   short_desc => 'Sets the size of the dedicated buffer pool used for the transaction status cache.',
   long_desc => '0 means use a fraction of "shared_buffers".',
