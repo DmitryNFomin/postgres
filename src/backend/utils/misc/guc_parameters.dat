@@ -3131,12 +3131,6 @@
   boot_val => 'false',
 },
 
-{ name => 'wait_event_timing', type => 'bool', context => 'PGC_SUSET', group => 'STATS_CUMULATIVE',
-  short_desc => 'Collects timing statistics for wait events (count, duration, histogram).',
-  variable => 'wait_event_timing',
-  boot_val => 'false',
-},
-
 { name => 'transaction_buffers', type => 'int', context => 'PGC_POSTMASTER', group => 'RESOURCES_MEM',
   short_desc => 'Sets the size of the dedicated buffer pool used for the transaction status cache.',
   long_desc => '0 means use a fraction of "shared_buffers".',
@@ -3334,6 +3328,18 @@
   short_desc => 'Enables vacuum to truncate empty pages at the end of the table.',
   variable => 'vacuum_truncate',
   boot_val => 'true',
+},
+
+{ name => 'wait_event_timing', type => 'bool', context => 'PGC_SUSET', group => 'STATS_CUMULATIVE',
+  short_desc => 'Collects timing statistics for wait events (count, duration, histogram).',
+  variable => 'wait_event_timing',
+  boot_val => 'false',
+},
+
+{ name => 'wait_event_trace', type => 'bool', context => 'PGC_USERSET', group => 'STATS_CUMULATIVE',
+  short_desc => 'Enables per-session wait event trace recording into a ring buffer.',
+  variable => 'wait_event_trace',
+  boot_val => 'false',
 },
 
 { name => 'wal_block_size', type => 'int', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',

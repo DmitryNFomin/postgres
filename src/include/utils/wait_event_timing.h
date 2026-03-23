@@ -24,6 +24,7 @@
 #ifndef WAIT_EVENT_TIMING_H
 #define WAIT_EVENT_TIMING_H
 
+#include "port/atomics.h"
 #include "portability/instr_time.h"
 
 /*
@@ -120,14 +121,42 @@ typedef struct WaitEventQueryState
 } WaitEventQueryState;
 
 
-/* GUC variable */
+/*
+ * Per-session wait event trace ring buffer (10046-style).
+ * When wait_event_trace GUC is on for a session, every wait_end writes
+ * a record to a per-backend ring buffer.  External tools read the buffer
+ * via pg_stat_get_wait_event_trace().
+ */
+#define WAIT_EVENT_TRACE_RING_SIZE	4096	/* must be power of 2 */
+
+typedef struct WaitEventTraceRecord
+{
+	int64		timestamp_ns;	/* monotonic clock */
+	uint32		event;			/* wait_event_info */
+	uint32		pad;
+	int64		duration_ns;
+	int64		query_id;
+} WaitEventTraceRecord;			/* 32 bytes */
+
+typedef struct WaitEventTraceState
+{
+	pg_atomic_uint64 write_pos;	/* monotonically increasing write position */
+	WaitEventTraceRecord records[WAIT_EVENT_TRACE_RING_SIZE];
+} WaitEventTraceState;			/* ~128 KB */
+
+
+/* GUC variables */
 extern PGDLLIMPORT bool wait_event_timing;
+extern PGDLLIMPORT bool wait_event_trace;
 
 /* Pointer to this backend's timing state in shared memory */
 extern PGDLLIMPORT WaitEventTimingState *my_wait_event_timing;
 
 /* Pointer to this backend's query attribution hash in shared memory */
 extern PGDLLIMPORT WaitEventQueryState *my_wait_event_query;
+
+/* Pointer to this backend's trace ring buffer in shared memory */
+extern PGDLLIMPORT WaitEventTraceState *my_wait_event_trace;
 
 /* Pointer to current backend's query_id in PgBackendStatus (set late) */
 extern PGDLLIMPORT volatile int64 *my_wait_event_query_id_ptr;
@@ -137,6 +166,8 @@ extern Size WaitEventTimingShmemSize(void);
 extern void WaitEventTimingShmemInit(void);
 extern Size WaitEventQueryShmemSize(void);
 extern void WaitEventQueryShmemInit(void);
+extern Size WaitEventTraceShmemSize(void);
+extern void WaitEventTraceShmemInit(void);
 
 /* Called from InitProcess() to point my_wait_event_timing at our slot */
 extern void pgstat_set_wait_event_timing_storage(int procNumber);

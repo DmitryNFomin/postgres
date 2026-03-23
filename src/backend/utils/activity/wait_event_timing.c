@@ -30,8 +30,9 @@
 #include "utils/wait_event.h"
 #include "utils/wait_event_timing.h"
 
-/* GUC variable */
+/* GUC variables */
 bool		wait_event_timing = false;
+bool		wait_event_trace = false;
 
 /* Pointer to this backend's timing state */
 WaitEventTimingState *my_wait_event_timing = NULL;
@@ -39,12 +40,16 @@ WaitEventTimingState *my_wait_event_timing = NULL;
 /* Pointer to this backend's query attribution hash */
 WaitEventQueryState *my_wait_event_query = NULL;
 
+/* Pointer to this backend's trace ring buffer */
+WaitEventTraceState *my_wait_event_trace = NULL;
+
 /* Pointer to current backend's query_id in PgBackendStatus */
 volatile int64 *my_wait_event_query_id_ptr = NULL;
 
 /* Shared memory base pointers */
 static WaitEventTimingState *WaitEventTimingArray = NULL;
 static WaitEventQueryState *WaitEventQueryArray = NULL;
+static WaitEventTraceState *WaitEventTraceArray = NULL;
 
 /*
  * Report the shared memory space needed.
@@ -101,6 +106,33 @@ WaitEventQueryShmemInit(void)
 }
 
 /*
+ * Report the shared memory space needed for trace ring buffers.
+ */
+Size
+WaitEventTraceShmemSize(void)
+{
+	return mul_size(MaxBackends, sizeof(WaitEventTraceState));
+}
+
+/*
+ * Initialize shared memory for trace ring buffers.
+ */
+void
+WaitEventTraceShmemInit(void)
+{
+	bool		found;
+	Size		size;
+
+	size = WaitEventTraceShmemSize();
+
+	WaitEventTraceArray = (WaitEventTraceState *)
+		ShmemInitStruct("WaitEventTraceArray", size, &found);
+
+	if (!found)
+		memset(WaitEventTraceArray, 0, size);
+}
+
+/*
  * Point my_wait_event_timing at this backend's slot.
  * Called from InitProcess() after the backend has a valid procNumber.
  *
@@ -132,6 +164,14 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 		my_wait_event_query = &WaitEventQueryArray[procNumber];
 		memset(my_wait_event_query, 0, sizeof(WaitEventQueryState));
 	}
+
+	/* Set up trace ring buffer (same index) */
+	if (WaitEventTraceArray != NULL)
+	{
+		my_wait_event_trace = &WaitEventTraceArray[procNumber];
+		memset(my_wait_event_trace, 0, sizeof(WaitEventTraceState));
+		pg_atomic_init_u64(&my_wait_event_trace->write_pos, 0);
+	}
 }
 
 /*
@@ -142,6 +182,7 @@ pgstat_reset_wait_event_timing_storage(void)
 {
 	my_wait_event_timing = NULL;
 	my_wait_event_query = NULL;
+	my_wait_event_trace = NULL;
 	my_wait_event_query_id_ptr = NULL;
 }
 
@@ -284,6 +325,87 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 								rsinfo->setDesc,
 								values, nulls);
 		}
+	}
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function: pg_stat_get_wait_event_trace(backend_id int4)
+ *
+ * Returns trace records from a backend's ring buffer in chronological order.
+ * Pass NULL or 0 for own backend.
+ */
+Datum
+pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int			backend_idx;
+	WaitEventTraceState *ts;
+	uint64		write_pos;
+	uint64		read_start;
+	uint64		i;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (WaitEventTraceArray == NULL)
+		PG_RETURN_VOID();
+
+	/* Determine which backend to read */
+	if (PG_ARGISNULL(0) || PG_GETARG_INT32(0) <= 0)
+	{
+		/* Own backend — find our index */
+		if (my_wait_event_trace == NULL)
+			PG_RETURN_VOID();
+		backend_idx = (int) (my_wait_event_trace - WaitEventTraceArray);
+	}
+	else
+	{
+		backend_idx = PG_GETARG_INT32(0) - 1;	/* 1-based to 0-based */
+	}
+
+	if (backend_idx < 0 || backend_idx >= MaxBackends)
+		PG_RETURN_VOID();
+
+	ts = &WaitEventTraceArray[backend_idx];
+	write_pos = pg_atomic_read_u64(&ts->write_pos);
+
+	if (write_pos == 0)
+		PG_RETURN_VOID();
+
+	/* Read from oldest available to newest */
+	read_start = (write_pos > WAIT_EVENT_TRACE_RING_SIZE)
+		? write_pos - WAIT_EVENT_TRACE_RING_SIZE : 0;
+
+	for (i = read_start; i < write_pos; i++)
+	{
+		WaitEventTraceRecord *rec =
+			&ts->records[i & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+		Datum		values[6];
+		bool		nulls[6];
+		const char *event_type;
+		const char *event_name;
+
+		if (rec->event == 0)
+			continue;
+
+		event_type = pgstat_get_wait_event_type(rec->event);
+		event_name = pgstat_get_wait_event(rec->event);
+		if (event_type == NULL || event_name == NULL)
+			continue;
+
+		memset(nulls, 0, sizeof(nulls));
+
+		values[0] = Int64GetDatum((int64) i);		/* seq */
+		values[1] = Int64GetDatum(rec->timestamp_ns);
+		values[2] = CStringGetTextDatum(event_type);
+		values[3] = CStringGetTextDatum(event_name);
+		values[4] = Float8GetDatum((double) rec->duration_ns / 1000.0);
+		values[5] = Int64GetDatum(rec->query_id);
+
+		tuplestore_putvalues(rsinfo->setResult,
+							rsinfo->setDesc,
+							values, nulls);
 	}
 
 	PG_RETURN_VOID();

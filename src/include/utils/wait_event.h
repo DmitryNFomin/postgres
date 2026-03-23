@@ -143,6 +143,21 @@ pgstat_report_wait_end(void)
 												qid, idx, duration_ns);
 			}
 
+			/* 10046-style per-session trace ring buffer */
+			if (unlikely(wait_event_trace && my_wait_event_trace != NULL))
+			{
+				uint64	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
+				WaitEventTraceRecord *rec =
+					&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+
+				rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
+				rec->event = event;
+				rec->duration_ns = duration_ns;
+				rec->query_id = my_wait_event_query_id_ptr
+					? *my_wait_event_query_id_ptr : 0;
+				pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
+			}
+
 			INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
 		}
 	}

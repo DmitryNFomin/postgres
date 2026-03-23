@@ -12863,4 +12863,14 @@
   proargnames => '{backend_id,query_id,wait_event_type,wait_event,calls,total_time_ms}',
   prosrc => 'pg_stat_get_wait_event_timing_by_query' },
 
+{ oid => '9952',
+  descr => 'statistics: per-session wait event trace ring buffer',
+  proname => 'pg_stat_get_wait_event_trace', prorows => '1000',
+  proretset => 't', provolatile => 's', proparallel => 'r',
+  prorettype => 'record', proargtypes => 'int4',
+  proallargtypes => '{int4,int8,int8,text,text,float8,int8}',
+  proargmodes => '{i,o,o,o,o,o,o}',
+  proargnames => '{backend_id,seq,timestamp_ns,wait_event_type,wait_event,duration_us,query_id}',
+  prosrc => 'pg_stat_get_wait_event_trace' },
+
 ]
