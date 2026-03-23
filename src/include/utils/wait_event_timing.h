@@ -96,15 +96,47 @@ typedef struct WaitEventTimingState
 } WaitEventTimingState;
 
 
+/*
+ * Per-(query_id, event) accumulated statistics for query attribution.
+ * Open-addressing hash table with linear probing, per backend.
+ */
+#define WAIT_EVENT_QUERY_HASH_SIZE	1024	/* must be power of 2 */
+
+typedef struct WaitEventQueryEntry
+{
+	int64		query_id;		/* 0 means slot is empty */
+	int32		event_idx;		/* flat index from wait_event_timing_index() */
+	int32		pad;
+	int64		count;
+	int64		total_ns;
+} WaitEventQueryEntry;			/* 32 bytes */
+
+typedef struct WaitEventQueryState
+{
+	int32		num_used;		/* occupied slots */
+	int32		pad;
+	int64		overflow_count;	/* waits dropped due to full table */
+	WaitEventQueryEntry entries[WAIT_EVENT_QUERY_HASH_SIZE];
+} WaitEventQueryState;
+
+
 /* GUC variable */
 extern PGDLLIMPORT bool wait_event_timing;
 
 /* Pointer to this backend's timing state in shared memory */
 extern PGDLLIMPORT WaitEventTimingState *my_wait_event_timing;
 
+/* Pointer to this backend's query attribution hash in shared memory */
+extern PGDLLIMPORT WaitEventQueryState *my_wait_event_query;
+
+/* Pointer to current backend's query_id in PgBackendStatus (set late) */
+extern PGDLLIMPORT volatile int64 *my_wait_event_query_id_ptr;
+
 /* Shared memory setup */
 extern Size WaitEventTimingShmemSize(void);
 extern void WaitEventTimingShmemInit(void);
+extern Size WaitEventQueryShmemSize(void);
+extern void WaitEventQueryShmemInit(void);
 
 /* Called from InitProcess() to point my_wait_event_timing at our slot */
 extern void pgstat_set_wait_event_timing_storage(int procNumber);
@@ -160,6 +192,57 @@ wait_event_timing_bucket(int64 duration_ns)
 		bucket = WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS - 1;
 
 	return bucket;
+}
+
+/*
+ * Accumulate a wait event duration into the per-(query_id, event) hash table.
+ * Uses open addressing with linear probing.  Called from the hot path in
+ * pgstat_report_wait_end() when wait_event_timing is on and query_id != 0.
+ */
+static inline void
+wait_event_query_accumulate(WaitEventQueryState *qs, int64 query_id,
+							int event_idx, int64 duration_ns)
+{
+	uint64		hash;
+	int			slot;
+	int			i;
+
+	if (qs == NULL)
+		return;
+
+	/* Simple hash combining query_id and event_idx */
+	hash = ((uint64) query_id * 0x9e3779b97f4a7c15ULL) ^ (uint64) event_idx;
+	slot = (int) (hash & (WAIT_EVENT_QUERY_HASH_SIZE - 1));
+
+	for (i = 0; i < WAIT_EVENT_QUERY_HASH_SIZE; i++)
+	{
+		WaitEventQueryEntry *e = &qs->entries[slot];
+
+		if (e->query_id == query_id && e->event_idx == event_idx)
+		{
+			/* Found existing entry */
+			e->count++;
+			e->total_ns += duration_ns;
+			return;
+		}
+
+		if (e->query_id == 0)
+		{
+			/* Empty slot — insert new entry */
+			e->query_id = query_id;
+			e->event_idx = event_idx;
+			e->count = 1;
+			e->total_ns = duration_ns;
+			qs->num_used++;
+			return;
+		}
+
+		/* Collision — linear probe */
+		slot = (slot + 1) & (WAIT_EVENT_QUERY_HASH_SIZE - 1);
+	}
+
+	/* Table full — drop this measurement */
+	qs->overflow_count++;
 }
 
 #endif							/* WAIT_EVENT_TIMING_H */

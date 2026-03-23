@@ -20,6 +20,7 @@
 #include "storage/proc.h"		/* for MyProc */
 #include "storage/procarray.h"
 #include "utils/ascii.h"
+#include "utils/wait_event_timing.h"
 #include "utils/guc.h"			/* for application_name */
 #include "utils/memutils.h"
 
@@ -248,6 +249,13 @@ pgstat_beinit(void)
 	Assert(MyProcNumber != INVALID_PROC_NUMBER);
 	Assert(MyProcNumber >= 0 && MyProcNumber < NumBackendStatSlots);
 	MyBEEntry = &BackendStatusArray[MyProcNumber];
+
+	/*
+	 * Point the wait event timing query_id pointer at our st_query_id.
+	 * This must happen here (not in InitProcess) because MyBEEntry is
+	 * not yet set when pgstat_set_wait_event_timing_storage() runs.
+	 */
+	my_wait_event_query_id_ptr = &MyBEEntry->st_query_id;
 
 	/* Set up a process-exit hook to clean up */
 	on_shmem_exit(pgstat_beshutdown_hook, 0);

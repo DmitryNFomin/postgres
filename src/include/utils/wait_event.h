@@ -132,6 +132,16 @@ pgstat_report_wait_end(void)
 				entry->histogram[wait_event_timing_bucket(duration_ns)]++;
 			}
 
+			/* Query attribution: accumulate per (query_id, event) */
+			if (my_wait_event_query_id_ptr)
+			{
+				int64	qid = *my_wait_event_query_id_ptr;
+
+				if (qid != 0)
+					wait_event_query_accumulate(my_wait_event_query,
+												qid, idx, duration_ns);
+			}
+
 			INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
 		}
 	}
