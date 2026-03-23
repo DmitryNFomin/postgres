@@ -71,12 +71,21 @@ WaitEventTimingShmemInit(void)
  * Called from InitProcess() after the backend has a valid procNumber.
  *
  * procNumber is the PGPROC array index (from GetNumberFromPGProc).
+ * Auxiliary processes (startup, bgwriter, etc.) have procNumbers beyond
+ * MaxBackends — we silently skip timing for them.
  */
 void
 pgstat_set_wait_event_timing_storage(int procNumber)
 {
-	Assert(WaitEventTimingArray != NULL);
-	Assert(procNumber >= 0 && procNumber < MaxBackends);
+	if (WaitEventTimingArray == NULL)
+		return;
+
+	/* Auxiliary processes have procNumbers >= MaxBackends; skip them */
+	if (procNumber < 0 || procNumber >= MaxBackends)
+	{
+		my_wait_event_timing = NULL;
+		return;
+	}
 
 	my_wait_event_timing = &WaitEventTimingArray[procNumber];
 
