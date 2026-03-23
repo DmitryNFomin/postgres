@@ -24,7 +24,6 @@
 #ifndef WAIT_EVENT_TIMING_H
 #define WAIT_EVENT_TIMING_H
 
-#include "port/pg_bitutils.h"
 #include "portability/instr_time.h"
 
 /*
@@ -144,8 +143,18 @@ wait_event_timing_bucket(int64 duration_ns)
 	if (duration_us <= 0)
 		return 0;
 
-	/* pg_leftmost_one_pos64 returns the position of the highest set bit */
-	bucket = pg_leftmost_one_pos64((uint64) duration_us) + 1;
+	/* Find position of highest set bit (log2) using bit shifting */
+	{
+		uint64	val = (uint64) duration_us;
+
+		bucket = 0;
+		while (val > 1)
+		{
+			val >>= 1;
+			bucket++;
+		}
+		bucket++;	/* shift so bucket 0 = [0,1)us, bucket 1 = [1,2)us */
+	}
 
 	if (bucket >= WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS)
 		bucket = WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS - 1;
