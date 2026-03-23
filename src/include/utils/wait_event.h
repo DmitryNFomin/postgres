@@ -133,7 +133,8 @@ pgstat_report_wait_end(void)
 			}
 
 			/* Query attribution: accumulate per (query_id, event) */
-			if (my_wait_event_query_id_ptr)
+			if (likely(idx >= 0) && my_wait_event_query != NULL &&
+				my_wait_event_query_id_ptr != NULL)
 			{
 				int64	qid = *my_wait_event_query_id_ptr;
 
