@@ -127,7 +127,7 @@ typedef struct WaitEventQueryState
  * a record to a per-backend ring buffer.  External tools read the buffer
  * via pg_stat_get_wait_event_trace().
  */
-#define WAIT_EVENT_TRACE_RING_SIZE	4096	/* must be power of 2 */
+#define WAIT_EVENT_TRACE_RING_SIZE	131072	/* must be power of 2, 128K records = 4 MB per backend */
 
 typedef struct WaitEventTraceRecord
 {
