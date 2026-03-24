@@ -23,16 +23,64 @@
  */
 #include "postgres.h"
 
+/*
+ * GUC variables — always defined so the GUC system works even when
+ * compiled without --enable-wait-event-timing.  Setting them to 'on'
+ * without the compile flag is harmless (no-op).
+ */
+bool		wait_event_timing = false;
+bool		wait_event_trace = false;
+
+#ifndef USE_WAIT_EVENT_TIMING
+
+/*
+ * Stub SQL functions when compiled without --enable-wait-event-timing.
+ * These are referenced by pg_proc.dat and must exist as symbols.
+ */
+#include "fmgr.h"
+
+Datum		pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS);
+Datum		pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS);
+Datum		pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS);
+
+Datum
+pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("wait_event_timing is not supported by this build"),
+			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("wait_event_timing is not supported by this build"),
+			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("wait_event_timing is not supported by this build"),
+			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
+	PG_RETURN_VOID();
+}
+
+#else							/* USE_WAIT_EVENT_TIMING */
+
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/wait_event.h"
 #include "utils/wait_event_timing.h"
-
-/* GUC variables */
-bool		wait_event_timing = false;
-bool		wait_event_trace = false;
 
 /* Pointer to this backend's timing state */
 WaitEventTimingState *my_wait_event_timing = NULL;
@@ -410,3 +458,5 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 
 	PG_RETURN_VOID();
 }
+
+#endif							/* USE_WAIT_EVENT_TIMING */

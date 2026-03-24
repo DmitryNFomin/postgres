@@ -12,7 +12,10 @@
 
 /* enums for wait events */
 #include "utils/wait_event_types.h"
+
+#ifdef USE_WAIT_EVENT_TIMING
 #include "utils/wait_event_timing.h"
+#endif
 
 extern const char *pgstat_get_wait_event(uint32 wait_event_info);
 extern const char *pgstat_get_wait_event_type(uint32 wait_event_info);
@@ -65,8 +68,8 @@ extern char **GetWaitEventCustomNames(uint32 classId, int *nwaitevents);
  *	my_wait_event_info initially points to local memory, making it safe to
  *	call this before MyProc has been initialized.
  *
- *	When wait_event_timing is enabled, we also record the start timestamp
- *	for later duration computation in pgstat_report_wait_end().
+ *	When compiled with --enable-wait-event-timing, also records the start
+ *	timestamp for later duration computation in pgstat_report_wait_end().
  * ----------
  */
 static inline void
@@ -78,16 +81,13 @@ pgstat_report_wait_start(uint32 wait_event_info)
 	 */
 	*(volatile uint32 *) my_wait_event_info = wait_event_info;
 
-	/*
-	 * Record start timestamp when wait_event_timing is enabled.
-	 * The branch is predictable (always taken or never taken for the
-	 * lifetime of the session) and costs ~1 ns when not taken.
-	 */
+#ifdef USE_WAIT_EVENT_TIMING
 	if (wait_event_timing && likely(my_wait_event_timing != NULL))
 	{
 		INSTR_TIME_SET_CURRENT(my_wait_event_timing->wait_start);
 		my_wait_event_timing->current_event = wait_event_info;
 	}
+#endif
 }
 
 /* ----------
@@ -95,17 +95,15 @@ pgstat_report_wait_start(uint32 wait_event_info)
  *
  *	Called to report end of a wait.
  *
- *	When wait_event_timing is enabled, computes the wait duration and
- *	accumulates it into per-event statistics.
+ *	When compiled with --enable-wait-event-timing and the GUC is enabled,
+ *	computes the wait duration and accumulates it into per-event statistics,
+ *	query attribution hash, and optional per-session trace ring buffer.
  * ----------
  */
 static inline void
 pgstat_report_wait_end(void)
 {
-	/*
-	 * When timing is enabled, compute duration and accumulate stats
-	 * before clearing the wait event.
-	 */
+#ifdef USE_WAIT_EVENT_TIMING
 	if (wait_event_timing && likely(my_wait_event_timing != NULL))
 	{
 		uint32		event = my_wait_event_timing->current_event;
@@ -161,6 +159,7 @@ pgstat_report_wait_end(void)
 			INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
 		}
 	}
+#endif
 
 	/* see pgstat_report_wait_start() */
 	*(volatile uint32 *) my_wait_event_info = 0;

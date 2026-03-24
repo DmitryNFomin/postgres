@@ -78,7 +78,9 @@
 #include "replication/syncrep.h"
 #include "storage/aio.h"
 #include "storage/bufmgr.h"
-#include "utils/wait_event_timing.h"
+/* wait_event_timing GUC variables — always available, no-op without compile flag */
+extern bool wait_event_timing;
+extern bool wait_event_trace;
 #include "storage/bufpage.h"
 #include "storage/copydir.h"
 #include "storage/fd.h"
