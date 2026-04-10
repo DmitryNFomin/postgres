@@ -79,6 +79,7 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 #include "miscadmin.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
+#include "utils/tuplestore.h"
 #include "utils/wait_event.h"
 #include "utils/wait_event_timing.h"
 
