@@ -75,16 +75,23 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 
 #else							/* USE_WAIT_EVENT_TIMING */
 
+#include "catalog/pg_authid.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "storage/procnumber.h"
 #include "storage/shmem.h"
+#include "utils/acl.h"
+#include "utils/backend_status.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
 #include "utils/wait_event_timing.h"
+
+#define HAS_PGSTAT_PERMISSIONS(role) \
+	(has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS) || \
+	 has_privs_of_role(GetUserId(), role))
 
 /* Pointer to this backend's timing state */
 WaitEventTimingState *my_wait_event_timing = NULL;
@@ -414,7 +421,15 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 	for (backend_idx = 0; backend_idx < MaxBackends; backend_idx++)
 	{
 		WaitEventTimingState *state = &WaitEventTimingArray[backend_idx];
+		PgBackendStatus *beentry;
 		int			i;
+
+		/* Skip dead backend slots and check permissions */
+		beentry = pgstat_get_beentry_by_proc_number(backend_idx);
+		if (beentry == NULL)
+			continue;
+		if (!HAS_PGSTAT_PERMISSIONS(beentry->st_userid))
+			continue;
 
 		for (i = 0; i < WAIT_EVENT_TIMING_NUM_EVENTS; i++)
 		{
@@ -496,7 +511,15 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 	for (backend_idx = 0; backend_idx < MaxBackends; backend_idx++)
 	{
 		WaitEventQueryState *qs = &WaitEventQueryArray[backend_idx];
+		PgBackendStatus *beentry;
 		int			i;
+
+		/* Skip dead backend slots and check permissions */
+		beentry = pgstat_get_beentry_by_proc_number(backend_idx);
+		if (beentry == NULL)
+			continue;
+		if (!HAS_PGSTAT_PERMISSIONS(beentry->st_userid))
+			continue;
 
 		for (i = 0; i < WAIT_EVENT_QUERY_HASH_SIZE; i++)
 		{
@@ -575,6 +598,21 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 
 	if (backend_idx < 0 || backend_idx >= MaxBackends)
 		PG_RETURN_VOID();
+
+	/* Permission check: only own backend or privileged roles */
+	if (backend_idx != my_trace_proc_number)
+	{
+		PgBackendStatus *beentry;
+
+		beentry = pgstat_get_beentry_by_proc_number(backend_idx);
+		if (beentry == NULL)
+			PG_RETURN_VOID();
+		if (!HAS_PGSTAT_PERMISSIONS(beentry->st_userid))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("permission denied to read wait event trace for backend %d",
+							backend_idx + 1)));
+	}
 
 	if (!DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[backend_idx]))
 		PG_RETURN_VOID();
