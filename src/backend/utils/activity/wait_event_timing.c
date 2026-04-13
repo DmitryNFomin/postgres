@@ -391,7 +391,19 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 void
 pgstat_reset_wait_event_timing_storage(void)
 {
-	/* Free trace ring buffer via DSA if allocated */
+	/*
+	 * Zero shared memory so stale data is not visible even at shmem level.
+	 * Reader-side filtering (Fix #2) skips dead backends via beentry==NULL,
+	 * but zeroing here handles the crash recovery case and ensures clean
+	 * state for the next backend on this slot.
+	 */
+	if (my_wait_event_timing != NULL)
+		memset(my_wait_event_timing, 0, sizeof(WaitEventTimingState));
+
+	if (my_wait_event_query != NULL)
+		memset(my_wait_event_query, 0, sizeof(WaitEventQueryState));
+
+	/* Trace ring buffer: cleanup via before_shmem_exit callback (Fix #1) */
 	if (my_trace_proc_number >= 0)
 		wait_event_trace_detach(my_trace_proc_number);
 
