@@ -12866,7 +12866,7 @@
 { oid => '9952',
   descr => 'statistics: per-session wait event trace ring buffer',
   proname => 'pg_stat_get_wait_event_trace', prorows => '1000',
-  proretset => 't', provolatile => 's', proparallel => 'r',
+  proretset => 't', proisstrict => 'f', provolatile => 's', proparallel => 'r',
   prorettype => 'record', proargtypes => 'int4',
   proallargtypes => '{int4,int8,int8,text,text,float8,int8}',
   proargmodes => '{i,o,o,o,o,o,o}',

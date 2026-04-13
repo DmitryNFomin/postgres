@@ -3337,9 +3337,10 @@
 },
 
 { name => 'wait_event_trace', type => 'bool', context => 'PGC_USERSET', group => 'STATS_CUMULATIVE',
-  short_desc => 'Enables per-session wait event trace recording into a ring buffer.',
+  short_desc => 'Enables per-session wait event trace recording into a ring buffer (requires wait_event_timing).',
   variable => 'wait_event_trace',
   boot_val => 'false',
+  assign_hook => 'assign_wait_event_trace',
 },
 
 { name => 'wal_block_size', type => 'int', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',

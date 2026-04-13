@@ -26,6 +26,8 @@
 
 #include "port/atomics.h"
 #include "portability/instr_time.h"
+#include "storage/lwlock.h"
+#include "utils/dsa.h"
 
 /*
  * Number of log2 histogram buckets.  Bucket i covers durations in
@@ -126,8 +128,12 @@ typedef struct WaitEventQueryState
  * When wait_event_trace GUC is on for a session, every wait_end writes
  * a record to a per-backend ring buffer.  External tools read the buffer
  * via pg_stat_get_wait_event_trace().
+ *
+ * The ring buffer is allocated lazily via DSA (Dynamic Shared Memory Areas)
+ * on first use.  Only backends that enable wait_event_trace pay the ~4 MB
+ * cost.  A small control struct in fixed shmem holds per-backend DSA pointers.
  */
-#define WAIT_EVENT_TRACE_RING_SIZE	131072	/* must be power of 2, 128K records = 4 MB per backend */
+#define WAIT_EVENT_TRACE_RING_SIZE	131072	/* must be power of 2, 128K records */
 
 typedef struct WaitEventTraceRecord
 {
@@ -142,7 +148,18 @@ typedef struct WaitEventTraceState
 {
 	pg_atomic_uint64 write_pos;	/* monotonically increasing write position */
 	WaitEventTraceRecord records[WAIT_EVENT_TRACE_RING_SIZE];
-} WaitEventTraceState;			/* ~128 KB */
+} WaitEventTraceState;			/* ~4 MB per backend (allocated lazily via DSA) */
+
+/*
+ * Control struct for lazy DSA-based trace ring allocation.
+ * Lives in fixed shared memory, one per cluster.
+ */
+typedef struct WaitEventTraceControl
+{
+	dsa_handle	trace_dsa_handle;	/* DSA_HANDLE_INVALID until first use */
+	LWLock		lock;				/* protects DSA creation */
+	dsa_pointer trace_ptrs[FLEXIBLE_ARRAY_MEMBER]; /* per procNumber */
+} WaitEventTraceControl;
 
 
 /* GUC variables */
@@ -166,12 +183,20 @@ extern Size WaitEventTimingShmemSize(void);
 extern void WaitEventTimingShmemInit(void);
 extern Size WaitEventQueryShmemSize(void);
 extern void WaitEventQueryShmemInit(void);
-extern Size WaitEventTraceShmemSize(void);
-extern void WaitEventTraceShmemInit(void);
+extern Size WaitEventTraceControlShmemSize(void);
+extern void WaitEventTraceControlShmemInit(void);
 
 /* Called from InitProcess() to point my_wait_event_timing at our slot */
 extern void pgstat_set_wait_event_timing_storage(int procNumber);
 extern void pgstat_reset_wait_event_timing_storage(void);
+
+/* Lazy DSA-based trace ring buffer allocation */
+extern void wait_event_trace_ensure_dsa(void);
+extern void wait_event_trace_attach(int procNumber);
+extern void wait_event_trace_detach(int procNumber);
+
+/* GUC assign hook for wait_event_trace */
+extern void assign_wait_event_trace(bool newval, void *extra);
 
 
 /* Convert wait_event_info to a flat index for the events[] array */

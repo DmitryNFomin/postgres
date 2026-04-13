@@ -141,7 +141,7 @@ pgstat_report_wait_end(void)
 												qid, idx, duration_ns);
 			}
 
-			/* 10046-style per-session trace ring buffer */
+			/* 10046-style per-session trace ring buffer (DSA-backed) */
 			if (unlikely(wait_event_trace && my_wait_event_trace != NULL))
 			{
 				uint64	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);

@@ -77,8 +77,11 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "storage/ipc.h"
+#include "storage/procnumber.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
 #include "utils/wait_event_timing.h"
@@ -98,7 +101,11 @@ volatile int64 *my_wait_event_query_id_ptr = NULL;
 /* Shared memory base pointers */
 static WaitEventTimingState *WaitEventTimingArray = NULL;
 static WaitEventQueryState *WaitEventQueryArray = NULL;
-static WaitEventTraceState *WaitEventTraceArray = NULL;
+
+/* DSA-based trace ring buffer control */
+static WaitEventTraceControl *WaitEventTraceCtl = NULL;
+static dsa_area *trace_dsa = NULL;
+static int	my_trace_proc_number = -1;
 
 /*
  * Report the shared memory space needed.
@@ -155,30 +162,179 @@ WaitEventQueryShmemInit(void)
 }
 
 /*
- * Report the shared memory space needed for trace ring buffers.
+ * Report the shared memory space needed for trace ring buffer control.
+ * Only a small control struct is in fixed shmem; the actual ring buffers
+ * are allocated lazily via DSA.
  */
 Size
-WaitEventTraceShmemSize(void)
+WaitEventTraceControlShmemSize(void)
 {
-	return mul_size(MaxBackends, sizeof(WaitEventTraceState));
+	return add_size(offsetof(WaitEventTraceControl, trace_ptrs),
+					mul_size(MaxBackends, sizeof(dsa_pointer)));
 }
 
 /*
- * Initialize shared memory for trace ring buffers.
+ * Initialize shared memory for trace ring buffer control.
  */
 void
-WaitEventTraceShmemInit(void)
+WaitEventTraceControlShmemInit(void)
 {
 	bool		found;
 	Size		size;
 
-	size = WaitEventTraceShmemSize();
+	size = WaitEventTraceControlShmemSize();
 
-	WaitEventTraceArray = (WaitEventTraceState *)
-		ShmemInitStruct("WaitEventTraceArray", size, &found);
+	WaitEventTraceCtl = (WaitEventTraceControl *)
+		ShmemInitStruct("WaitEventTraceControl", size, &found);
 
 	if (!found)
-		memset(WaitEventTraceArray, 0, size);
+	{
+		int		i;
+
+		WaitEventTraceCtl->trace_dsa_handle = DSA_HANDLE_INVALID;
+		LWLockInitialize(&WaitEventTraceCtl->lock,
+						 LWTRANCHE_WAIT_EVENT_TRACE_DSA);
+		for (i = 0; i < MaxBackends; i++)
+			WaitEventTraceCtl->trace_ptrs[i] = InvalidDsaPointer;
+	}
+}
+
+/*
+ * Ensure the shared DSA for trace ring buffers exists and is attached.
+ * Creates it on first call (any backend), attaches on subsequent calls.
+ * Must be called from a backend context (not postmaster).
+ */
+void
+wait_event_trace_ensure_dsa(void)
+{
+	MemoryContext oldcontext;
+
+	if (trace_dsa != NULL)
+		return;
+
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+	LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
+
+	if (WaitEventTraceCtl->trace_dsa_handle == DSA_HANDLE_INVALID)
+	{
+		trace_dsa = dsa_create(LWTRANCHE_WAIT_EVENT_TRACE_DSA);
+		dsa_pin(trace_dsa);
+		dsa_pin_mapping(trace_dsa);
+		WaitEventTraceCtl->trace_dsa_handle = dsa_get_handle(trace_dsa);
+	}
+	else
+	{
+		trace_dsa = dsa_attach(WaitEventTraceCtl->trace_dsa_handle);
+		dsa_pin_mapping(trace_dsa);
+	}
+
+	LWLockRelease(&WaitEventTraceCtl->lock);
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+/*
+ * Free trace ring buffer for this backend.
+ *
+ * Must be called BEFORE dsm_backend_shutdown() detaches the DSA.
+ * Registered as a before_shmem_exit callback.
+ */
+static void
+wait_event_trace_before_shmem_exit(int code, Datum arg)
+{
+	int		procNumber = DatumGetInt32(arg);
+
+	if (WaitEventTraceCtl == NULL)
+		return;
+
+	if (procNumber < 0 || procNumber >= MaxBackends)
+		return;
+
+	if (DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[procNumber]) &&
+		trace_dsa != NULL)
+	{
+		dsa_free(trace_dsa, WaitEventTraceCtl->trace_ptrs[procNumber]);
+		WaitEventTraceCtl->trace_ptrs[procNumber] = InvalidDsaPointer;
+	}
+
+	my_wait_event_trace = NULL;
+}
+
+/*
+ * Allocate a trace ring buffer for this backend via DSA.
+ * Called when wait_event_trace is turned on.
+ */
+void
+wait_event_trace_attach(int procNumber)
+{
+	dsa_pointer p;
+	WaitEventTraceState *ts;
+
+	if (WaitEventTraceCtl == NULL)
+		return;
+
+	if (procNumber < 0 || procNumber >= MaxBackends)
+		return;
+
+	/* Already have a ring buffer? */
+	if (DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[procNumber]))
+	{
+		wait_event_trace_ensure_dsa();
+		my_wait_event_trace = dsa_get_address(trace_dsa,
+											  WaitEventTraceCtl->trace_ptrs[procNumber]);
+		my_trace_proc_number = procNumber;
+		return;
+	}
+
+	wait_event_trace_ensure_dsa();
+
+	p = dsa_allocate_extended(trace_dsa, sizeof(WaitEventTraceState),
+							  DSA_ALLOC_ZERO);
+	ts = dsa_get_address(trace_dsa, p);
+	pg_atomic_init_u64(&ts->write_pos, 0);
+
+	WaitEventTraceCtl->trace_ptrs[procNumber] = p;
+	my_wait_event_trace = ts;
+	my_trace_proc_number = procNumber;
+
+	/*
+	 * Register cleanup to run BEFORE dsm_backend_shutdown() detaches the
+	 * DSA.  The before_shmem_exit callbacks run in LIFO order before DSM
+	 * detach, so dsa_free() is safe at that point.
+	 *
+	 * This branch executes at most once per backend lifetime: subsequent
+	 * SET wait_event_trace = on takes the reattach fast path above because
+	 * trace_ptrs[procNumber] remains valid until exit.
+	 */
+	before_shmem_exit(wait_event_trace_before_shmem_exit,
+					  Int32GetDatum(procNumber));
+}
+
+/*
+ * Free trace ring buffer for this backend on exit.
+ */
+void
+wait_event_trace_detach(int procNumber)
+{
+	/*
+	 * Only clear local pointers here.  The actual DSA free happens in
+	 * wait_event_trace_before_shmem_exit(), which runs before
+	 * dsm_backend_shutdown() detaches the DSA segments.
+	 */
+	my_wait_event_trace = NULL;
+	my_trace_proc_number = -1;
+}
+
+/*
+ * GUC assign hook for wait_event_trace.
+ * Lazily allocates the DSA-backed trace ring buffer on first enable.
+ */
+void
+assign_wait_event_trace(bool newval, void *extra)
+{
+	if (newval && my_wait_event_trace == NULL && my_trace_proc_number >= 0)
+		wait_event_trace_attach(my_trace_proc_number);
 }
 
 /*
@@ -214,13 +370,12 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 		memset(my_wait_event_query, 0, sizeof(WaitEventQueryState));
 	}
 
-	/* Set up trace ring buffer (same index) */
-	if (WaitEventTraceArray != NULL)
-	{
-		my_wait_event_trace = &WaitEventTraceArray[procNumber];
-		memset(my_wait_event_trace, 0, sizeof(WaitEventTraceState));
-		pg_atomic_init_u64(&my_wait_event_trace->write_pos, 0);
-	}
+	/*
+	 * Trace ring buffer is allocated lazily via DSA when wait_event_trace
+	 * is turned on.  Save procNumber for later use by trace_attach/detach.
+	 */
+	my_trace_proc_number = procNumber;
+	my_wait_event_trace = NULL;
 }
 
 /*
@@ -229,10 +384,15 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 void
 pgstat_reset_wait_event_timing_storage(void)
 {
+	/* Free trace ring buffer via DSA if allocated */
+	if (my_trace_proc_number >= 0)
+		wait_event_trace_detach(my_trace_proc_number);
+
 	my_wait_event_timing = NULL;
 	my_wait_event_query = NULL;
 	my_wait_event_trace = NULL;
 	my_wait_event_query_id_ptr = NULL;
+	my_trace_proc_number = -1;
 }
 
 /*
@@ -397,16 +557,16 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	if (WaitEventTraceArray == NULL)
+	if (WaitEventTraceCtl == NULL)
 		PG_RETURN_VOID();
 
 	/* Determine which backend to read */
 	if (PG_ARGISNULL(0) || PG_GETARG_INT32(0) <= 0)
 	{
-		/* Own backend — find our index */
+		/* Own backend */
 		if (my_wait_event_trace == NULL)
 			PG_RETURN_VOID();
-		backend_idx = (int) (my_wait_event_trace - WaitEventTraceArray);
+		backend_idx = my_trace_proc_number;
 	}
 	else
 	{
@@ -416,7 +576,14 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 	if (backend_idx < 0 || backend_idx >= MaxBackends)
 		PG_RETURN_VOID();
 
-	ts = &WaitEventTraceArray[backend_idx];
+	if (!DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[backend_idx]))
+		PG_RETURN_VOID();
+
+	/* Attach to DSA if needed and resolve the pointer */
+	wait_event_trace_ensure_dsa();
+	ts = dsa_get_address(trace_dsa,
+						 WaitEventTraceCtl->trace_ptrs[backend_idx]);
+
 	write_pos = pg_atomic_read_u64(&ts->write_pos);
 
 	if (write_pos == 0)

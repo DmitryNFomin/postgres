@@ -140,7 +140,7 @@ CalculateShmemSize(void)
 #ifdef USE_WAIT_EVENT_TIMING
 	size = add_size(size, WaitEventTimingShmemSize());
 	size = add_size(size, WaitEventQueryShmemSize());
-	size = add_size(size, WaitEventTraceShmemSize());
+	size = add_size(size, WaitEventTraceControlShmemSize());
 #endif
 	size = add_size(size, InjectionPointShmemSize());
 	size = add_size(size, SlotSyncShmemSize());
@@ -333,7 +333,7 @@ CreateOrAttachShmemStructs(void)
 #ifdef USE_WAIT_EVENT_TIMING
 	WaitEventTimingShmemInit();
 	WaitEventQueryShmemInit();
-	WaitEventTraceShmemInit();
+	WaitEventTraceControlShmemInit();
 #endif
 	InjectionPointShmemInit();
 	AioShmemInit();
