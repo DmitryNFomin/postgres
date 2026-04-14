@@ -44,6 +44,7 @@ bool		wait_event_trace = false;
 Datum		pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS);
 Datum		pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS);
 Datum		pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS);
+Datum		pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS);
 
 Datum
 pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
@@ -67,6 +68,16 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 
 Datum
 pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("wait_event_timing is not supported by this build"),
+			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -822,6 +833,78 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 		tuplestore_putvalues(rsinfo->setResult,
 							rsinfo->setDesc,
 							values, nulls);
+	}
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function: pg_stat_reset_wait_event_timing(backend_id int4)
+ *
+ * Resets wait event timing counters.
+ *   backend_id = NULL or 0: reset own backend
+ *   backend_id > 0: reset specific backend (superuser only)
+ *   backend_id = -1: reset ALL backends (superuser only)
+ */
+Datum
+pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
+{
+	int			target;
+
+	if (PG_ARGISNULL(0) || PG_GETARG_INT32(0) == 0)
+	{
+		/* Reset own backend -- no privilege check needed */
+		if (my_wait_event_timing != NULL)
+		{
+			memset(my_wait_event_timing->events, 0,
+				   sizeof(my_wait_event_timing->events));
+			memset(my_wait_event_timing->lwlock_hash.lwlock_events, 0,
+				   sizeof(my_wait_event_timing->lwlock_hash.lwlock_events));
+			my_wait_event_timing->reset_count++;
+		}
+		if (my_wait_event_query != NULL)
+			memset(my_wait_event_query, 0, sizeof(WaitEventQueryState));
+	}
+	else
+	{
+		target = PG_GETARG_INT32(0);
+
+		/* Resetting other backends requires superuser */
+		if (!superuser())
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("must be a superuser to reset other backends' wait event timing")));
+
+		if (target == -1)
+		{
+			/* Reset all backends */
+			for (int i = 0; i < MaxBackends; i++)
+			{
+				memset(WaitEventTimingArray[i].events, 0,
+					   sizeof(WaitEventTimingArray[i].events));
+				memset(WaitEventTimingArray[i].lwlock_hash.lwlock_events, 0,
+					   sizeof(WaitEventTimingArray[i].lwlock_hash.lwlock_events));
+				WaitEventTimingArray[i].reset_count++;
+			}
+			for (int i = 0; i < MaxBackends; i++)
+				memset(&WaitEventQueryArray[i], 0, sizeof(WaitEventQueryState));
+		}
+		else
+		{
+			int			idx = target - 1;	/* 1-based to 0-based */
+
+			if (idx < 0 || idx >= MaxBackends)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid backend_id: %d", target)));
+
+			memset(WaitEventTimingArray[idx].events, 0,
+				   sizeof(WaitEventTimingArray[idx].events));
+			memset(WaitEventTimingArray[idx].lwlock_hash.lwlock_events, 0,
+				   sizeof(WaitEventTimingArray[idx].lwlock_hash.lwlock_events));
+			WaitEventTimingArray[idx].reset_count++;
+			memset(&WaitEventQueryArray[idx], 0, sizeof(WaitEventQueryState));
+		}
 	}
 
 	PG_RETURN_VOID();

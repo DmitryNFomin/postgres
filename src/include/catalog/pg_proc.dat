@@ -12873,4 +12873,11 @@
   proargnames => '{backend_id,seq,timestamp_ns,wait_event_type,wait_event,duration_us,query_id}',
   prosrc => 'pg_stat_get_wait_event_trace' },
 
+{ oid => '9953',
+  descr => 'statistics: reset wait event timing counters for current backend or all backends',
+  proname => 'pg_stat_reset_wait_event_timing', proisstrict => 'f',
+  provolatile => 'v', prorettype => 'void', proargtypes => 'int4',
+  proargnames => '{backend_id}',
+  prosrc => 'pg_stat_reset_wait_event_timing' },
+
 ]
