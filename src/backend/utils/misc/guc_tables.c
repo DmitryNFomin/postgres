@@ -78,9 +78,6 @@
 #include "replication/syncrep.h"
 #include "storage/aio.h"
 #include "storage/bufmgr.h"
-/* wait_event_timing GUC variables — always available, no-op without compile flag */
-extern bool wait_event_timing;
-extern bool wait_event_trace;
 #include "storage/bufpage.h"
 #include "storage/copydir.h"
 #include "storage/fd.h"
@@ -105,6 +102,7 @@ extern bool wait_event_trace;
 #include "utils/plancache.h"
 #include "utils/ps_status.h"
 #include "utils/rls.h"
+#include "utils/wait_event_timing.h"
 #include "utils/xml.h"
 
 #ifdef TRACE_SYNCSCAN
