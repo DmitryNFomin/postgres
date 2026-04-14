@@ -118,6 +118,9 @@ pgstat_report_wait_end(void)
 			duration_ns = INSTR_TIME_GET_NANOSEC(now) -
 				INSTR_TIME_GET_NANOSEC(my_wait_event_timing->wait_start);
 
+			if (unlikely(duration_ns < 0))
+				duration_ns = 0;
+
 			idx = wait_event_timing_index(event);
 
 			{
