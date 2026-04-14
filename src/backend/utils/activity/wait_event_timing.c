@@ -38,6 +38,8 @@ bool		wait_event_trace = false;
  * These are referenced by pg_proc.dat and must exist as symbols.
  */
 #include "fmgr.h"
+#include "utils/guc_hooks.h"
+#include "utils/wait_event_timing.h"
 
 Datum		pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS);
 Datum		pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS);
@@ -71,6 +73,63 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 			 errmsg("wait_event_timing is not supported by this build"),
 			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
 	PG_RETURN_VOID();
+}
+
+/*
+ * Extern variables referenced by backend_status.c unconditionally.
+ * In timing builds these are defined after the #else.
+ */
+volatile int64 *my_wait_event_query_id_ptr = NULL;
+
+/* Stub GUC assign hook */
+void
+assign_wait_event_trace(bool newval, void *extra)
+{
+	/* no-op in non-timing builds */
+}
+
+/* Stub shmem functions called from ipci.c */
+Size
+WaitEventTimingShmemSize(void)
+{
+	return 0;
+}
+
+void
+WaitEventTimingShmemInit(void)
+{
+}
+
+Size
+WaitEventQueryShmemSize(void)
+{
+	return 0;
+}
+
+void
+WaitEventQueryShmemInit(void)
+{
+}
+
+Size
+WaitEventTraceControlShmemSize(void)
+{
+	return 0;
+}
+
+void
+WaitEventTraceControlShmemInit(void)
+{
+}
+
+void
+pgstat_set_wait_event_timing_storage(int procNumber)
+{
+}
+
+void
+pgstat_reset_wait_event_timing_storage(void)
+{
 }
 
 #else							/* USE_WAIT_EVENT_TIMING */
