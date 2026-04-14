@@ -3334,12 +3334,14 @@
   short_desc => 'Collects timing statistics for wait events (count, duration, histogram).',
   variable => 'wait_event_timing',
   boot_val => 'false',
+  check_hook => 'check_wait_event_timing',
 },
 
 { name => 'wait_event_trace', type => 'bool', context => 'PGC_USERSET', group => 'STATS_CUMULATIVE',
   short_desc => 'Enables per-session wait event trace recording into a ring buffer (requires wait_event_timing).',
   variable => 'wait_event_trace',
   boot_val => 'false',
+  check_hook => 'check_wait_event_trace',
   assign_hook => 'assign_wait_event_trace',
 },
 

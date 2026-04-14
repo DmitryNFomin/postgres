@@ -221,8 +221,7 @@ extern void wait_event_trace_ensure_dsa(void);
 extern void wait_event_trace_attach(int procNumber);
 extern void wait_event_trace_detach(int procNumber);
 
-/* GUC assign hook for wait_event_trace */
-extern void assign_wait_event_trace(bool newval, void *extra);
+/* GUC hooks declared in guc_hooks.h */
 
 
 /*

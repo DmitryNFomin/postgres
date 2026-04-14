@@ -90,6 +90,42 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
  * Extern variables referenced by backend_status.c unconditionally.
  * In timing builds these are defined after the #else.
  */
+/* GUC check hooks: reject 'on' in unsupported builds */
+bool
+check_wait_event_timing(bool *newval, void **extra, GucSource source)
+{
+	if (*newval)
+	{
+		if (source < PGC_S_INTERACTIVE)
+		{
+			/* Config file, env, command line: force off so server can start */
+			*newval = false;
+			return true;
+		}
+		GUC_check_errdetail("This build does not support wait event timing.");
+		GUC_check_errhint("Compile PostgreSQL with --enable-wait-event-timing.");
+		return false;
+	}
+	return true;
+}
+
+bool
+check_wait_event_trace(bool *newval, void **extra, GucSource source)
+{
+	if (*newval)
+	{
+		if (source < PGC_S_INTERACTIVE)
+		{
+			*newval = false;
+			return true;
+		}
+		GUC_check_errdetail("This build does not support wait event tracing.");
+		GUC_check_errhint("Compile PostgreSQL with --enable-wait-event-timing.");
+		return false;
+	}
+	return true;
+}
+
 /* Stub GUC assign hook */
 void
 assign_wait_event_trace(bool newval, void *extra)
@@ -359,6 +395,21 @@ wait_event_trace_detach(int procNumber)
 	 */
 	my_wait_event_trace = NULL;
 	my_trace_proc_number = -1;
+}
+
+/*
+ * GUC check hooks -- in timing builds, all values are accepted.
+ */
+bool
+check_wait_event_timing(bool *newval, void **extra, GucSource source)
+{
+	return true;
+}
+
+bool
+check_wait_event_trace(bool *newval, void **extra, GucSource source)
+{
+	return true;
 }
 
 /*
