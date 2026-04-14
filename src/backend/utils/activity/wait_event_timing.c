@@ -90,8 +90,6 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
  * Extern variables referenced by backend_status.c unconditionally.
  * In timing builds these are defined after the #else.
  */
-volatile int64 *my_wait_event_query_id_ptr = NULL;
-
 /* Stub GUC assign hook */
 void
 assign_wait_event_trace(bool newval, void *extra)
@@ -108,17 +106,6 @@ WaitEventTimingShmemSize(void)
 
 void
 WaitEventTimingShmemInit(void)
-{
-}
-
-Size
-WaitEventQueryShmemSize(void)
-{
-	return 0;
-}
-
-void
-WaitEventQueryShmemInit(void)
 {
 }
 
@@ -166,18 +153,11 @@ pgstat_reset_wait_event_timing_storage(void)
 /* Pointer to this backend's timing state */
 WaitEventTimingState *my_wait_event_timing = NULL;
 
-/* Pointer to this backend's query attribution hash */
-WaitEventQueryState *my_wait_event_query = NULL;
-
 /* Pointer to this backend's trace ring buffer */
 WaitEventTraceState *my_wait_event_trace = NULL;
 
-/* Pointer to current backend's query_id in PgBackendStatus */
-volatile int64 *my_wait_event_query_id_ptr = NULL;
-
 /* Shared memory base pointers */
 static WaitEventTimingState *WaitEventTimingArray = NULL;
-static WaitEventQueryState *WaitEventQueryArray = NULL;
 
 /* DSA-based trace ring buffer control */
 static WaitEventTraceControl *WaitEventTraceCtl = NULL;
@@ -209,33 +189,6 @@ WaitEventTimingShmemInit(void)
 
 	if (!found)
 		memset(WaitEventTimingArray, 0, size);
-}
-
-/*
- * Report the shared memory space needed for query attribution.
- */
-Size
-WaitEventQueryShmemSize(void)
-{
-	return mul_size(MaxBackends, sizeof(WaitEventQueryState));
-}
-
-/*
- * Initialize shared memory for query attribution.
- */
-void
-WaitEventQueryShmemInit(void)
-{
-	bool		found;
-	Size		size;
-
-	size = WaitEventQueryShmemSize();
-
-	WaitEventQueryArray = (WaitEventQueryState *)
-		ShmemInitStruct("WaitEventQueryArray", size, &found);
-
-	if (!found)
-		memset(WaitEventQueryArray, 0, size);
 }
 
 /*
@@ -446,13 +399,6 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 	/* Zero the state for this new backend session */
 	memset(my_wait_event_timing, 0, sizeof(WaitEventTimingState));
 
-	/* Set up query attribution hash (same index) */
-	if (WaitEventQueryArray != NULL)
-	{
-		my_wait_event_query = &WaitEventQueryArray[procNumber];
-		memset(my_wait_event_query, 0, sizeof(WaitEventQueryState));
-	}
-
 	/*
 	 * Trace ring buffer is allocated lazily via DSA when wait_event_trace
 	 * is turned on.  Save procNumber for later use by trace_attach/detach.
@@ -476,17 +422,12 @@ pgstat_reset_wait_event_timing_storage(void)
 	if (my_wait_event_timing != NULL)
 		memset(my_wait_event_timing, 0, sizeof(WaitEventTimingState));
 
-	if (my_wait_event_query != NULL)
-		memset(my_wait_event_query, 0, sizeof(WaitEventQueryState));
-
 	/* Trace ring buffer: cleanup via before_shmem_exit callback (Fix #1) */
 	if (my_trace_proc_number >= 0)
 		wait_event_trace_detach(my_trace_proc_number);
 
 	my_wait_event_timing = NULL;
-	my_wait_event_query = NULL;
 	my_wait_event_trace = NULL;
-	my_wait_event_query_id_ptr = NULL;
 	my_trace_proc_number = -1;
 }
 
@@ -646,6 +587,37 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
  *
  * Returns one row per (backend_id, query_id, wait_event) with non-zero counts.
  */
+/*
+ * Local hash entry for trace-ring-based query attribution.
+ * Keyed by (query_id, event), accumulated at read time.
+ */
+typedef struct QueryAttrKey
+{
+	int64		query_id;
+	uint32		event;
+} QueryAttrKey;
+
+typedef struct QueryAttrEntry
+{
+	QueryAttrKey key;
+	int64		count;
+	int64		total_ns;
+	char		status;			/* for simplehash */
+} QueryAttrEntry;
+
+#define SH_PREFIX		queryattr
+#define SH_ELEMENT_TYPE	QueryAttrEntry
+#define SH_KEY_TYPE		QueryAttrKey
+#define SH_KEY			key
+#define SH_HASH_KEY(tb, key) \
+	((uint32)((uint64)(key).query_id * 0x9e3779b97f4a7c15ULL) ^ (key).event)
+#define SH_EQUAL(tb, a, b) \
+	((a).query_id == (b).query_id && (a).event == (b).event)
+#define SH_SCOPE		static inline
+#define SH_DECLARE
+#define SH_DEFINE
+#include "lib/simplehash.h"
+
 Datum
 pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 {
@@ -654,14 +626,20 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	if (WaitEventQueryArray == NULL)
+	if (WaitEventTraceCtl == NULL)
 		PG_RETURN_VOID();
 
 	for (backend_idx = 0; backend_idx < MaxBackends; backend_idx++)
 	{
-		WaitEventQueryState *qs = &WaitEventQueryArray[backend_idx];
+		WaitEventTraceState *ts;
 		PgBackendStatus *beentry;
-		int			i;
+		queryattr_hash *ht;
+		uint64		write_pos;
+		uint64		read_start;
+		uint64		i;
+		int64		current_qid = 0;
+		queryattr_iterator iter;
+		QueryAttrEntry *entry;
 
 		/* Skip dead backend slots and check permissions */
 		beentry = pgstat_get_beentry_by_proc_number(backend_idx);
@@ -670,33 +648,102 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 		if (!HAS_PGSTAT_PERMISSIONS(beentry->st_userid))
 			continue;
 
-		for (i = 0; i < WAIT_EVENT_QUERY_HASH_SIZE; i++)
+		/* Skip backends without trace ring */
+		if (!DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[backend_idx]))
+			continue;
+
+		wait_event_trace_ensure_dsa();
+		ts = dsa_get_address(trace_dsa,
+							 WaitEventTraceCtl->trace_ptrs[backend_idx]);
+
+		write_pos = pg_atomic_read_u64(&ts->write_pos);
+		if (write_pos == 0)
+			continue;
+
+		read_start = (write_pos > WAIT_EVENT_TRACE_RING_SIZE)
+			? write_pos - WAIT_EVENT_TRACE_RING_SIZE : 0;
+
+		/* Build local hash from trace ring */
+		ht = queryattr_create(CurrentMemoryContext, 256, NULL);
+
+		for (i = read_start; i < write_pos; i++)
 		{
-			WaitEventQueryEntry *entry = &qs->entries[i];
+			WaitEventTraceRecord *rec =
+				&ts->records[i & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+			uint32		seq_before, seq_after;
+			uint8		rtype;
+			int64		ts_ns;
+			uint32		evt;
+			int64		dur_ns;
+			int64		qid;
+			bool		found;
+
+			seq_before = rec->seq;
+			pg_read_barrier();
+			if (seq_before & 1)
+				continue;
+
+			rtype = rec->record_type;
+			ts_ns = rec->timestamp_ns;
+			if (rtype == TRACE_WAIT_EVENT)
+			{
+				evt = rec->data.wait.event;
+				dur_ns = rec->data.wait.duration_ns;
+			}
+			else
+			{
+				qid = rec->data.query.query_id;
+			}
+
+			pg_read_barrier();
+			seq_after = rec->seq;
+			if (seq_before != seq_after)
+				continue;
+
+			if (rtype == TRACE_QUERY_START)
+			{
+				current_qid = qid;
+			}
+			else if (rtype == TRACE_QUERY_END)
+			{
+				current_qid = 0;
+			}
+			else if (rtype == TRACE_WAIT_EVENT && current_qid != 0 && evt != 0)
+			{
+				QueryAttrKey k;
+				QueryAttrEntry *e;
+
+				k.query_id = current_qid;
+				k.event = evt;
+				e = queryattr_insert(ht, k, &found);
+				if (!found)
+				{
+					e->count = 0;
+					e->total_ns = 0;
+				}
+				e->count++;
+				e->total_ns += dur_ns;
+			}
+		}
+
+		/* Emit rows from local hash */
+		queryattr_start_iterate(ht, &iter);
+		while ((entry = queryattr_iterate(ht, &iter)) != NULL)
+		{
 			Datum		values[6];
 			bool		nulls[6];
-			uint32		wait_event_info;
 			const char *event_type;
 			const char *event_name;
 
-			if (entry->query_id == 0)
-				continue;
-
-			/* Reconstruct wait_event_info from flat index */
-			wait_event_info =
-				((entry->event_idx / WAIT_EVENT_TIMING_EVENTS_PER_CLASS) << 24) |
-				(entry->event_idx % WAIT_EVENT_TIMING_EVENTS_PER_CLASS);
-
-			event_type = pgstat_get_wait_event_type(wait_event_info);
-			event_name = pgstat_get_wait_event(wait_event_info);
-
+			event_type = pgstat_get_wait_event_type(entry->key.event);
+			event_name = pgstat_get_wait_event(entry->key.event);
 			if (event_type == NULL || event_name == NULL)
 				continue;
 
 			memset(nulls, 0, sizeof(nulls));
 
 			values[0] = Int32GetDatum(backend_idx + 1);
-			values[1] = Int64GetDatum(entry->query_id);
+			values[1] = Int64GetDatum(entry->key.query_id);
 			values[2] = CStringGetTextDatum(event_type);
 			values[3] = CStringGetTextDatum(event_name);
 			values[4] = Int64GetDatum(entry->count);
@@ -706,6 +753,8 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 								rsinfo->setDesc,
 								values, nulls);
 		}
+
+		queryattr_destroy(ht);
 	}
 
 	PG_RETURN_VOID();
@@ -790,40 +839,72 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 		const char *event_name;
 		uint32		seq_before;
 		uint32		seq_after;
+		uint8		rtype;
 		int64		timestamp_ns;
 		uint32		event_info;
 		int64		duration_ns;
 		int64		query_id;
 
-		/* Seqlock read: sample seq, barrier, read payload, barrier, re-check */
+		/* Seqlock read */
 		seq_before = rec->seq;
 		pg_read_barrier();
 
 		if (seq_before & 1)
-			continue;			/* write in progress -- skip */
+			continue;
 
+		rtype = rec->record_type;
 		timestamp_ns = rec->timestamp_ns;
-		event_info = rec->event;
-		duration_ns = rec->duration_ns;
-		query_id = rec->query_id;
+
+		if (rtype == TRACE_WAIT_EVENT)
+		{
+			event_info = rec->data.wait.event;
+			duration_ns = rec->data.wait.duration_ns;
+			query_id = 0;
+		}
+		else if (rtype == TRACE_QUERY_START || rtype == TRACE_QUERY_END)
+		{
+			event_info = 0;
+			duration_ns = 0;
+			query_id = rec->data.query.query_id;
+		}
+		else
+		{
+			pg_read_barrier();
+			continue;
+		}
 
 		pg_read_barrier();
 		seq_after = rec->seq;
 
 		if (seq_before != seq_after)
-			continue;			/* record overwritten during read -- skip */
-
-		if (event_info == 0)
 			continue;
 
-		event_type = pgstat_get_wait_event_type(event_info);
-		event_name = pgstat_get_wait_event(event_info);
+		/* Skip empty wait events */
+		if (rtype == TRACE_WAIT_EVENT && event_info == 0)
+			continue;
+
+		if (rtype == TRACE_WAIT_EVENT)
+		{
+			event_type = pgstat_get_wait_event_type(event_info);
+			event_name = pgstat_get_wait_event(event_info);
+		}
+		else if (rtype == TRACE_QUERY_START)
+		{
+			event_type = "Query";
+			event_name = "QueryStart";
+		}
+		else
+		{
+			event_type = "Query";
+			event_name = "QueryEnd";
+		}
+
 		if (event_type == NULL || event_name == NULL)
 			continue;
 
 		memset(nulls, 0, sizeof(nulls));
 
-		values[0] = Int64GetDatum((int64) i);		/* seq */
+		values[0] = Int64GetDatum((int64) i);
 		values[1] = Int64GetDatum(timestamp_ns);
 		values[2] = CStringGetTextDatum(event_type);
 		values[3] = CStringGetTextDatum(event_name);
@@ -862,8 +943,6 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 				   sizeof(my_wait_event_timing->lwlock_hash.lwlock_events));
 			my_wait_event_timing->reset_count++;
 		}
-		if (my_wait_event_query != NULL)
-			memset(my_wait_event_query, 0, sizeof(WaitEventQueryState));
 	}
 	else
 	{
@@ -886,8 +965,6 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 					   sizeof(WaitEventTimingArray[i].lwlock_hash.lwlock_events));
 				WaitEventTimingArray[i].reset_count++;
 			}
-			for (int i = 0; i < MaxBackends; i++)
-				memset(&WaitEventQueryArray[i], 0, sizeof(WaitEventQueryState));
 		}
 		else
 		{
@@ -903,7 +980,6 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 			memset(WaitEventTimingArray[idx].lwlock_hash.lwlock_events, 0,
 				   sizeof(WaitEventTimingArray[idx].lwlock_hash.lwlock_events));
 			WaitEventTimingArray[idx].reset_count++;
-			memset(&WaitEventQueryArray[idx], 0, sizeof(WaitEventQueryState));
 		}
 	}
 

@@ -135,34 +135,14 @@ typedef struct WaitEventTimingState
 
 
 /*
- * Per-(query_id, event) accumulated statistics for query attribution.
- * Open-addressing hash table with linear probing, per backend.
- */
-#define WAIT_EVENT_QUERY_HASH_SIZE	1024	/* must be power of 2 */
-
-typedef struct WaitEventQueryEntry
-{
-	int64		query_id;		/* 0 means slot is empty */
-	int32		event_idx;		/* flat index from wait_event_timing_index() */
-	int32		pad;
-	int64		count;
-	int64		total_ns;
-} WaitEventQueryEntry;			/* 32 bytes */
-
-typedef struct WaitEventQueryState
-{
-	int32		num_used;		/* occupied slots */
-	int32		pad;
-	int64		overflow_count;	/* waits dropped due to full table */
-	WaitEventQueryEntry entries[WAIT_EVENT_QUERY_HASH_SIZE];
-} WaitEventQueryState;
-
-
-/*
  * Per-session wait event trace ring buffer (10046-style).
  * When wait_event_trace GUC is on for a session, every wait_end writes
  * a record to a per-backend ring buffer.  External tools read the buffer
  * via pg_stat_get_wait_event_trace().
+ *
+ * Query attribution is done by scanning the ring at read time: QUERY_START
+ * and QUERY_END markers delimit which wait events belong to which query_id.
+ * This eliminates the previous per-backend shared-memory hash table.
  *
  * The ring buffer is allocated lazily via DSA (Dynamic Shared Memory Areas)
  * on first use.  Only backends that enable wait_event_trace pay the ~4 MB
@@ -170,13 +150,31 @@ typedef struct WaitEventQueryState
  */
 #define WAIT_EVENT_TRACE_RING_SIZE	131072	/* must be power of 2, 128K records */
 
+/* Trace record types */
+#define TRACE_WAIT_EVENT	0
+#define TRACE_QUERY_START	1
+#define TRACE_QUERY_END		2
+
 typedef struct WaitEventTraceRecord
 {
 	uint32		seq;			/* seqlock: odd = write in progress */
-	uint32		event;			/* wait_event_info */
+	uint8		record_type;	/* TRACE_WAIT_EVENT / QUERY_START / QUERY_END */
+	uint8		pad[3];
 	int64		timestamp_ns;	/* monotonic clock */
-	int64		duration_ns;
-	int64		query_id;
+	union
+	{
+		struct						/* record_type = TRACE_WAIT_EVENT */
+		{
+			uint32	event;			/* wait_event_info */
+			uint32	pad2;
+			int64	duration_ns;
+		}			wait;
+		struct						/* record_type = TRACE_QUERY_START/END */
+		{
+			int64	query_id;
+			int64	pad2;
+		}			query;
+	}			data;
 } WaitEventTraceRecord;			/* 32 bytes */
 
 typedef struct WaitEventTraceState
@@ -204,20 +202,12 @@ extern PGDLLIMPORT bool wait_event_trace;
 /* Pointer to this backend's timing state in shared memory */
 extern PGDLLIMPORT WaitEventTimingState *my_wait_event_timing;
 
-/* Pointer to this backend's query attribution hash in shared memory */
-extern PGDLLIMPORT WaitEventQueryState *my_wait_event_query;
-
 /* Pointer to this backend's trace ring buffer in shared memory */
 extern PGDLLIMPORT WaitEventTraceState *my_wait_event_trace;
-
-/* Pointer to current backend's query_id in PgBackendStatus (set late) */
-extern PGDLLIMPORT volatile int64 *my_wait_event_query_id_ptr;
 
 /* Shared memory setup */
 extern Size WaitEventTimingShmemSize(void);
 extern void WaitEventTimingShmemInit(void);
-extern Size WaitEventQueryShmemSize(void);
-extern void WaitEventQueryShmemInit(void);
 extern Size WaitEventTraceControlShmemSize(void);
 extern void WaitEventTraceControlShmemInit(void);
 
@@ -330,55 +320,63 @@ wait_event_timing_bucket(int64 duration_ns)
 }
 
 /*
- * Accumulate a wait event duration into the per-(query_id, event) hash table.
- * Uses open addressing with linear probing.  Called from the hot path in
- * pgstat_report_wait_end() when wait_event_timing is on and query_id != 0.
+ * Write a QUERY_START marker into the trace ring buffer.
+ * Called from pgstat_report_query_id() when query_id transitions to non-zero.
  */
 static inline void
-wait_event_query_accumulate(WaitEventQueryState *qs, int64 query_id,
-							int event_idx, int64 duration_ns)
+wait_event_trace_query_start(int64 query_id)
 {
-	uint64		hash;
-	int			slot;
-	int			i;
-
-	if (qs == NULL)
-		return;
-
-	/* Simple hash combining query_id and event_idx */
-	hash = ((uint64) query_id * 0x9e3779b97f4a7c15ULL) ^ (uint64) event_idx;
-	slot = (int) (hash & (WAIT_EVENT_QUERY_HASH_SIZE - 1));
-
-	for (i = 0; i < WAIT_EVENT_QUERY_HASH_SIZE; i++)
+	if (unlikely(wait_event_trace && my_wait_event_trace != NULL && query_id != 0))
 	{
-		WaitEventQueryEntry *e = &qs->entries[slot];
+		uint64	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
+		WaitEventTraceRecord *rec =
+			&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+		uint32	seq = (uint32)(pos * 2 + 1);
+		instr_time now;
 
-		if (e->query_id == query_id && e->event_idx == event_idx)
-		{
-			/* Found existing entry */
-			e->count++;
-			e->total_ns += duration_ns;
-			return;
-		}
+		rec->seq = seq;
+		pg_write_barrier();
 
-		if (e->query_id == 0)
-		{
-			/* Empty slot -- fill payload first, then publish */
-			e->event_idx = event_idx;
-			e->count = 1;
-			e->total_ns = duration_ns;
-			pg_write_barrier();		/* payload visible before query_id */
-			e->query_id = query_id;	/* publication: slot becomes valid */
-			qs->num_used++;
-			return;
-		}
+		INSTR_TIME_SET_CURRENT(now);
+		rec->record_type = TRACE_QUERY_START;
+		rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
+		rec->data.query.query_id = query_id;
+		rec->data.query.pad2 = 0;
 
-		/* Collision — linear probe */
-		slot = (slot + 1) & (WAIT_EVENT_QUERY_HASH_SIZE - 1);
+		pg_write_barrier();
+		rec->seq = seq + 1;
+		pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
 	}
+}
 
-	/* Table full — drop this measurement */
-	qs->overflow_count++;
+/*
+ * Write a QUERY_END marker into the trace ring buffer.
+ * Called from pgstat_report_query_id() when query_id transitions to zero.
+ */
+static inline void
+wait_event_trace_query_end(int64 query_id)
+{
+	if (unlikely(wait_event_trace && my_wait_event_trace != NULL && query_id != 0))
+	{
+		uint64	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
+		WaitEventTraceRecord *rec =
+			&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+		uint32	seq = (uint32)(pos * 2 + 1);
+		instr_time now;
+
+		rec->seq = seq;
+		pg_write_barrier();
+
+		INSTR_TIME_SET_CURRENT(now);
+		rec->record_type = TRACE_QUERY_END;
+		rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
+		rec->data.query.query_id = query_id;
+		rec->data.query.pad2 = 0;
+
+		pg_write_barrier();
+		rec->seq = seq + 1;
+		pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
+	}
 }
 
 #endif							/* WAIT_EVENT_TIMING_H */

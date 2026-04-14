@@ -143,47 +143,23 @@ pgstat_report_wait_end(void)
 				}
 			}
 
-			/* Query attribution: accumulate per (query_id, event) */
-			if (my_wait_event_query != NULL &&
-				my_wait_event_query_id_ptr != NULL)
-			{
-				int64	qid = *my_wait_event_query_id_ptr;
-
-				if (qid != 0)
-				{
-					int		qidx;
-
-					if (idx == WAIT_EVENT_TIMING_IDX_LWLOCK)
-						qidx = WAIT_EVENT_TIMING_EVENTS_PER_CLASS +
-							(event & 0xFFFF);
-					else
-						qidx = idx;
-
-					if (qidx >= 0)
-						wait_event_query_accumulate(my_wait_event_query,
-													qid, qidx, duration_ns);
-				}
-			}
-
 			/* 10046-style per-session trace ring buffer (DSA-backed) */
 			if (unlikely(wait_event_trace && my_wait_event_trace != NULL))
 			{
 				uint64	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
 				WaitEventTraceRecord *rec =
 					&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
-				uint32	seq = (uint32)(pos * 2 + 1); /* unique odd value */
+				uint32	seq = (uint32)(pos * 2 + 1);
 
-				/* Begin write: odd seq signals write in progress */
 				rec->seq = seq;
 				pg_write_barrier();
 
+				rec->record_type = TRACE_WAIT_EVENT;
 				rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
-				rec->event = event;
-				rec->duration_ns = duration_ns;
-				rec->query_id = my_wait_event_query_id_ptr
-					? *my_wait_event_query_id_ptr : 0;
+				rec->data.wait.event = event;
+				rec->data.wait.pad2 = 0;
+				rec->data.wait.duration_ns = duration_ns;
 
-				/* Finish write: even seq signals record is complete */
 				pg_write_barrier();
 				rec->seq = seq + 1;
 

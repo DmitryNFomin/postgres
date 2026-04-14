@@ -251,13 +251,9 @@ pgstat_beinit(void)
 	MyBEEntry = &BackendStatusArray[MyProcNumber];
 
 	/*
-	 * Point the wait event timing query_id pointer at our st_query_id.
-	 * This must happen here (not in InitProcess) because MyBEEntry is
-	 * not yet set when pgstat_set_wait_event_timing_storage() runs.
-	 * In non-timing builds, my_wait_event_query_id_ptr is never read
-	 * but assigning it is harmless and avoids #ifdef clutter.
+	 * (Fix #12 removed my_wait_event_query_id_ptr -- query attribution
+	 * now uses QUERY_START/QUERY_END markers in the trace ring buffer.)
 	 */
-	my_wait_event_query_id_ptr = &MyBEEntry->st_query_id;
 
 	/* Set up a process-exit hook to clean up */
 	on_shmem_exit(pgstat_beshutdown_hook, 0);
@@ -714,6 +710,21 @@ pgstat_report_query_id(int64 query_id, bool force)
 	 */
 	if (beentry->st_query_id != INT64CONST(0) && !force)
 		return;
+
+	/*
+	 * Write trace ring markers for query attribution (Fix #12).
+	 * QUERY_END for old query_id, QUERY_START for new one.
+	 */
+#ifdef USE_WAIT_EVENT_TIMING
+	{
+		int64	old_qid = beentry->st_query_id;
+
+		if (old_qid != 0 && old_qid != query_id)
+			wait_event_trace_query_end(old_qid);
+		if (query_id != 0)
+			wait_event_trace_query_start(query_id);
+	}
+#endif
 
 	/*
 	 * Update my status entry, following the protocol of bumping
