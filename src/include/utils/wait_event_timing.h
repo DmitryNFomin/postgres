@@ -172,9 +172,9 @@ typedef struct WaitEventQueryState
 
 typedef struct WaitEventTraceRecord
 {
-	int64		timestamp_ns;	/* monotonic clock */
+	uint32		seq;			/* seqlock: odd = write in progress */
 	uint32		event;			/* wait_event_info */
-	uint32		pad;
+	int64		timestamp_ns;	/* monotonic clock */
 	int64		duration_ns;
 	int64		query_id;
 } WaitEventTraceRecord;			/* 32 bytes */

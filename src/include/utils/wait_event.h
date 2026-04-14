@@ -168,12 +168,22 @@ pgstat_report_wait_end(void)
 				uint64	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
 				WaitEventTraceRecord *rec =
 					&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+				uint32	seq = (uint32)(pos * 2 + 1); /* unique odd value */
+
+				/* Begin write: odd seq signals write in progress */
+				rec->seq = seq;
+				pg_write_barrier();
 
 				rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
 				rec->event = event;
 				rec->duration_ns = duration_ns;
 				rec->query_id = my_wait_event_query_id_ptr
 					? *my_wait_event_query_id_ptr : 0;
+
+				/* Finish write: even seq signals record is complete */
+				pg_write_barrier();
+				rec->seq = seq + 1;
+
 				pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
 			}
 

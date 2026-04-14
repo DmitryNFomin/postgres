@@ -771,23 +771,47 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 		bool		nulls[6];
 		const char *event_type;
 		const char *event_name;
+		uint32		seq_before;
+		uint32		seq_after;
+		int64		timestamp_ns;
+		uint32		event_info;
+		int64		duration_ns;
+		int64		query_id;
 
-		if (rec->event == 0)
+		/* Seqlock read: sample seq, barrier, read payload, barrier, re-check */
+		seq_before = rec->seq;
+		pg_read_barrier();
+
+		if (seq_before & 1)
+			continue;			/* write in progress -- skip */
+
+		timestamp_ns = rec->timestamp_ns;
+		event_info = rec->event;
+		duration_ns = rec->duration_ns;
+		query_id = rec->query_id;
+
+		pg_read_barrier();
+		seq_after = rec->seq;
+
+		if (seq_before != seq_after)
+			continue;			/* record overwritten during read -- skip */
+
+		if (event_info == 0)
 			continue;
 
-		event_type = pgstat_get_wait_event_type(rec->event);
-		event_name = pgstat_get_wait_event(rec->event);
+		event_type = pgstat_get_wait_event_type(event_info);
+		event_name = pgstat_get_wait_event(event_info);
 		if (event_type == NULL || event_name == NULL)
 			continue;
 
 		memset(nulls, 0, sizeof(nulls));
 
 		values[0] = Int64GetDatum((int64) i);		/* seq */
-		values[1] = Int64GetDatum(rec->timestamp_ns);
+		values[1] = Int64GetDatum(timestamp_ns);
 		values[2] = CStringGetTextDatum(event_type);
 		values[3] = CStringGetTextDatum(event_name);
-		values[4] = Float8GetDatum((double) rec->duration_ns / 1000.0);
-		values[5] = Int64GetDatum(rec->query_id);
+		values[4] = Float8GetDatum((double) duration_ns / 1000.0);
+		values[5] = Int64GetDatum(query_id);
 
 		tuplestore_putvalues(rsinfo->setResult,
 							rsinfo->setDesc,
