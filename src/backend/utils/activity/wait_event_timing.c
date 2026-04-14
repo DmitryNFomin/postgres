@@ -136,6 +136,7 @@ pgstat_reset_wait_event_timing_storage(void)
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "storage/ipc.h"
+#include "storage/proc.h"
 #include "storage/procnumber.h"
 #include "storage/shmem.h"
 #include "catalog/pg_type_d.h"
@@ -147,6 +148,8 @@ pgstat_reset_wait_event_timing_storage(void)
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
 #include "utils/wait_event_timing.h"
+
+#define NUM_WAIT_EVENT_TIMING_SLOTS  (MaxBackends + NUM_AUXILIARY_PROCS)
 
 #define HAS_PGSTAT_PERMISSIONS(role) \
 	(has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS) || \
@@ -172,7 +175,7 @@ static int	my_trace_proc_number = -1;
 Size
 WaitEventTimingShmemSize(void)
 {
-	return mul_size(MaxBackends, sizeof(WaitEventTimingState));
+	return mul_size(NUM_WAIT_EVENT_TIMING_SLOTS, sizeof(WaitEventTimingState));
 }
 
 /*
@@ -202,7 +205,7 @@ Size
 WaitEventTraceControlShmemSize(void)
 {
 	return add_size(offsetof(WaitEventTraceControl, trace_ptrs),
-					mul_size(MaxBackends, sizeof(dsa_pointer)));
+					mul_size(NUM_WAIT_EVENT_TIMING_SLOTS, sizeof(dsa_pointer)));
 }
 
 /*
@@ -226,7 +229,7 @@ WaitEventTraceControlShmemInit(void)
 		WaitEventTraceCtl->trace_dsa_handle = DSA_HANDLE_INVALID;
 		LWLockInitialize(&WaitEventTraceCtl->lock,
 						 LWTRANCHE_WAIT_EVENT_TRACE_DSA);
-		for (i = 0; i < MaxBackends; i++)
+		for (i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
 			WaitEventTraceCtl->trace_ptrs[i] = InvalidDsaPointer;
 	}
 }
@@ -280,7 +283,7 @@ wait_event_trace_before_shmem_exit(int code, Datum arg)
 	if (WaitEventTraceCtl == NULL)
 		return;
 
-	if (procNumber < 0 || procNumber >= MaxBackends)
+	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
 		return;
 
 	if (DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[procNumber]) &&
@@ -306,7 +309,7 @@ wait_event_trace_attach(int procNumber)
 	if (WaitEventTraceCtl == NULL)
 		return;
 
-	if (procNumber < 0 || procNumber >= MaxBackends)
+	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
 		return;
 
 	/* Already have a ring buffer? */
@@ -380,8 +383,8 @@ assign_wait_event_trace(bool newval, void *extra)
  * Called from InitProcess() after the backend has a valid procNumber.
  *
  * procNumber is the PGPROC array index (from GetNumberFromPGProc).
- * Auxiliary processes (startup, bgwriter, etc.) have procNumbers beyond
- * MaxBackends — we silently skip timing for them.
+ * Covers both regular backends (procNumber < MaxBackends) and auxiliary
+ * processes (bgwriter, checkpointer, walwriter, etc.).
  */
 void
 pgstat_set_wait_event_timing_storage(int procNumber)
@@ -389,8 +392,7 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 	if (WaitEventTimingArray == NULL)
 		return;
 
-	/* Auxiliary processes have procNumbers >= MaxBackends; skip them */
-	if (procNumber < 0 || procNumber >= MaxBackends)
+	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
 	{
 		my_wait_event_timing = NULL;
 		return;
@@ -449,7 +451,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 	if (WaitEventTimingArray == NULL)
 		PG_RETURN_VOID();
 
-	for (backend_idx = 0; backend_idx < MaxBackends; backend_idx++)
+	for (backend_idx = 0; backend_idx < NUM_WAIT_EVENT_TIMING_SLOTS; backend_idx++)
 	{
 		WaitEventTimingState *state = &WaitEventTimingArray[backend_idx];
 		PgBackendStatus *beentry;
@@ -622,7 +624,7 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 	if (WaitEventTraceCtl == NULL)
 		PG_RETURN_VOID();
 
-	for (backend_idx = 0; backend_idx < MaxBackends; backend_idx++)
+	for (backend_idx = 0; backend_idx < NUM_WAIT_EVENT_TIMING_SLOTS; backend_idx++)
 	{
 		WaitEventTraceState *ts;
 		PgBackendStatus *beentry;
@@ -787,7 +789,7 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 		backend_idx = PG_GETARG_INT32(0) - 1;	/* 1-based to 0-based */
 	}
 
-	if (backend_idx < 0 || backend_idx >= MaxBackends)
+	if (backend_idx < 0 || backend_idx >= NUM_WAIT_EVENT_TIMING_SLOTS)
 		PG_RETURN_VOID();
 
 	/* Permission check: only own backend or privileged roles */
@@ -950,7 +952,7 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 		if (target == -1)
 		{
 			/* Reset all backends */
-			for (int i = 0; i < MaxBackends; i++)
+			for (int i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
 			{
 				memset(WaitEventTimingArray[i].events, 0,
 					   sizeof(WaitEventTimingArray[i].events));
@@ -963,7 +965,7 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 		{
 			int			idx = target - 1;	/* 1-based to 0-based */
 
-			if (idx < 0 || idx >= MaxBackends)
+			if (idx < 0 || idx >= NUM_WAIT_EVENT_TIMING_SLOTS)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("invalid backend_id: %d", target)));
