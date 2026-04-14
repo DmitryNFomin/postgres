@@ -363,11 +363,12 @@ wait_event_query_accumulate(WaitEventQueryState *qs, int64 query_id,
 
 		if (e->query_id == 0)
 		{
-			/* Empty slot — insert new entry */
-			e->query_id = query_id;
+			/* Empty slot -- fill payload first, then publish */
 			e->event_idx = event_idx;
 			e->count = 1;
 			e->total_ns = duration_ns;
+			pg_write_barrier();		/* payload visible before query_id */
+			e->query_id = query_id;	/* publication: slot becomes valid */
 			qs->num_used++;
 			return;
 		}
