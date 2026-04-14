@@ -394,11 +394,17 @@ wait_event_trace_detach(int procNumber)
 
 /*
  * GUC assign hook for wait_event_trace.
+ * Warns if wait_event_timing is off, since trace has no effect without it.
  * Lazily allocates the DSA-backed trace ring buffer on first enable.
  */
 void
 assign_wait_event_trace(bool newval, void *extra)
 {
+	if (newval && !wait_event_timing)
+		ereport(NOTICE,
+				(errmsg("wait_event_trace has no effect unless wait_event_timing is enabled"),
+				 errhint("Ask a superuser to SET wait_event_timing = on.")));
+
 	if (newval && my_wait_event_trace == NULL && my_trace_proc_number >= 0)
 		wait_event_trace_attach(my_trace_proc_number);
 }
