@@ -138,7 +138,9 @@ pgstat_reset_wait_event_timing_storage(void)
 #include "storage/ipc.h"
 #include "storage/procnumber.h"
 #include "storage/shmem.h"
+#include "catalog/pg_type_d.h"
 #include "utils/acl.h"
+#include "utils/array.h"
 #include "utils/backend_status.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -496,21 +498,16 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 									   : 0.0);  /* avg us */
 			values[6] = Float8GetDatum((double) entry->max_ns / 1000.0);  /* max us */
 
-			/* Pack histogram into a text representation */
 			{
-				StringInfoData buf;
+				Datum	elems[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
 
-				initStringInfo(&buf);
-				appendStringInfoChar(&buf, '{');
 				for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
-				{
-					if (bucket > 0)
-						appendStringInfoChar(&buf, ',');
-					appendStringInfo(&buf, "%d", entry->histogram[bucket]);
-				}
-				appendStringInfoChar(&buf, '}');
-				values[7] = CStringGetTextDatum(buf.data);
-				pfree(buf.data);
+					elems[bucket] = Int32GetDatum(entry->histogram[bucket]);
+
+				values[7] = PointerGetDatum(
+					construct_array_builtin(elems,
+											WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS,
+											INT4OID));
 			}
 
 			tuplestore_putvalues(rsinfo->setResult,
@@ -558,19 +555,15 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 			values[6] = Float8GetDatum((double) entry->max_ns / 1000.0);
 
 			{
-				StringInfoData buf;
+				Datum	elems[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
 
-				initStringInfo(&buf);
-				appendStringInfoChar(&buf, '{');
 				for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
-				{
-					if (bucket > 0)
-						appendStringInfoChar(&buf, ',');
-					appendStringInfo(&buf, "%d", entry->histogram[bucket]);
-				}
-				appendStringInfoChar(&buf, '}');
-				values[7] = CStringGetTextDatum(buf.data);
-				pfree(buf.data);
+					elems[bucket] = Int32GetDatum(entry->histogram[bucket]);
+
+				values[7] = PointerGetDatum(
+					construct_array_builtin(elems,
+											WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS,
+											INT4OID));
 			}
 
 			tuplestore_putvalues(rsinfo->setResult,
