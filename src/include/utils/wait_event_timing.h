@@ -28,6 +28,7 @@
 #include "portability/instr_time.h"
 #include "storage/lwlock.h"
 #include "utils/dsa.h"
+#include "utils/wait_classes.h"
 
 /*
  * Number of log2 histogram buckets.  Bucket i covers durations in
@@ -46,7 +47,10 @@
  * per-class arrays.
  *
  * Wait event classes and their max event counts:
- *   LWLock (0x01): up to 256 tranches (dynamic, use separate array)
+ *   LWLock (0x01): tranche IDs are dynamically allocated and unbounded;
+ *                  extensions can push IDs well past 256 via
+ *                  LWLockNewTrancheId(), so LWLock uses a separate
+ *                  per-backend hash table instead of the flat array.
  *   Lock (0x03): ~10 lock types
  *   Buffer (0x04): ~6 events
  *   Activity (0x05): ~20 events
@@ -57,13 +61,18 @@
  *   IO (0x0A): ~85 events
  *   InjectionPoint (0x0B): up to 128 custom events
  *
- * We use a flat array indexed by (classId >> 24) * 256 + eventId.
- * With 12 classes * 256 = 3072 slots, this uses ~73 KB per backend.
+ * For all classes except LWLock, we use a flat array indexed by
+ * (classId >> 24) * 256 + eventId.  LWLock events go through a
+ * per-backend open-addressing hash table (see LWLockTimingHash).
+ * With 12 classes * 256 = 3072 flat slots, the flat part uses ~73 KB.
  */
 #define WAIT_EVENT_TIMING_CLASSES		12  /* 0x00 .. 0x0B */
 #define WAIT_EVENT_TIMING_EVENTS_PER_CLASS	256
 #define WAIT_EVENT_TIMING_NUM_EVENTS \
 	(WAIT_EVENT_TIMING_CLASSES * WAIT_EVENT_TIMING_EVENTS_PER_CLASS)
+
+/* Sentinel returned by wait_event_timing_index() for LWLock events */
+#define WAIT_EVENT_TIMING_IDX_LWLOCK	(-2)
 
 /*
  * Per-event accumulated statistics.  One entry per distinct wait event
@@ -80,6 +89,29 @@ typedef struct WaitEventTimingEntry
 } WaitEventTimingEntry;
 
 /*
+ * LWLock-specific open-addressing hash table for unbounded tranche IDs.
+ * Per-backend, written only by the owning backend -- no locking needed.
+ * Tranche IDs are dynamically allocated by LWLockNewTrancheId() starting
+ * at LWTRANCHE_FIRST_USER_DEFINED (~88) with no upper bound.  The hash
+ * maps tranche_id -> dense index into lwlock_events[].
+ */
+#define LWLOCK_TIMING_HASH_SIZE		256		/* must be power of 2 */
+#define LWLOCK_TIMING_MAX_ENTRIES	192		/* ~75% load factor */
+
+typedef struct LWLockTimingHashEntry
+{
+	uint16		tranche_id;		/* 0 = empty slot */
+	uint16		dense_idx;		/* index into lwlock_events[] */
+} LWLockTimingHashEntry;
+
+typedef struct LWLockTimingHash
+{
+	int			num_used;
+	LWLockTimingHashEntry entries[LWLOCK_TIMING_HASH_SIZE];
+	WaitEventTimingEntry lwlock_events[LWLOCK_TIMING_MAX_ENTRIES];
+} LWLockTimingHash;
+
+/*
  * Per-backend wait event timing state.  Allocated in shared memory,
  * one per MaxBackends slot.
  */
@@ -91,11 +123,14 @@ typedef struct WaitEventTimingState
 	/* Current wait_event_info (cached for use in wait_end) */
 	uint32		current_event;
 
-	/* Reset counter — incremented by pg_stat_reset_wait_event_timing() */
+	/* Reset counter -- incremented by pg_stat_reset_wait_event_timing() */
 	int64		reset_count;
 
-	/* Per-event statistics array */
+	/* Per-event statistics: flat array for bounded classes */
 	WaitEventTimingEntry events[WAIT_EVENT_TIMING_NUM_EVENTS];
+
+	/* Per-event statistics: hash table for LWLock class (unbounded IDs) */
+	LWLockTimingHash lwlock_hash;
 } WaitEventTimingState;
 
 
@@ -199,18 +234,62 @@ extern void wait_event_trace_detach(int procNumber);
 extern void assign_wait_event_trace(bool newval, void *extra);
 
 
-/* Convert wait_event_info to a flat index for the events[] array */
+/*
+ * Convert wait_event_info to a flat index for the events[] array.
+ * Returns WAIT_EVENT_TIMING_IDX_LWLOCK (-2) for LWLock class events;
+ * the caller must use lwlock_timing_lookup() for those.
+ * Returns -1 for out-of-range events in other classes.
+ */
 static inline int
 wait_event_timing_index(uint32 wait_event_info)
 {
 	int			classId = (wait_event_info >> 24) & 0xFF;
 	int			eventId = wait_event_info & 0xFFFF;
 
+	/* LWLock tranche IDs are unbounded -- use hash table */
+	if (classId == (PG_WAIT_LWLOCK >> 24))
+		return WAIT_EVENT_TIMING_IDX_LWLOCK;
+
 	if (unlikely(classId >= WAIT_EVENT_TIMING_CLASSES ||
 				 eventId >= WAIT_EVENT_TIMING_EVENTS_PER_CLASS))
 		return -1;
 
 	return classId * WAIT_EVENT_TIMING_EVENTS_PER_CLASS + eventId;
+}
+
+/*
+ * Look up (or insert) timing entry for an LWLock tranche ID.
+ * Open-addressing with linear probing.  Returns NULL if hash is full.
+ */
+static inline WaitEventTimingEntry *
+lwlock_timing_lookup(LWLockTimingHash *ht, uint16 tranche_id)
+{
+	uint32		hash = (uint32) tranche_id * 2654435761U; /* Knuth multiplicative */
+	int			slot = hash & (LWLOCK_TIMING_HASH_SIZE - 1);
+	int			i;
+
+	for (i = 0; i < LWLOCK_TIMING_HASH_SIZE; i++)
+	{
+		LWLockTimingHashEntry *e = &ht->entries[slot];
+
+		if (e->tranche_id == tranche_id)
+			return &ht->lwlock_events[e->dense_idx];
+
+		if (e->tranche_id == 0)
+		{
+			/* Empty slot -- insert if room */
+			if (ht->num_used >= LWLOCK_TIMING_MAX_ENTRIES)
+				return NULL;	/* hash full, drop this event */
+
+			e->tranche_id = tranche_id;
+			e->dense_idx = ht->num_used++;
+			return &ht->lwlock_events[e->dense_idx];
+		}
+
+		slot = (slot + 1) & (LWLOCK_TIMING_HASH_SIZE - 1);
+	}
+
+	return NULL;				/* should not happen with load factor < 1 */
 }
 
 /*

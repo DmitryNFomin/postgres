@@ -119,26 +119,47 @@ pgstat_report_wait_end(void)
 				INSTR_TIME_GET_NANOSEC(my_wait_event_timing->wait_start);
 
 			idx = wait_event_timing_index(event);
-			if (likely(idx >= 0))
-			{
-				WaitEventTimingEntry *entry = &my_wait_event_timing->events[idx];
 
-				entry->count++;
-				entry->total_ns += duration_ns;
-				if (duration_ns > entry->max_ns)
-					entry->max_ns = duration_ns;
-				entry->histogram[wait_event_timing_bucket(duration_ns)]++;
+			{
+				WaitEventTimingEntry *entry = NULL;
+
+				if (idx == WAIT_EVENT_TIMING_IDX_LWLOCK)
+					entry = lwlock_timing_lookup(
+						&my_wait_event_timing->lwlock_hash,
+						event & 0xFFFF);
+				else if (likely(idx >= 0))
+					entry = &my_wait_event_timing->events[idx];
+
+				if (likely(entry != NULL))
+				{
+					entry->count++;
+					entry->total_ns += duration_ns;
+					if (duration_ns > entry->max_ns)
+						entry->max_ns = duration_ns;
+					entry->histogram[wait_event_timing_bucket(duration_ns)]++;
+				}
 			}
 
 			/* Query attribution: accumulate per (query_id, event) */
-			if (likely(idx >= 0) && my_wait_event_query != NULL &&
+			if (my_wait_event_query != NULL &&
 				my_wait_event_query_id_ptr != NULL)
 			{
 				int64	qid = *my_wait_event_query_id_ptr;
 
 				if (qid != 0)
-					wait_event_query_accumulate(my_wait_event_query,
-												qid, idx, duration_ns);
+				{
+					int		qidx;
+
+					if (idx == WAIT_EVENT_TIMING_IDX_LWLOCK)
+						qidx = WAIT_EVENT_TIMING_EVENTS_PER_CLASS +
+							(event & 0xFFFF);
+					else
+						qidx = idx;
+
+					if (qidx >= 0)
+						wait_event_query_accumulate(my_wait_event_query,
+													qid, qidx, duration_ns);
+				}
 			}
 
 			/* 10046-style per-session trace ring buffer (DSA-backed) */

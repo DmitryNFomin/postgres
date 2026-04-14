@@ -502,6 +502,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 		if (!HAS_PGSTAT_PERMISSIONS(beentry->st_userid))
 			continue;
 
+		/* Emit rows from the flat array (all classes except LWLock) */
 		for (i = 0; i < WAIT_EVENT_TIMING_NUM_EVENTS; i++)
 		{
 			WaitEventTimingEntry *entry = &state->events[i];
@@ -538,6 +539,66 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 			values[6] = Float8GetDatum((double) entry->max_ns / 1000.0);  /* max us */
 
 			/* Pack histogram into a text representation */
+			{
+				StringInfoData buf;
+
+				initStringInfo(&buf);
+				appendStringInfoChar(&buf, '{');
+				for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
+				{
+					if (bucket > 0)
+						appendStringInfoChar(&buf, ',');
+					appendStringInfo(&buf, "%d", entry->histogram[bucket]);
+				}
+				appendStringInfoChar(&buf, '}');
+				values[7] = CStringGetTextDatum(buf.data);
+				pfree(buf.data);
+			}
+
+			tuplestore_putvalues(rsinfo->setResult,
+								rsinfo->setDesc,
+								values, nulls);
+		}
+
+		/* Emit rows from the LWLock hash table */
+		for (i = 0; i < LWLOCK_TIMING_HASH_SIZE; i++)
+		{
+			LWLockTimingHashEntry *he = &state->lwlock_hash.entries[i];
+			WaitEventTimingEntry *entry;
+			Datum		values[8];
+			bool		nulls[8];
+			uint32		wait_event_info;
+			const char *event_type;
+			const char *event_name;
+			int			bucket;
+
+			if (he->tranche_id == 0)
+				continue;
+
+			entry = &state->lwlock_hash.lwlock_events[he->dense_idx];
+			if (entry->count == 0)
+				continue;
+
+			wait_event_info = PG_WAIT_LWLOCK | he->tranche_id;
+
+			event_type = pgstat_get_wait_event_type(wait_event_info);
+			event_name = pgstat_get_wait_event(wait_event_info);
+
+			if (event_type == NULL || event_name == NULL)
+				continue;
+
+			memset(nulls, 0, sizeof(nulls));
+
+			values[0] = Int32GetDatum(backend_idx + 1);
+			values[1] = CStringGetTextDatum(event_type);
+			values[2] = CStringGetTextDatum(event_name);
+			values[3] = Int64GetDatum(entry->count);
+			values[4] = Float8GetDatum((double) entry->total_ns / 1000000.0);
+			values[5] = Float8GetDatum(entry->count > 0
+									   ? (double) entry->total_ns / entry->count / 1000.0
+									   : 0.0);
+			values[6] = Float8GetDatum((double) entry->max_ns / 1000.0);
+
 			{
 				StringInfoData buf;
 
