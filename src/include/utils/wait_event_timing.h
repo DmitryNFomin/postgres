@@ -86,7 +86,7 @@ typedef struct WaitEventTimingEntry
 	int64		count;			/* number of occurrences */
 	int64		total_ns;		/* total wait duration in nanoseconds */
 	int64		max_ns;			/* longest single wait in nanoseconds */
-	int32		histogram[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
+	int64		histogram[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
 } WaitEventTimingEntry;
 
 /*

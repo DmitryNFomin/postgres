@@ -12848,7 +12848,7 @@
   proname => 'pg_stat_get_wait_event_timing', prorows => '100',
   proretset => 't', provolatile => 's', proparallel => 'r',
   prorettype => 'record', proargtypes => '',
-  proallargtypes => '{int4,text,text,int8,float8,float8,float8,_int4}',
+  proallargtypes => '{int4,text,text,int8,float8,float8,float8,_int8}',
   proargmodes => '{o,o,o,o,o,o,o,o}',
   proargnames => '{backend_id,wait_event_type,wait_event,calls,total_time_ms,avg_time_us,max_time_us,histogram}',
   prosrc => 'pg_stat_get_wait_event_timing' },

@@ -504,12 +504,12 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 				Datum	elems[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
 
 				for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
-					elems[bucket] = Int32GetDatum(entry->histogram[bucket]);
+					elems[bucket] = Int64GetDatum(entry->histogram[bucket]);
 
 				values[7] = PointerGetDatum(
 					construct_array_builtin(elems,
 											WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS,
-											INT4OID));
+											INT8OID));
 			}
 
 			tuplestore_putvalues(rsinfo->setResult,
@@ -560,12 +560,12 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 				Datum	elems[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
 
 				for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
-					elems[bucket] = Int32GetDatum(entry->histogram[bucket]);
+					elems[bucket] = Int64GetDatum(entry->histogram[bucket]);
 
 				values[7] = PointerGetDatum(
 					construct_array_builtin(elems,
 											WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS,
-											INT4OID));
+											INT8OID));
 			}
 
 			tuplestore_putvalues(rsinfo->setResult,
