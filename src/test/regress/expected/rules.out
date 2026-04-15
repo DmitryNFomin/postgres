@@ -2356,6 +2356,33 @@ pg_stat_user_tables| SELECT relid,
     stats_reset
    FROM pg_stat_all_tables
   WHERE ((schemaname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (schemaname !~ '^pg_toast'::text));
+pg_stat_wait_event_timing| SELECT pid,
+    backend_type,
+    backend_id,
+    wait_event_type,
+    wait_event,
+    calls,
+    total_time_ms,
+    avg_time_us,
+    max_time_us,
+    histogram
+   FROM pg_stat_get_wait_event_timing() t(pid, backend_type, backend_id, wait_event_type, wait_event, calls, total_time_ms, avg_time_us, max_time_us, histogram);
+pg_stat_wait_event_timing_by_query| SELECT pid,
+    backend_type,
+    backend_id,
+    query_id,
+    wait_event_type,
+    wait_event,
+    calls,
+    total_time_ms
+   FROM pg_stat_get_wait_event_timing_by_query() t(pid, backend_type, backend_id, query_id, wait_event_type, wait_event, calls, total_time_ms);
+pg_stat_wait_event_trace| SELECT seq,
+    timestamp_ns,
+    wait_event_type,
+    wait_event,
+    duration_us,
+    query_id
+   FROM pg_stat_get_wait_event_trace(NULL::integer) t(seq, timestamp_ns, wait_event_type, wait_event, duration_us, query_id);
 pg_stat_wal| SELECT wal_records,
     wal_fpi,
     wal_bytes,
