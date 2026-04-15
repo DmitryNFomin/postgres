@@ -13,8 +13,8 @@
  * arrays.  No locking is needed because each backend writes only to its own
  * stats slot.
  *
- * External tools can read the accumulated stats from shared memory, or
- * use the pg_wait_event_timing view.
+ * Statistics are exposed via the pg_stat_wait_event_timing view
+ * and pg_stat_get_wait_event_timing() SQL function.
  *
  * Copyright (c) 2001-2026, PostgreSQL Global Development Group
  *
