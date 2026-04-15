@@ -519,8 +519,8 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 		for (i = 0; i < WAIT_EVENT_TIMING_NUM_EVENTS; i++)
 		{
 			WaitEventTimingEntry *entry = &state->events[i];
-			Datum		values[8];
-			bool		nulls[8];
+			Datum		values[10];
+			bool		nulls[10];
 			uint32		wait_event_info;
 			const char *event_type;
 			const char *event_name;
@@ -541,15 +541,17 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 			memset(nulls, 0, sizeof(nulls));
 
-			values[0] = Int32GetDatum(backend_idx + 1);  /* backend_id (1-based) */
-			values[1] = CStringGetTextDatum(event_type);
-			values[2] = CStringGetTextDatum(event_name);
-			values[3] = Int64GetDatum(entry->count);
-			values[4] = Float8GetDatum((double) entry->total_ns / 1000000.0);  /* ms */
-			values[5] = Float8GetDatum(entry->count > 0
+			values[0] = Int32GetDatum(beentry->st_procpid);
+			values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
+			values[2] = Int32GetDatum(backend_idx + 1);  /* backend_id (1-based) */
+			values[3] = CStringGetTextDatum(event_type);
+			values[4] = CStringGetTextDatum(event_name);
+			values[5] = Int64GetDatum(entry->count);
+			values[6] = Float8GetDatum((double) entry->total_ns / 1000000.0);  /* ms */
+			values[7] = Float8GetDatum(entry->count > 0
 									   ? (double) entry->total_ns / entry->count / 1000.0
 									   : 0.0);  /* avg us */
-			values[6] = Float8GetDatum((double) entry->max_ns / 1000.0);  /* max us */
+			values[8] = Float8GetDatum((double) entry->max_ns / 1000.0);  /* max us */
 
 			{
 				Datum	elems[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
@@ -557,7 +559,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 				for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
 					elems[bucket] = Int64GetDatum(entry->histogram[bucket]);
 
-				values[7] = PointerGetDatum(
+				values[9] = PointerGetDatum(
 					construct_array_builtin(elems,
 											WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS,
 											INT8OID));
@@ -573,8 +575,8 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 		{
 			LWLockTimingHashEntry *he = &state->lwlock_hash.entries[i];
 			WaitEventTimingEntry *entry;
-			Datum		values[8];
-			bool		nulls[8];
+			Datum		values[10];
+			bool		nulls[10];
 			uint32		wait_event_info;
 			const char *event_type;
 			const char *event_name;
@@ -597,15 +599,17 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 			memset(nulls, 0, sizeof(nulls));
 
-			values[0] = Int32GetDatum(backend_idx + 1);
-			values[1] = CStringGetTextDatum(event_type);
-			values[2] = CStringGetTextDatum(event_name);
-			values[3] = Int64GetDatum(entry->count);
-			values[4] = Float8GetDatum((double) entry->total_ns / 1000000.0);
-			values[5] = Float8GetDatum(entry->count > 0
+			values[0] = Int32GetDatum(beentry->st_procpid);
+			values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
+			values[2] = Int32GetDatum(backend_idx + 1);
+			values[3] = CStringGetTextDatum(event_type);
+			values[4] = CStringGetTextDatum(event_name);
+			values[5] = Int64GetDatum(entry->count);
+			values[6] = Float8GetDatum((double) entry->total_ns / 1000000.0);
+			values[7] = Float8GetDatum(entry->count > 0
 									   ? (double) entry->total_ns / entry->count / 1000.0
 									   : 0.0);
-			values[6] = Float8GetDatum((double) entry->max_ns / 1000.0);
+			values[8] = Float8GetDatum((double) entry->max_ns / 1000.0);
 
 			{
 				Datum	elems[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
@@ -613,7 +617,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 				for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
 					elems[bucket] = Int64GetDatum(entry->histogram[bucket]);
 
-				values[7] = PointerGetDatum(
+				values[9] = PointerGetDatum(
 					construct_array_builtin(elems,
 											WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS,
 											INT8OID));
@@ -776,8 +780,8 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 		queryattr_start_iterate(ht, &iter);
 		while ((entry = queryattr_iterate(ht, &iter)) != NULL)
 		{
-			Datum		values[6];
-			bool		nulls[6];
+			Datum		values[8];
+			bool		nulls[8];
 			const char *event_type;
 			const char *event_name;
 
@@ -788,12 +792,14 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 
 			memset(nulls, 0, sizeof(nulls));
 
-			values[0] = Int32GetDatum(backend_idx + 1);
-			values[1] = Int64GetDatum(entry->key.query_id);
-			values[2] = CStringGetTextDatum(event_type);
-			values[3] = CStringGetTextDatum(event_name);
-			values[4] = Int64GetDatum(entry->count);
-			values[5] = Float8GetDatum((double) entry->total_ns / 1000000.0);
+			values[0] = Int32GetDatum(beentry->st_procpid);
+			values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
+			values[2] = Int32GetDatum(backend_idx + 1);
+			values[3] = Int64GetDatum(entry->key.query_id);
+			values[4] = CStringGetTextDatum(event_type);
+			values[5] = CStringGetTextDatum(event_name);
+			values[6] = Int64GetDatum(entry->count);
+			values[7] = Float8GetDatum((double) entry->total_ns / 1000000.0);
 
 			tuplestore_putvalues(rsinfo->setResult,
 								rsinfo->setDesc,

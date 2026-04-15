@@ -1507,3 +1507,39 @@ CREATE VIEW pg_aios AS
     SELECT * FROM pg_get_aios();
 REVOKE ALL ON pg_aios FROM PUBLIC;
 GRANT SELECT ON pg_aios TO pg_read_all_stats;
+
+CREATE VIEW pg_stat_wait_event_timing AS
+    SELECT
+        t.pid,
+        t.backend_type,
+        t.backend_id,
+        t.wait_event_type,
+        t.wait_event,
+        t.calls,
+        t.total_time_ms,
+        t.avg_time_us,
+        t.max_time_us,
+        t.histogram
+    FROM pg_stat_get_wait_event_timing() t;
+
+CREATE VIEW pg_stat_wait_event_timing_by_query AS
+    SELECT
+        t.pid,
+        t.backend_type,
+        t.backend_id,
+        t.query_id,
+        t.wait_event_type,
+        t.wait_event,
+        t.calls,
+        t.total_time_ms
+    FROM pg_stat_get_wait_event_timing_by_query() t;
+
+CREATE VIEW pg_stat_wait_event_trace AS
+    SELECT
+        t.seq,
+        t.timestamp_ns,
+        t.wait_event_type,
+        t.wait_event,
+        t.duration_us,
+        t.query_id
+    FROM pg_stat_get_wait_event_trace(NULL) t;
