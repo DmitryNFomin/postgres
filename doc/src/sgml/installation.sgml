@@ -1594,6 +1594,26 @@ build-postgresql:
        </listitem>
       </varlistentry>
 
+      <varlistentry id="configure-option-enable-wait-event-timing">
+       <term><option>--enable-wait-event-timing</option></term>
+       <listitem>
+        <para>
+         Compiles in per-backend wait event timing instrumentation.
+         When enabled, every call to
+         <function>pgstat_report_wait_start()</function>/<function>pgstat_report_wait_end()</function>
+         records the wait duration and accumulates per-event statistics
+         (count, total time, histogram) in shared memory.
+         The overhead is two <function>clock_gettime(CLOCK_MONOTONIC)</function>
+         calls per wait event transition (~40&ndash;100&nbsp;ns via VDSO).
+         When not compiled in, the GUC variables still exist but
+         <literal>SET wait_event_timing = on</literal> is rejected, and the
+         SQL functions return a <quote>not supported</quote> error.
+         See <xref linkend="guc-wait-event-timing"/> and
+         <xref linkend="guc-wait-event-trace"/> for runtime controls.
+        </para>
+       </listitem>
+      </varlistentry>
+
       <varlistentry id="configure-option-enable-tap-tests">
        <term><option>--enable-tap-tests</option></term>
        <listitem>

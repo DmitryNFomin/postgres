@@ -8883,6 +8883,50 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-wait-event-timing" xreflabel="wait_event_timing">
+      <term><varname>wait_event_timing</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>wait_event_timing</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Enables collection of per-backend wait event timing statistics,
+        including event counts, total and average durations, and log2
+        histograms.  Requires the server to be compiled with
+        <option>--enable-wait-event-timing</option>.  This parameter is off
+        by default because the two <function>clock_gettime()</function> calls
+        per wait event transition add approximately 40&ndash;100 ns of
+        overhead.  Results are visible in the
+        <link linkend="monitoring-pg-stat-wait-event-timing-view">
+        <structname>pg_stat_wait_event_timing</structname></link> view.
+        Only superusers and users with the appropriate <literal>SET</literal>
+        privilege can change this setting.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-wait-event-trace" xreflabel="wait_event_trace">
+      <term><varname>wait_event_trace</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>wait_event_trace</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Enables per-session recording of individual wait events into a
+        ring buffer.  Each record captures the event type, duration, and
+        timestamp.  Requires <varname>wait_event_timing</varname> to be
+        enabled.  Results are visible in the
+        <link linkend="monitoring-pg-stat-wait-event-trace-view">
+        <structname>pg_stat_wait_event_trace</structname></link> view.
+        The ring buffer is allocated lazily from a DSA segment when
+        first enabled, using approximately 4&nbsp;MB per backend.
+        Any user can change this setting for their own session.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-track-functions" xreflabel="track_functions">
       <term><varname>track_functions</varname> (<type>enum</type>)
       <indexterm>
