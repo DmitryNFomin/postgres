@@ -645,6 +645,7 @@ typedef struct QueryAttrKey
 {
 	int64		query_id;
 	uint32		event;
+	uint8		phase;			/* 0 = plan, 1 = exec */
 } QueryAttrKey;
 
 typedef struct QueryAttrEntry
@@ -660,9 +661,9 @@ typedef struct QueryAttrEntry
 #define SH_KEY_TYPE		QueryAttrKey
 #define SH_KEY			key
 #define SH_HASH_KEY(tb, key) \
-	((uint32)((uint64)(key).query_id * 0x9e3779b97f4a7c15ULL) ^ (key).event)
+	((uint32)((uint64)(key).query_id * 0x9e3779b97f4a7c15ULL) ^ (key).event ^ ((uint32)(key).phase << 16))
 #define SH_EQUAL(tb, a, b) \
-	((a).query_id == (b).query_id && (a).event == (b).event)
+	((a).query_id == (b).query_id && (a).event == (b).event && (a).phase == (b).phase)
 #define SH_SCOPE		static inline
 #define SH_DECLARE
 #define SH_DEFINE
@@ -688,6 +689,7 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 		uint64		read_start;
 		uint64		i;
 		int64		current_qid = 0;
+		uint8		current_phase = 0;	/* 0=plan, 1=exec */
 		queryattr_iterator iter;
 		QueryAttrEntry *entry;
 
@@ -753,10 +755,16 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 			if (rtype == TRACE_QUERY_START)
 			{
 				current_qid = qid;
+				current_phase = 0;	/* planning */
+			}
+			else if (rtype == TRACE_EXEC_START)
+			{
+				current_phase = 1;	/* execution */
 			}
 			else if (rtype == TRACE_QUERY_END)
 			{
 				current_qid = 0;
+				current_phase = 0;
 			}
 			else if (rtype == TRACE_WAIT_EVENT && current_qid != 0 && evt != 0)
 			{
@@ -765,6 +773,7 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 
 				k.query_id = current_qid;
 				k.event = evt;
+				k.phase = current_phase;
 				e = queryattr_insert(ht, k, &found);
 				if (!found)
 				{
@@ -780,8 +789,8 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 		queryattr_start_iterate(ht, &iter);
 		while ((entry = queryattr_iterate(ht, &iter)) != NULL)
 		{
-			Datum		values[8];
-			bool		nulls[8];
+			Datum		values[9];
+			bool		nulls[9];
 			const char *event_type;
 			const char *event_name;
 
@@ -796,10 +805,11 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 			values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
 			values[2] = Int32GetDatum(backend_idx + 1);
 			values[3] = Int64GetDatum(entry->key.query_id);
-			values[4] = CStringGetTextDatum(event_type);
-			values[5] = CStringGetTextDatum(event_name);
-			values[6] = Int64GetDatum(entry->count);
-			values[7] = Float8GetDatum((double) entry->total_ns / 1000000.0);
+			values[4] = CStringGetTextDatum(entry->key.phase == 0 ? "plan" : "exec");
+			values[5] = CStringGetTextDatum(event_type);
+			values[6] = CStringGetTextDatum(event_name);
+			values[7] = Int64GetDatum(entry->count);
+			values[8] = Float8GetDatum((double) entry->total_ns / 1000000.0);
 
 			tuplestore_putvalues(rsinfo->setResult,
 								rsinfo->setDesc,
@@ -913,7 +923,8 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 			duration_ns = rec->data.wait.duration_ns;
 			query_id = 0;
 		}
-		else if (rtype == TRACE_QUERY_START || rtype == TRACE_QUERY_END)
+		else if (rtype == TRACE_QUERY_START || rtype == TRACE_QUERY_END ||
+				 rtype == TRACE_EXEC_START)
 		{
 			event_info = 0;
 			duration_ns = 0;
@@ -944,6 +955,11 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 		{
 			event_type = "Query";
 			event_name = "QueryStart";
+		}
+		else if (rtype == TRACE_EXEC_START)
+		{
+			event_type = "Query";
+			event_name = "ExecStart";
 		}
 		else
 		{

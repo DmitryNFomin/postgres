@@ -2371,11 +2371,12 @@ pg_stat_wait_event_timing_by_query| SELECT pid,
     backend_type,
     backend_id,
     query_id,
+    phase,
     wait_event_type,
     wait_event,
     calls,
     total_time_ms
-   FROM pg_stat_get_wait_event_timing_by_query() t(pid, backend_type, backend_id, query_id, wait_event_type, wait_event, calls, total_time_ms);
+   FROM pg_stat_get_wait_event_timing_by_query() t(pid, backend_type, backend_id, query_id, phase, wait_event_type, wait_event, calls, total_time_ms);
 pg_stat_wait_event_trace| SELECT seq,
     timestamp_ns,
     wait_event_type,

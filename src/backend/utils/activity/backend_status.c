@@ -712,18 +712,14 @@ pgstat_report_query_id(int64 query_id, bool force)
 		return;
 
 	/*
-	 * Write trace ring markers for query attribution (Fix #12).
-	 * QUERY_END for old query_id, QUERY_START for new one.
+	 * Write QUERY_START trace marker when a new query_id is assigned.
+	 * QUERY_END is emitted separately in PostgresMain() when the backend
+	 * transitions to idle, so that idle waits are not attributed to the
+	 * finished query.
 	 */
 #ifdef USE_WAIT_EVENT_TIMING
-	{
-		int64	old_qid = beentry->st_query_id;
-
-		if (old_qid != 0 && old_qid != query_id)
-			wait_event_trace_query_end(old_qid);
-		if (query_id != 0)
-			wait_event_trace_query_start(query_id);
-	}
+	if (query_id != 0 && query_id != beentry->st_query_id)
+		wait_event_trace_query_start(query_id);
 #endif
 
 	/*

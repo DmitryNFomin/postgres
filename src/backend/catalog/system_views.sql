@@ -1528,6 +1528,7 @@ CREATE VIEW pg_stat_wait_event_timing_by_query AS
         t.backend_type,
         t.backend_id,
         t.query_id,
+        t.phase,
         t.wait_event_type,
         t.wait_event,
         t.calls,

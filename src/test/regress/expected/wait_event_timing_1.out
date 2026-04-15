@@ -23,8 +23,8 @@ SELECT * FROM pg_stat_wait_event_timing LIMIT 0;
 (0 rows)
 
 SELECT * FROM pg_stat_wait_event_timing_by_query LIMIT 0;
- pid | backend_type | backend_id | query_id | wait_event_type | wait_event | calls | total_time_ms 
------+--------------+------------+----------+-----------------+------------+-------+---------------
+ pid | backend_type | backend_id | query_id | phase | wait_event_type | wait_event | calls | total_time_ms 
+-----+--------------+------------+----------+-------+-----------------+------------+-------+---------------
 (0 rows)
 
 SELECT * FROM pg_stat_wait_event_trace LIMIT 0;

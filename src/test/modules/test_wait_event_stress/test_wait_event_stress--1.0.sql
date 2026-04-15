@@ -1,0 +1,4 @@
+CREATE FUNCTION stress_wait_events(integer)
+RETURNS bigint
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT;

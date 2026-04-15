@@ -155,6 +155,7 @@ typedef struct WaitEventTimingState
 #define TRACE_WAIT_EVENT	0
 #define TRACE_QUERY_START	1
 #define TRACE_QUERY_END		2
+#define TRACE_EXEC_START	3
 
 typedef struct WaitEventTraceRecord
 {
@@ -358,6 +359,36 @@ wait_event_trace_query_end(int64 query_id)
 
 		INSTR_TIME_SET_CURRENT(now);
 		rec->record_type = TRACE_QUERY_END;
+		rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
+		rec->data.query.query_id = query_id;
+		rec->data.query.pad2 = 0;
+
+		pg_write_barrier();
+		rec->seq = seq + 1;
+		pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
+	}
+}
+
+/*
+ * Write an EXEC_START marker into the trace ring buffer.
+ * Called from ExecutorStart() to separate planning from execution phase.
+ */
+static inline void
+wait_event_trace_exec_start(int64 query_id)
+{
+	if (unlikely(wait_event_trace && my_wait_event_trace != NULL && query_id != 0))
+	{
+		uint64	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
+		WaitEventTraceRecord *rec =
+			&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+		uint32	seq = (uint32)(pos * 2 + 1);
+		instr_time now;
+
+		rec->seq = seq;
+		pg_write_barrier();
+
+		INSTR_TIME_SET_CURRENT(now);
+		rec->record_type = TRACE_EXEC_START;
 		rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
 		rec->data.query.query_id = query_id;
 		rec->data.query.pad2 = 0;

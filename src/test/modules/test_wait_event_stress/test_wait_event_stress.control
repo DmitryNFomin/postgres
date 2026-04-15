@@ -1,0 +1,4 @@
+comment = 'Stress test for wait event timing overhead'
+default_version = '1.0'
+module_pathname = '$libdir/test_wait_event_stress'
+relocatable = true
