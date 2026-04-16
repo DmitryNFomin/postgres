@@ -44,3 +44,5 @@ lib*.pc
 /tmp_install/
 /portlock/
 install/
+install_test/
+install_test_noflag/
