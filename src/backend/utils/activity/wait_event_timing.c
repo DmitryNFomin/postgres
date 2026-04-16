@@ -14,7 +14,7 @@
  *
  * Controlled by the wait_event_timing GUC (default: off).
  *
- * Copyright (c) 2001-2026, PostgreSQL Global Development Group
+ * Copyright (c) 2026, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/activity/wait_event_timing.c
@@ -38,6 +38,7 @@ bool		wait_event_trace = false;
  * These are referenced by pg_proc.dat and must exist as symbols.
  */
 #include "fmgr.h"
+#include "funcapi.h"
 #include "utils/guc_hooks.h"
 #include "utils/wait_event_timing.h"
 
@@ -49,30 +50,21 @@ Datum		pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS);
 Datum
 pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("wait_event_timing is not supported by this build"),
-			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
+	InitMaterializedSRF(fcinfo, 0);
 	PG_RETURN_VOID();
 }
 
 Datum
 pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("wait_event_timing is not supported by this build"),
-			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
+	InitMaterializedSRF(fcinfo, 0);
 	PG_RETURN_VOID();
 }
 
 Datum
 pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("wait_event_timing is not supported by this build"),
-			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
+	InitMaterializedSRF(fcinfo, 0);
 	PG_RETURN_VOID();
 }
 
@@ -421,7 +413,7 @@ void
 assign_wait_event_trace(bool newval, void *extra)
 {
 	if (newval && !wait_event_timing)
-		ereport(NOTICE,
+		ereport(WARNING,
 				(errmsg("wait_event_trace has no effect unless wait_event_timing is enabled"),
 				 errhint("Ask a superuser to SET wait_event_timing = on.")));
 
@@ -487,6 +479,79 @@ pgstat_reset_wait_event_timing_storage(void)
 }
 
 /*
+ * Out-of-line body for pgstat_report_wait_end() timing path.
+ * Called when wait_event_timing GUC is on and my_wait_event_timing is set.
+ * Computes wait duration, accumulates per-event stats, and optionally
+ * writes to the trace ring buffer.
+ */
+void
+pgstat_report_wait_end_timing(void)
+{
+	uint32		event = my_wait_event_timing->current_event;
+
+	if (event != 0 && !INSTR_TIME_IS_ZERO(my_wait_event_timing->wait_start))
+	{
+		instr_time	now;
+		int64		duration_ns;
+		int			idx;
+
+		INSTR_TIME_SET_CURRENT(now);
+		duration_ns = INSTR_TIME_GET_NANOSEC(now) -
+			INSTR_TIME_GET_NANOSEC(my_wait_event_timing->wait_start);
+
+		if (unlikely(duration_ns < 0))
+			duration_ns = 0;
+
+		idx = wait_event_timing_index(event);
+
+		{
+			WaitEventTimingEntry *entry = NULL;
+
+			if (idx == WAIT_EVENT_TIMING_IDX_LWLOCK)
+				entry = lwlock_timing_lookup(
+					&my_wait_event_timing->lwlock_hash,
+					event & 0xFFFF);
+			else if (likely(idx >= 0))
+				entry = &my_wait_event_timing->events[idx];
+
+			if (likely(entry != NULL))
+			{
+				entry->count++;
+				entry->total_ns += duration_ns;
+				if (duration_ns > entry->max_ns)
+					entry->max_ns = duration_ns;
+				entry->histogram[wait_event_timing_bucket(duration_ns)]++;
+			}
+			else if (idx == WAIT_EVENT_TIMING_IDX_LWLOCK)
+				my_wait_event_timing->lwlock_overflow_count++;
+		}
+
+		/* 10046-style per-session trace ring buffer (DSA-backed) */
+		if (unlikely(wait_event_trace && my_wait_event_trace != NULL))
+		{
+			uint64	pos = pg_atomic_fetch_add_u64(&my_wait_event_trace->write_pos, 1);
+			WaitEventTraceRecord *rec =
+				&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+			uint32	seq = (uint32)(pos * 2 + 1);
+
+			rec->seq = seq;
+			pg_write_barrier();
+
+			rec->record_type = TRACE_WAIT_EVENT;
+			rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
+			rec->data.wait.event = event;
+			rec->data.wait.pad2 = 0;
+			rec->data.wait.duration_ns = duration_ns;
+
+			pg_write_barrier();
+			rec->seq = seq + 1;
+		}
+
+		INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
+	}
+}
+
+/*
  * SQL function: pg_stat_get_wait_event_timing(OUT ...)
  *
  * Returns one row per (backend_id, wait_event) with non-zero counts.
@@ -516,58 +581,65 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 			continue;
 
 		/* Emit rows from the flat array (all classes except LWLock) */
-		for (i = 0; i < WAIT_EVENT_TIMING_NUM_EVENTS; i++)
+		for (i = 0; i < WAIT_EVENT_TIMING_DENSE_CLASSES; i++)
 		{
-			WaitEventTimingEntry *entry = &state->events[i];
-			Datum		values[10];
-			bool		nulls[10];
-			uint32		wait_event_info;
-			const char *event_type;
-			const char *event_name;
-			int			bucket;
+			int		base = wait_event_class_offset[i];
+			int		nevents = wait_event_class_nevents[i];
+			uint32	classId = wait_event_dense_to_classid[i];
+			int		j;
 
-			if (entry->count == 0)
-				continue;
-
-			/* Reconstruct wait_event_info from flat index */
-			wait_event_info = ((i / WAIT_EVENT_TIMING_EVENTS_PER_CLASS) << 24) |
-				(i % WAIT_EVENT_TIMING_EVENTS_PER_CLASS);
-
-			event_type = pgstat_get_wait_event_type(wait_event_info);
-			event_name = pgstat_get_wait_event(wait_event_info);
-
-			if (event_type == NULL || event_name == NULL)
-				continue;
-
-			memset(nulls, 0, sizeof(nulls));
-
-			values[0] = Int32GetDatum(beentry->st_procpid);
-			values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
-			values[2] = Int32GetDatum(backend_idx + 1);  /* backend_id (1-based) */
-			values[3] = CStringGetTextDatum(event_type);
-			values[4] = CStringGetTextDatum(event_name);
-			values[5] = Int64GetDatum(entry->count);
-			values[6] = Float8GetDatum((double) entry->total_ns / 1000000.0);  /* ms */
-			values[7] = Float8GetDatum(entry->count > 0
-									   ? (double) entry->total_ns / entry->count / 1000.0
-									   : 0.0);  /* avg us */
-			values[8] = Float8GetDatum((double) entry->max_ns / 1000.0);  /* max us */
-
+			for (j = 0; j < nevents; j++)
 			{
-				Datum	elems[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
+				WaitEventTimingEntry *entry = &state->events[base + j];
+				Datum		values[10];
+				bool		nulls[10];
+				uint32		wait_event_info;
+				const char *event_type;
+				const char *event_name;
+				int			bucket;
 
-				for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
-					elems[bucket] = Int64GetDatum(entry->histogram[bucket]);
+				if (entry->count == 0)
+					continue;
 
-				values[9] = PointerGetDatum(
-					construct_array_builtin(elems,
-											WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS,
-											INT8OID));
+				/* Reconstruct wait_event_info from class and event ID */
+				wait_event_info = ((uint32) classId << 24) | j;
+
+				event_type = pgstat_get_wait_event_type(wait_event_info);
+				event_name = pgstat_get_wait_event(wait_event_info);
+
+				if (event_type == NULL || event_name == NULL)
+					continue;
+
+				memset(nulls, 0, sizeof(nulls));
+
+				values[0] = Int32GetDatum(beentry->st_procpid);
+				values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
+				values[2] = Int32GetDatum(backend_idx + 1);
+				values[3] = CStringGetTextDatum(event_type);
+				values[4] = CStringGetTextDatum(event_name);
+				values[5] = Int64GetDatum(entry->count);
+				values[6] = Float8GetDatum((double) entry->total_ns / 1000000.0);
+				values[7] = Float8GetDatum(entry->count > 0
+										   ? (double) entry->total_ns / entry->count / 1000.0
+										   : 0.0);
+				values[8] = Float8GetDatum((double) entry->max_ns / 1000.0);
+
+				{
+					Datum	elems[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
+
+					for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
+						elems[bucket] = Int64GetDatum(entry->histogram[bucket]);
+
+					values[9] = PointerGetDatum(
+						construct_array_builtin(elems,
+												WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS,
+												INT8OID));
+				}
+
+				tuplestore_putvalues(rsinfo->setResult,
+									rsinfo->setDesc,
+									values, nulls);
 			}
-
-			tuplestore_putvalues(rsinfo->setResult,
-								rsinfo->setDesc,
-								values, nulls);
 		}
 
 		/* Emit rows from the LWLock hash table */
@@ -1007,8 +1079,8 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 		{
 			memset(my_wait_event_timing->events, 0,
 				   sizeof(my_wait_event_timing->events));
-			memset(my_wait_event_timing->lwlock_hash.lwlock_events, 0,
-				   sizeof(my_wait_event_timing->lwlock_hash.lwlock_events));
+			memset(&my_wait_event_timing->lwlock_hash, 0,
+				   sizeof(LWLockTimingHash));
 			my_wait_event_timing->reset_count++;
 		}
 	}
@@ -1029,8 +1101,8 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 			{
 				memset(WaitEventTimingArray[i].events, 0,
 					   sizeof(WaitEventTimingArray[i].events));
-				memset(WaitEventTimingArray[i].lwlock_hash.lwlock_events, 0,
-					   sizeof(WaitEventTimingArray[i].lwlock_hash.lwlock_events));
+				memset(&WaitEventTimingArray[i].lwlock_hash, 0,
+					   sizeof(LWLockTimingHash));
 				WaitEventTimingArray[i].reset_count++;
 			}
 		}
@@ -1045,8 +1117,8 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 
 			memset(WaitEventTimingArray[idx].events, 0,
 				   sizeof(WaitEventTimingArray[idx].events));
-			memset(WaitEventTimingArray[idx].lwlock_hash.lwlock_events, 0,
-				   sizeof(WaitEventTimingArray[idx].lwlock_hash.lwlock_events));
+			memset(&WaitEventTimingArray[idx].lwlock_hash, 0,
+				   sizeof(LWLockTimingHash));
 			WaitEventTimingArray[idx].reset_count++;
 		}
 	}

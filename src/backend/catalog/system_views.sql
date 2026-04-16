@@ -1521,6 +1521,8 @@ CREATE VIEW pg_stat_wait_event_timing AS
         t.max_time_us,
         t.histogram
     FROM pg_stat_get_wait_event_timing() t;
+REVOKE ALL ON pg_stat_wait_event_timing FROM PUBLIC;
+GRANT SELECT ON pg_stat_wait_event_timing TO pg_read_all_stats;
 
 CREATE VIEW pg_stat_wait_event_timing_by_query AS
     SELECT
@@ -1534,6 +1536,8 @@ CREATE VIEW pg_stat_wait_event_timing_by_query AS
         t.calls,
         t.total_time_ms
     FROM pg_stat_get_wait_event_timing_by_query() t;
+REVOKE ALL ON pg_stat_wait_event_timing_by_query FROM PUBLIC;
+GRANT SELECT ON pg_stat_wait_event_timing_by_query TO pg_read_all_stats;
 
 CREATE VIEW pg_stat_wait_event_trace AS
     SELECT
@@ -1544,3 +1548,5 @@ CREATE VIEW pg_stat_wait_event_trace AS
         t.duration_us,
         t.query_id
     FROM pg_stat_get_wait_event_trace(NULL) t;
+REVOKE ALL ON pg_stat_wait_event_trace FROM PUBLIC;
+GRANT SELECT ON pg_stat_wait_event_trace TO pg_read_all_stats;

@@ -250,11 +250,6 @@ pgstat_beinit(void)
 	Assert(MyProcNumber >= 0 && MyProcNumber < NumBackendStatSlots);
 	MyBEEntry = &BackendStatusArray[MyProcNumber];
 
-	/*
-	 * (Fix #12 removed my_wait_event_query_id_ptr -- query attribution
-	 * now uses QUERY_START/QUERY_END markers in the trace ring buffer.)
-	 */
-
 	/* Set up a process-exit hook to clean up */
 	on_shmem_exit(pgstat_beshutdown_hook, 0);
 }

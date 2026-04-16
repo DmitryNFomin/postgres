@@ -16,7 +16,7 @@
  * Statistics are exposed via the pg_stat_wait_event_timing view
  * and pg_stat_get_wait_event_timing() SQL function.
  *
- * Copyright (c) 2001-2026, PostgreSQL Global Development Group
+ * Copyright (c) 2026, PostgreSQL Global Development Group
  *
  * src/include/utils/wait_event_timing.h
  *-------------------------------------------------------------------------
@@ -41,36 +41,84 @@
 #define WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS	16
 
 /*
- * Maximum number of distinct wait events we track.  This must be large
- * enough to cover all built-in events (currently ~288) plus some headroom
- * for custom extension events.  The wait event ID (low 16 bits of
- * wait_event_info) is used as the index within a class, and we store
- * per-class arrays.
+ * Compact per-class mapping for the flat events[] array.
  *
- * Wait event classes and their max event counts:
- *   LWLock (0x01): tranche IDs are dynamically allocated and unbounded;
- *                  extensions can push IDs well past 256 via
- *                  LWLockNewTrancheId(), so LWLock uses a separate
- *                  per-backend hash table instead of the flat array.
- *   Lock (0x03): ~10 lock types
- *   Buffer (0x04): ~6 events
- *   Activity (0x05): ~20 events
- *   Client (0x06): ~14 events
- *   Extension (0x07): up to 128 custom events
- *   IPC (0x08): ~59 events
- *   Timeout (0x09): ~13 events
- *   IO (0x0A): ~85 events
- *   InjectionPoint (0x0B): up to 128 custom events
+ * Wait event classes (from wait_classes.h) use sparse classId values
+ * (0x01, 0x03-0x0B).  LWLock (0x01) uses a separate hash table because
+ * tranche IDs are dynamically allocated and unbounded.  Classes 0x00
+ * and 0x02 do not exist.
  *
- * For all classes except LWLock, we use a flat array indexed by
- * (classId >> 24) * 256 + eventId.  LWLock events go through a
- * per-backend open-addressing hash table (see LWLockTimingHash).
- * With 12 classes * 256 = 3072 flat slots, the flat part uses ~73 KB.
+ * Instead of a uniform 256 slots per class (wasting memory on unused
+ * classes and oversized per-class ranges), we use per-class slot counts
+ * sized to actual event populations with headroom:
+ *
+ *   Dense  ClassId  Class           Actual  Slots  Offset
+ *     0     0x03    Lock              12      32       0
+ *     1     0x04    Buffer             4      16      32
+ *     2     0x05    Activity          18      32      48
+ *     3     0x06    Client            12      32      80
+ *     4     0x07    Extension        128     128     112
+ *     5     0x08    IPC               57     128     240
+ *     6     0x09    Timeout           11      32     368
+ *     7     0x0A    IO                83     128     400
+ *     8     0x0B    InjectionPoint   128     128     528
+ *                                          Total:   656
+ *
+ * Per-backend flat array: 656 * 152 bytes = ~97 KB (vs ~456 KB before).
  */
-#define WAIT_EVENT_TIMING_CLASSES		12  /* 0x00 .. 0x0B */
-#define WAIT_EVENT_TIMING_EVENTS_PER_CLASS	256
-#define WAIT_EVENT_TIMING_NUM_EVENTS \
-	(WAIT_EVENT_TIMING_CLASSES * WAIT_EVENT_TIMING_EVENTS_PER_CLASS)
+#define WAIT_EVENT_TIMING_RAW_CLASSES	12	/* 0x00 .. 0x0B for bounds check */
+#define WAIT_EVENT_TIMING_DENSE_CLASSES	9	/* actual classes in the flat array */
+#define WAIT_EVENT_TIMING_NUM_EVENTS	656	/* sum of per-class slot counts */
+
+/*
+ * Maps raw classId (0x00..0x0B) to dense class index, or -1 for unused /
+ * LWLock classes.  Indexed by (wait_event_info >> 24) & 0xFF.
+ */
+static const int8 wait_event_class_dense[WAIT_EVENT_TIMING_RAW_CLASSES] = {
+	-1,		/* 0x00: unused */
+	-1,		/* 0x01: LWLock (uses hash) */
+	-1,		/* 0x02: unused */
+	 0,		/* 0x03: Lock */
+	 1,		/* 0x04: Buffer */
+	 2,		/* 0x05: Activity */
+	 3,		/* 0x06: Client */
+	 4,		/* 0x07: Extension */
+	 5,		/* 0x08: IPC */
+	 6,		/* 0x09: Timeout */
+	 7,		/* 0x0A: IO */
+	 8,		/* 0x0B: InjectionPoint */
+};
+
+/* Per dense-class: maximum eventId (exclusive) */
+static const int wait_event_class_nevents[WAIT_EVENT_TIMING_DENSE_CLASSES] = {
+	32,		/* Lock */
+	16,		/* Buffer */
+	32,		/* Activity */
+	32,		/* Client */
+	128,	/* Extension */
+	128,	/* IPC */
+	32,		/* Timeout */
+	128,	/* IO */
+	128,	/* InjectionPoint */
+};
+
+/* Per dense-class: cumulative offset into events[] */
+static const int wait_event_class_offset[WAIT_EVENT_TIMING_DENSE_CLASSES] = {
+	0,		/* Lock */
+	32,		/* Buffer */
+	48,		/* Activity */
+	80,		/* Client */
+	112,	/* Extension */
+	240,	/* IPC */
+	368,	/* Timeout */
+	400,	/* IO */
+	528,	/* InjectionPoint */
+};
+
+/* Reverse mapping: dense class index -> raw classId */
+static const uint8 wait_event_dense_to_classid[WAIT_EVENT_TIMING_DENSE_CLASSES] = {
+	0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+};
 
 /* Sentinel returned by wait_event_timing_index() for LWLock events */
 #define WAIT_EVENT_TIMING_IDX_LWLOCK	(-2)
@@ -101,7 +149,9 @@ typedef struct WaitEventTimingEntry
 
 typedef struct LWLockTimingHashEntry
 {
-	uint16		tranche_id;		/* 0 = empty slot */
+	uint16		tranche_id;		/* 0 = empty slot; 16-bit matches
+							 * core wait_event_info encoding
+							 * (event & 0xFFFF) */
 	uint16		dense_idx;		/* index into lwlock_events[] */
 } LWLockTimingHashEntry;
 
@@ -132,6 +182,9 @@ typedef struct WaitEventTimingState
 
 	/* Per-event statistics: hash table for LWLock class (unbounded IDs) */
 	LWLockTimingHash lwlock_hash;
+
+	/* Count of LWLock events dropped due to hash table overflow (192 limit) */
+	int64		lwlock_overflow_count;
 } WaitEventTimingState;
 
 
@@ -159,7 +212,18 @@ typedef struct WaitEventTimingState
 
 typedef struct WaitEventTraceRecord
 {
-	uint32		seq;			/* seqlock: odd = write in progress */
+	/*
+	 * Seqlock for torn-read detection.  Writers set seq to an odd value
+	 * before filling fields, then to even after.  Readers check seq before
+	 * and after; if either is odd or they differ, the record is skipped.
+	 *
+	 * uint32 wraps after pos > 2^31 (~2.7 hours at 220K events/sec), but
+	 * the protection only needs to hold for the reader's access window
+	 * (~10-20 ns between seq_before and seq_after reads).  A collision
+	 * requires advancing 2^31 positions in that window -- physically
+	 * impossible by 11 orders of magnitude.
+	 */
+	uint32		seq;
 	uint8		record_type;	/* TRACE_WAIT_EVENT / QUERY_START / QUERY_END */
 	uint8		pad[3];
 	int64		timestamp_ns;	/* monotonic clock */
@@ -229,23 +293,30 @@ extern void wait_event_trace_detach(int procNumber);
  * Convert wait_event_info to a flat index for the events[] array.
  * Returns WAIT_EVENT_TIMING_IDX_LWLOCK (-2) for LWLock class events;
  * the caller must use lwlock_timing_lookup() for those.
- * Returns -1 for out-of-range events in other classes.
+ * Returns -1 for out-of-range or unknown class events.
  */
 static inline int
 wait_event_timing_index(uint32 wait_event_info)
 {
 	int			classId = (wait_event_info >> 24) & 0xFF;
 	int			eventId = wait_event_info & 0xFFFF;
+	int			dense;
 
 	/* LWLock tranche IDs are unbounded -- use hash table */
 	if (classId == (PG_WAIT_LWLOCK >> 24))
 		return WAIT_EVENT_TIMING_IDX_LWLOCK;
 
-	if (unlikely(classId >= WAIT_EVENT_TIMING_CLASSES ||
-				 eventId >= WAIT_EVENT_TIMING_EVENTS_PER_CLASS))
+	if (unlikely(classId >= WAIT_EVENT_TIMING_RAW_CLASSES))
 		return -1;
 
-	return classId * WAIT_EVENT_TIMING_EVENTS_PER_CLASS + eventId;
+	dense = wait_event_class_dense[classId];
+	if (unlikely(dense < 0))
+		return -1;
+
+	if (unlikely(eventId >= wait_event_class_nevents[dense]))
+		return -1;
+
+	return wait_event_class_offset[dense] + eventId;
 }
 
 /*
@@ -318,7 +389,7 @@ wait_event_trace_query_start(int64 query_id)
 {
 	if (unlikely(wait_event_trace && my_wait_event_trace != NULL && query_id != 0))
 	{
-		uint64	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
+		uint64	pos = pg_atomic_fetch_add_u64(&my_wait_event_trace->write_pos, 1);
 		WaitEventTraceRecord *rec =
 			&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
 		uint32	seq = (uint32)(pos * 2 + 1);
@@ -335,7 +406,6 @@ wait_event_trace_query_start(int64 query_id)
 
 		pg_write_barrier();
 		rec->seq = seq + 1;
-		pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
 	}
 }
 
@@ -348,7 +418,7 @@ wait_event_trace_query_end(int64 query_id)
 {
 	if (unlikely(wait_event_trace && my_wait_event_trace != NULL && query_id != 0))
 	{
-		uint64	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
+		uint64	pos = pg_atomic_fetch_add_u64(&my_wait_event_trace->write_pos, 1);
 		WaitEventTraceRecord *rec =
 			&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
 		uint32	seq = (uint32)(pos * 2 + 1);
@@ -365,7 +435,6 @@ wait_event_trace_query_end(int64 query_id)
 
 		pg_write_barrier();
 		rec->seq = seq + 1;
-		pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
 	}
 }
 
@@ -378,7 +447,7 @@ wait_event_trace_exec_start(int64 query_id)
 {
 	if (unlikely(wait_event_trace && my_wait_event_trace != NULL && query_id != 0))
 	{
-		uint64	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
+		uint64	pos = pg_atomic_fetch_add_u64(&my_wait_event_trace->write_pos, 1);
 		WaitEventTraceRecord *rec =
 			&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
 		uint32	seq = (uint32)(pos * 2 + 1);
@@ -395,7 +464,6 @@ wait_event_trace_exec_start(int64 query_id)
 
 		pg_write_barrier();
 		rec->seq = seq + 1;
-		pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
 	}
 }
 

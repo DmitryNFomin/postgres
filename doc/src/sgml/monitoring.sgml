@@ -3866,7 +3866,20 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    buffer.  Each record captures a single wait event with its timestamp
    and duration, or a <literal>QUERY_START</literal>/<literal>QUERY_END</literal>
    marker.  Requires <xref linkend="guc-wait-event-trace"/> to be enabled.
-   The ring buffer holds up to 131072 records; older records are overwritten.
+   The ring buffer holds up to 131072 records; older records are overwritten
+   in FIFO order.
+  </para>
+
+  <para>
+   The ring buffer is designed as a lock-free transport mechanism for
+   external consumption.  At high wait event rates (e.g., 220K events/sec),
+   the ring wraps in roughly 0.5&ndash;1 seconds.  The
+   <structname>pg_stat_wait_event_timing_by_query</structname> view
+   attributes events to queries by scanning for
+   <literal>QUERY_START</literal> markers; if such a marker has been
+   overwritten, events before the next visible marker are unattributed.
+   For complete trace analysis of long-running queries, use an external
+   reader that polls the ring buffer before it wraps.
   </para>
 
   <table id="pg-stat-wait-event-trace-view" xreflabel="pg_stat_wait_event_trace">
