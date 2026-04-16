@@ -23,6 +23,8 @@
  */
 #include "postgres.h"
 
+#include "utils/wait_event_timing.h"
+
 /*
  * GUC variables — always defined so the GUC system works even when
  * compiled without --enable-wait-event-timing.  Setting them to 'on'
@@ -173,6 +175,7 @@ pgstat_reset_wait_event_timing_storage(void)
 #include "utils/backend_status.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/guc_hooks.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
 #include "utils/wait_event_timing.h"
@@ -796,7 +799,6 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 				&ts->records[i & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
 			uint32		seq_before, seq_after;
 			uint8		rtype;
-			int64		ts_ns;
 			uint32		evt;
 			int64		dur_ns;
 			int64		qid;
@@ -808,7 +810,6 @@ pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 				continue;
 
 			rtype = rec->record_type;
-			ts_ns = rec->timestamp_ns;
 			if (rtype == TRACE_WAIT_EVENT)
 			{
 				evt = rec->data.wait.event;
