@@ -474,6 +474,10 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 void
 ExecutorEnd(QueryDesc *queryDesc)
 {
+#ifdef USE_WAIT_EVENT_TIMING
+	wait_event_trace_exec_end(queryDesc->plannedstmt->queryId);
+#endif
+
 	if (ExecutorEnd_hook)
 		(*ExecutorEnd_hook) (queryDesc);
 	else

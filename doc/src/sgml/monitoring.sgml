@@ -552,15 +552,6 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      </row>
 
      <row>
-      <entry><structname>pg_stat_wait_event_timing_by_query</structname><indexterm><primary>pg_stat_wait_event_timing_by_query</primary></indexterm></entry>
-      <entry>One row per backend per query per wait event, showing timing
-       attributed to individual queries via trace ring analysis.  See
-       <link linkend="monitoring-pg-stat-wait-event-timing-by-query-view">
-       <structname>pg_stat_wait_event_timing_by_query</structname></link> for details.
-      </entry>
-     </row>
-
-     <row>
       <entry><structname>pg_stat_wait_event_trace</structname><indexterm><primary>pg_stat_wait_event_trace</primary></indexterm></entry>
       <entry>Individual wait event records from the current backend's trace
        ring buffer.  See
@@ -3744,115 +3735,6 @@ description | Waiting for a newly initialized WAL file to reach durable storage
   </table>
  </sect2>
 
- <sect2 id="monitoring-pg-stat-wait-event-timing-by-query-view">
-  <title><structname>pg_stat_wait_event_timing_by_query</structname></title>
-
-  <indexterm>
-   <primary>pg_stat_wait_event_timing_by_query</primary>
-  </indexterm>
-
-  <para>
-   The <structname>pg_stat_wait_event_timing_by_query</structname> view
-   contains one row for each combination of backend, query, and wait event.
-   It attributes wait events to individual queries by scanning the trace
-   ring buffer for <literal>QUERY_START</literal>/<literal>QUERY_END</literal>
-   markers.  Requires both <xref linkend="guc-wait-event-timing"/> and
-   <xref linkend="guc-wait-event-trace"/> to be enabled, and
-   <xref linkend="guc-compute-query-id"/> to be on.
-  </para>
-
-  <table id="pg-stat-wait-event-timing-by-query-view" xreflabel="pg_stat_wait_event_timing_by_query">
-   <title><structname>pg_stat_wait_event_timing_by_query</structname> View</title>
-   <tgroup cols="1">
-    <thead>
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       Column Type
-      </para>
-      <para>
-       Description
-      </para></entry>
-     </row>
-    </thead>
-
-    <tbody>
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>pid</structfield> <type>integer</type>
-      </para>
-      <para>
-       Process ID of the backend
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>backend_type</structfield> <type>text</type>
-      </para>
-      <para>
-       Type of the backend
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>backend_id</structfield> <type>integer</type>
-      </para>
-      <para>
-       Internal slot number (1-based process number)
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>query_id</structfield> <type>bigint</type>
-      </para>
-      <para>
-       Query identifier (from <xref linkend="guc-compute-query-id"/>)
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>wait_event_type</structfield> <type>text</type>
-      </para>
-      <para>
-       Wait event type
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>wait_event</structfield> <type>text</type>
-      </para>
-      <para>
-       Wait event name
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>calls</structfield> <type>bigint</type>
-      </para>
-      <para>
-       Number of times this wait event occurred for this query
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>total_time_ms</structfield> <type>double precision</type>
-      </para>
-      <para>
-       Total time spent in this wait event for this query, in milliseconds
-      </para></entry>
-     </row>
-
-    </tbody>
-   </tgroup>
-  </table>
- </sect2>
-
  <sect2 id="monitoring-pg-stat-wait-event-trace-view">
   <title><structname>pg_stat_wait_event_trace</structname></title>
 
@@ -3873,13 +3755,14 @@ description | Waiting for a newly initialized WAL file to reach durable storage
   <para>
    The ring buffer is designed as a lock-free transport mechanism for
    external consumption.  At high wait event rates (e.g., 220K events/sec),
-   the ring wraps in roughly 0.5&ndash;1 seconds.  The
-   <structname>pg_stat_wait_event_timing_by_query</structname> view
-   attributes events to queries by scanning for
-   <literal>QUERY_START</literal> markers; if such a marker has been
-   overwritten, events before the next visible marker are unattributed.
-   For complete trace analysis of long-running queries, use an external
-   reader that polls the ring buffer before it wraps.
+   the ring wraps in roughly 0.5&ndash;1 seconds.  External consumers
+   (background workers, extensions) can attribute events to queries by
+   scanning for <literal>QUERY_START</literal> markers; if such a marker
+   has been overwritten, events before the next visible marker are
+   unattributed.  Consumers should poll the ring buffer before it wraps
+   and can use <structfield>st_query_id</structfield> from
+   <structname>PgBackendStatus</structname> as a fallback for the current
+   query context.
   </para>
 
   <table id="pg-stat-wait-event-trace-view" xreflabel="pg_stat_wait_event_trace">
@@ -5829,22 +5712,6 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         own backend.  Superusers and members of
         <literal>pg_read_all_stats</literal> see all backends.
         Requires <option>--enable-wait-event-timing</option>.
-       </para></entry>
-      </row>
-
-      <row>
-       <entry role="func_table_entry"><para role="func_signature">
-        <indexterm>
-         <primary>pg_stat_get_wait_event_timing_by_query</primary>
-        </indexterm>
-        <function>pg_stat_get_wait_event_timing_by_query</function> ()
-        <returnvalue>setof record</returnvalue>
-       </para>
-       <para>
-        Returns wait event timing attributed to individual queries by
-        scanning the trace ring buffer for query markers.  Requires both
-        <xref linkend="guc-wait-event-timing"/> and
-        <xref linkend="guc-wait-event-trace"/> to be enabled.
        </para></entry>
       </row>
 

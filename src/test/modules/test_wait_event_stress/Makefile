@@ -4,6 +4,8 @@ PGFILEDESC = "test_wait_event_stress - wait event timing overhead measurement"
 EXTENSION = test_wait_event_stress
 DATA = test_wait_event_stress--1.0.sql
 
+REGRESS = test_wait_event_stress
+
 ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

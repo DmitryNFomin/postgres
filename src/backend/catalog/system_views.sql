@@ -1524,20 +1524,6 @@ CREATE VIEW pg_stat_wait_event_timing AS
 REVOKE ALL ON pg_stat_wait_event_timing FROM PUBLIC;
 GRANT SELECT ON pg_stat_wait_event_timing TO pg_read_all_stats;
 
-CREATE VIEW pg_stat_wait_event_timing_by_query AS
-    SELECT
-        t.pid,
-        t.backend_type,
-        t.backend_id,
-        t.query_id,
-        t.phase,
-        t.wait_event_type,
-        t.wait_event,
-        t.calls,
-        t.total_time_ms
-    FROM pg_stat_get_wait_event_timing_by_query() t;
-REVOKE ALL ON pg_stat_wait_event_timing_by_query FROM PUBLIC;
-GRANT SELECT ON pg_stat_wait_event_timing_by_query TO pg_read_all_stats;
 
 CREATE VIEW pg_stat_wait_event_trace AS
     SELECT

@@ -2,7 +2,10 @@
 -- Test wait event timing infrastructure
 --
 -- These tests verify the wait event timing SQL interface.
--- They require --enable-wait-event-timing at compile time.
+-- They require --enable-wait-event-timing (or -Dwait_event_timing=true for
+-- meson) at compile time.  Without it, the alternate expected output
+-- wait_event_timing_1.out is used.  The default CI (Cirrus) runs without
+-- timing enabled, so the non-timing path is tested automatically.
 --
 
 -- Check GUC default
@@ -13,7 +16,6 @@ SET wait_event_timing = on;
 
 -- Verify views exist (zero rows is fine, just checking structure)
 SELECT * FROM pg_stat_wait_event_timing LIMIT 0;
-SELECT * FROM pg_stat_wait_event_timing_by_query LIMIT 0;
 SELECT * FROM pg_stat_wait_event_trace LIMIT 0;
 
 -- Verify column types of timing view
@@ -72,19 +74,6 @@ SELECT count(*) > 0 AS has_query_markers
 FROM pg_stat_wait_event_trace
 WHERE wait_event_type = 'Query';
 
--- Test by_query (requires trace + compute_query_id, both already on)
-SELECT pg_sleep(0.01);
-
-SELECT
-    pid = pg_backend_pid() AS pid_ok,
-    backend_type,
-    query_id IS NOT NULL AS has_qid,
-    wait_event = 'PgSleep' AS is_pgsleep,
-    calls >= 1 AS has_calls,
-    total_time_ms > 0 AS has_time
-FROM pg_stat_wait_event_timing_by_query
-WHERE wait_event = 'PgSleep';
-
 -- Reset does not crash
 SELECT pg_stat_reset_wait_event_timing(NULL);
 
@@ -94,6 +83,22 @@ SELECT pg_stat_reset_wait_event_timing(99999);
 -- Trace read with invalid backend_id returns empty
 SELECT count(*) AS invalid_trace
 FROM pg_stat_get_wait_event_trace(99999);
+
+-- Test trace lifecycle: enable, query, read, disable, re-enable
+SET compute_query_id = on;
+SET wait_event_trace = off;
+SET wait_event_trace = on;
+SELECT 1 AS reattach_test;
+SELECT count(*) >= 0 AS trace_reattach_ok
+FROM pg_stat_wait_event_trace;
+SET wait_event_trace = off;
+
+-- Test auxiliary process timing: verify background processes have
+-- accumulated wait events (requires wait_event_timing = on)
+SELECT count(*) > 0 AS aux_timing_ok
+FROM pg_stat_wait_event_timing
+WHERE backend_type IN ('checkpointer', 'background writer', 'walwriter')
+  AND calls > 0;
 
 -- Clean up
 RESET wait_event_timing;

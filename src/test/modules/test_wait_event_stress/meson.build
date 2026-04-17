@@ -20,3 +20,14 @@ test_install_data += files(
   'test_wait_event_stress.control',
   'test_wait_event_stress--1.0.sql',
 )
+
+tests += {
+  'name': 'test_wait_event_stress',
+  'sd': meson.current_source_dir(),
+  'bd': meson.current_build_dir(),
+  'regress': {
+    'sql': [
+      'test_wait_event_stress',
+    ],
+  },
+}

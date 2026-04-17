@@ -42,22 +42,13 @@ bool		wait_event_trace = false;
 #include "fmgr.h"
 #include "funcapi.h"
 #include "utils/guc_hooks.h"
-#include "utils/wait_event_timing.h"
 
 Datum		pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS);
-Datum		pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS);
 Datum		pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS);
 Datum		pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS);
 
 Datum
 pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
-{
-	InitMaterializedSRF(fcinfo, 0);
-	PG_RETURN_VOID();
-}
-
-Datum
-pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
 {
 	InitMaterializedSRF(fcinfo, 0);
 	PG_RETURN_VOID();
@@ -92,7 +83,11 @@ check_wait_event_timing(bool *newval, void **extra, GucSource source)
 	{
 		if (source < PGC_S_INTERACTIVE)
 		{
-			/* Config file, env, command line: force off so server can start */
+			ereport(WARNING,
+					(errmsg("wait_event_timing is not supported by this build, "
+							"forcing to off"),
+					 errhint("Compile PostgreSQL with "
+							 "--enable-wait-event-timing.")));
 			*newval = false;
 			return true;
 		}
@@ -110,6 +105,11 @@ check_wait_event_trace(bool *newval, void **extra, GucSource source)
 	{
 		if (source < PGC_S_INTERACTIVE)
 		{
+			ereport(WARNING,
+					(errmsg("wait_event_trace is not supported by this build, "
+							"forcing to off"),
+					 errhint("Compile PostgreSQL with "
+							 "--enable-wait-event-timing.")));
 			*newval = false;
 			return true;
 		}
@@ -178,7 +178,6 @@ pgstat_reset_wait_event_timing_storage(void)
 #include "utils/guc_hooks.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
-#include "utils/wait_event_timing.h"
 
 #define NUM_WAIT_EVENT_TIMING_SLOTS  (MaxBackends + NUM_AUXILIARY_PROCS)
 
@@ -199,6 +198,150 @@ static WaitEventTimingState *WaitEventTimingArray = NULL;
 static WaitEventTraceControl *WaitEventTraceCtl = NULL;
 static dsa_area *trace_dsa = NULL;
 static int	my_trace_proc_number = -1;
+
+/*
+ * Mapping arrays for the flat events[] array, generated from
+ * wait_event_names.txt by generate-wait_event_types.pl.
+ * Defines: WAIT_EVENT_TIMING_RAW_CLASSES, WAIT_EVENT_TIMING_DENSE_CLASSES,
+ *          WAIT_EVENT_TIMING_NUM_EVENTS, and the four mapping arrays.
+ */
+#include "utils/wait_event_timing_data.c"
+
+/*
+ * Convert wait_event_info to a flat index for the events[] array.
+ * For bounded classes, eventId equals the array index within the class
+ * (the enum values start at PG_WAIT_<CLASS> and increment by one).
+ */
+static int
+wait_event_timing_index(uint32 wait_event_info)
+{
+	int			classId = (wait_event_info >> 24) & 0xFF;
+	int			eventId = wait_event_info & 0xFFFF;	/* array index for bounded classes */
+	int			dense;
+
+	if (classId == (PG_WAIT_LWLOCK >> 24))
+		return WAIT_EVENT_TIMING_IDX_LWLOCK;
+
+	if (unlikely(classId >= WAIT_EVENT_TIMING_RAW_CLASSES))
+		return -1;
+
+	dense = wait_event_class_dense[classId];
+	if (unlikely(dense < 0))
+		return -1;
+
+	if (unlikely(eventId >= wait_event_class_nevents[dense]))
+		return -1;
+
+	return wait_event_class_offset[dense] + eventId;
+}
+
+/*
+ * Look up (or insert) timing entry for an LWLock tranche ID.
+ */
+static WaitEventTimingEntry *
+lwlock_timing_lookup(LWLockTimingHash *ht, uint16 tranche_id)
+{
+	uint32		hash = (uint32) tranche_id * 2654435761U;
+	int			slot = hash & (LWLOCK_TIMING_HASH_SIZE - 1);
+	int			i;
+
+	for (i = 0; i < LWLOCK_TIMING_HASH_SIZE; i++)
+	{
+		LWLockTimingHashEntry *e = &ht->entries[slot];
+
+		if (e->tranche_id == tranche_id)
+			return &ht->lwlock_events[e->dense_idx];
+
+		if (e->tranche_id == 0)
+		{
+			if (ht->num_used >= LWLOCK_TIMING_MAX_ENTRIES)
+				return NULL;
+
+			e->tranche_id = tranche_id;
+			e->dense_idx = ht->num_used++;
+			return &ht->lwlock_events[e->dense_idx];
+		}
+
+		slot = (slot + 1) & (LWLOCK_TIMING_HASH_SIZE - 1);
+	}
+
+	return NULL;
+}
+
+/*
+ * Compute histogram bucket index for a duration in nanoseconds.
+ */
+static int
+wait_event_timing_bucket(int64 duration_ns)
+{
+	int64		duration_us = duration_ns / 1000;
+	int			bucket;
+
+	if (duration_us <= 0)
+		return 0;
+
+	bucket = pg_leftmost_one_pos64((uint64) duration_us) + 1;
+
+	if (bucket >= WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS)
+		bucket = WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS - 1;
+
+	return bucket;
+}
+
+/*
+ * Write a trace ring marker record.  Shared helper for all marker types.
+ */
+static void
+wait_event_trace_write_marker(uint8 record_type, int64 query_id)
+{
+	uint64	pos;
+	WaitEventTraceRecord *rec;
+	uint32	seq;
+	instr_time now;
+
+	if (likely(!(wait_event_trace && my_wait_event_trace != NULL && query_id != 0)))
+		return;
+
+	pos = pg_atomic_fetch_add_u64(&my_wait_event_trace->write_pos, 1);
+	rec = &my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+	seq = (uint32)(pos * 2 + 1);
+
+	rec->seq = seq;
+	pg_write_barrier();
+
+	INSTR_TIME_SET_CURRENT(now);
+	rec->record_type = record_type;
+	rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
+	rec->data.query.query_id = query_id;
+	rec->data.query.pad2 = 0;
+
+	pg_write_barrier();
+	rec->seq = seq + 1;
+}
+
+void
+wait_event_trace_query_start(int64 query_id)
+{
+	wait_event_trace_write_marker(TRACE_QUERY_START, query_id);
+}
+
+void
+wait_event_trace_query_end(int64 query_id)
+{
+	wait_event_trace_write_marker(TRACE_QUERY_END, query_id);
+}
+
+void
+wait_event_trace_exec_start(int64 query_id)
+{
+	wait_event_trace_write_marker(TRACE_EXEC_START, query_id);
+}
+
+void
+wait_event_trace_exec_end(int64 query_id)
+{
+	wait_event_trace_write_marker(TRACE_EXEC_END, query_id);
+}
 
 /*
  * Report the shared memory space needed.
@@ -224,7 +367,13 @@ WaitEventTimingShmemInit(void)
 		ShmemInitStruct("WaitEventTimingArray", size, &found);
 
 	if (!found)
+	{
 		memset(WaitEventTimingArray, 0, size);
+
+		for (int i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
+			LWLockInitialize(&WaitEventTimingArray[i].lock,
+							 LWTRANCHE_WAIT_EVENT_TIMING);
+	}
 }
 
 /*
@@ -320,8 +469,10 @@ wait_event_trace_before_shmem_exit(int code, Datum arg)
 	if (DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[procNumber]) &&
 		trace_dsa != NULL)
 	{
+		LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
 		dsa_free(trace_dsa, WaitEventTraceCtl->trace_ptrs[procNumber]);
 		WaitEventTraceCtl->trace_ptrs[procNumber] = InvalidDsaPointer;
+		LWLockRelease(&WaitEventTraceCtl->lock);
 	}
 
 	my_wait_event_trace = NULL;
@@ -360,7 +511,10 @@ wait_event_trace_attach(int procNumber)
 	ts = dsa_get_address(trace_dsa, p);
 	pg_atomic_init_u64(&ts->write_pos, 0);
 
+	LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
 	WaitEventTraceCtl->trace_ptrs[procNumber] = p;
+	LWLockRelease(&WaitEventTraceCtl->lock);
+
 	my_wait_event_trace = ts;
 	my_trace_proc_number = procNumber;
 
@@ -420,6 +574,11 @@ assign_wait_event_trace(bool newval, void *extra)
 				(errmsg("wait_event_trace has no effect unless wait_event_timing is enabled"),
 				 errhint("Ask a superuser to SET wait_event_timing = on.")));
 
+	if (newval && !pgstat_track_activities)
+		ereport(WARNING,
+				(errmsg("wait_event_trace query attribution requires "
+						"track_activities to be enabled")));
+
 	if (newval && my_wait_event_trace == NULL && my_trace_proc_number >= 0)
 		wait_event_trace_attach(my_trace_proc_number);
 }
@@ -431,6 +590,10 @@ assign_wait_event_trace(bool newval, void *extra)
  * procNumber is the PGPROC array index (from GetNumberFromPGProc).
  * Covers both regular backends (procNumber < MaxBackends) and auxiliary
  * processes (bgwriter, checkpointer, walwriter, etc.).
+ *
+ * On EXEC_BACKEND builds (Windows), SubPostmasterMain() calls
+ * CreateSharedMemoryAndSemaphores() before InitProcess(), so
+ * WaitEventTimingArray is always initialized at this point.
  */
 void
 pgstat_set_wait_event_timing_storage(int procNumber)
@@ -446,8 +609,16 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 
 	my_wait_event_timing = &WaitEventTimingArray[procNumber];
 
-	/* Zero the state for this new backend session */
-	memset(my_wait_event_timing, 0, sizeof(WaitEventTimingState));
+	/* Zero the stats for this new backend session, preserving the LWLock */
+	memset(my_wait_event_timing->events, 0,
+		   sizeof(my_wait_event_timing->events));
+	memset(&my_wait_event_timing->lwlock_hash, 0,
+		   sizeof(LWLockTimingHash));
+	my_wait_event_timing->reset_count = 0;
+	my_wait_event_timing->lwlock_overflow_count = 0;
+	my_wait_event_timing->flat_overflow_count = 0;
+	my_wait_event_timing->current_event = 0;
+	INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
 
 	/*
 	 * Trace ring buffer is allocated lazily via DSA when wait_event_trace
@@ -470,7 +641,19 @@ pgstat_reset_wait_event_timing_storage(void)
 	 * state for the next backend on this slot.
 	 */
 	if (my_wait_event_timing != NULL)
-		memset(my_wait_event_timing, 0, sizeof(WaitEventTimingState));
+	{
+		LWLockAcquire(&my_wait_event_timing->lock, LW_EXCLUSIVE);
+		memset(my_wait_event_timing->events, 0,
+			   sizeof(my_wait_event_timing->events));
+		memset(&my_wait_event_timing->lwlock_hash, 0,
+			   sizeof(LWLockTimingHash));
+		my_wait_event_timing->reset_count = 0;
+		my_wait_event_timing->lwlock_overflow_count = 0;
+		my_wait_event_timing->flat_overflow_count = 0;
+		my_wait_event_timing->current_event = 0;
+		INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
+		LWLockRelease(&my_wait_event_timing->lock);
+	}
 
 	/* Trace ring buffer: cleanup via before_shmem_exit callback (Fix #1) */
 	if (my_trace_proc_number >= 0)
@@ -507,6 +690,7 @@ pgstat_report_wait_end_timing(void)
 
 		idx = wait_event_timing_index(event);
 
+		LWLockAcquire(&my_wait_event_timing->lock, LW_SHARED);
 		{
 			WaitEventTimingEntry *entry = NULL;
 
@@ -526,8 +710,23 @@ pgstat_report_wait_end_timing(void)
 				entry->histogram[wait_event_timing_bucket(duration_ns)]++;
 			}
 			else if (idx == WAIT_EVENT_TIMING_IDX_LWLOCK)
-				my_wait_event_timing->lwlock_overflow_count++;
+			{
+				if (my_wait_event_timing->lwlock_overflow_count++ == 0)
+					ereport(WARNING,
+							(errmsg("wait_event_timing: LWLock hash table full, "
+									"timing data for some LWLock tranches will be lost"),
+							 errhint("This backend uses more than %d distinct LWLock tranches.",
+									 LWLOCK_TIMING_MAX_ENTRIES)));
+			}
+			else if (idx == -1)
+			{
+				if (my_wait_event_timing->flat_overflow_count++ == 0)
+					ereport(WARNING,
+							(errmsg("wait_event_timing: event class overflow, "
+									"some events will not be timed")));
+			}
 		}
+		LWLockRelease(&my_wait_event_timing->lock);
 
 		/* 10046-style per-session trace ring buffer (DSA-backed) */
 		if (unlikely(wait_event_trace && my_wait_event_trace != NULL))
@@ -558,6 +757,10 @@ pgstat_report_wait_end_timing(void)
  * SQL function: pg_stat_get_wait_event_timing(OUT ...)
  *
  * Returns one row per (backend_id, wait_event) with non-zero counts.
+ *
+ * Uses InitMaterializedSRF (materialize-all) for simplicity.  The result
+ * set is bounded by (NUM_WAIT_EVENT_TIMING_SLOTS * WAIT_EVENT_TIMING_NUM_EVENTS)
+ * rows, so deferred (value-per-call) mode is not needed.
  */
 Datum
 pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
@@ -708,204 +911,26 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 }
 
 /*
- * SQL function: pg_stat_get_wait_event_timing_by_query(OUT ...)
- *
- * Returns one row per (backend_id, query_id, wait_event) with non-zero counts.
- */
-/*
- * Local hash entry for trace-ring-based query attribution.
- * Keyed by (query_id, event), accumulated at read time.
- */
-typedef struct QueryAttrKey
-{
-	int64		query_id;
-	uint32		event;
-	uint8		phase;			/* 0 = plan, 1 = exec */
-} QueryAttrKey;
-
-typedef struct QueryAttrEntry
-{
-	QueryAttrKey key;
-	int64		count;
-	int64		total_ns;
-	char		status;			/* for simplehash */
-} QueryAttrEntry;
-
-#define SH_PREFIX		queryattr
-#define SH_ELEMENT_TYPE	QueryAttrEntry
-#define SH_KEY_TYPE		QueryAttrKey
-#define SH_KEY			key
-#define SH_HASH_KEY(tb, key) \
-	((uint32)((uint64)(key).query_id * 0x9e3779b97f4a7c15ULL) ^ (key).event ^ ((uint32)(key).phase << 16))
-#define SH_EQUAL(tb, a, b) \
-	((a).query_id == (b).query_id && (a).event == (b).event && (a).phase == (b).phase)
-#define SH_SCOPE		static inline
-#define SH_DECLARE
-#define SH_DEFINE
-#include "lib/simplehash.h"
-
-Datum
-pg_stat_get_wait_event_timing_by_query(PG_FUNCTION_ARGS)
-{
-	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	int			backend_idx;
-
-	InitMaterializedSRF(fcinfo, 0);
-
-	if (WaitEventTraceCtl == NULL)
-		PG_RETURN_VOID();
-
-	for (backend_idx = 0; backend_idx < NUM_WAIT_EVENT_TIMING_SLOTS; backend_idx++)
-	{
-		WaitEventTraceState *ts;
-		PgBackendStatus *beentry;
-		queryattr_hash *ht;
-		uint64		write_pos;
-		uint64		read_start;
-		uint64		i;
-		int64		current_qid = 0;
-		uint8		current_phase = 0;	/* 0=plan, 1=exec */
-		queryattr_iterator iter;
-		QueryAttrEntry *entry;
-
-		/* Skip dead backend slots and check permissions */
-		beentry = pgstat_get_beentry_by_proc_number(backend_idx);
-		if (beentry == NULL)
-			continue;
-		if (!HAS_PGSTAT_PERMISSIONS(beentry->st_userid))
-			continue;
-
-		/* Skip backends without trace ring */
-		if (!DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[backend_idx]))
-			continue;
-
-		wait_event_trace_ensure_dsa();
-		ts = dsa_get_address(trace_dsa,
-							 WaitEventTraceCtl->trace_ptrs[backend_idx]);
-
-		write_pos = pg_atomic_read_u64(&ts->write_pos);
-		if (write_pos == 0)
-			continue;
-
-		read_start = (write_pos > WAIT_EVENT_TRACE_RING_SIZE)
-			? write_pos - WAIT_EVENT_TRACE_RING_SIZE : 0;
-
-		/* Build local hash from trace ring */
-		ht = queryattr_create(CurrentMemoryContext, 256, NULL);
-
-		for (i = read_start; i < write_pos; i++)
-		{
-			WaitEventTraceRecord *rec =
-				&ts->records[i & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
-			uint32		seq_before, seq_after;
-			uint8		rtype;
-			uint32		evt;
-			int64		dur_ns;
-			int64		qid;
-			bool		found;
-
-			seq_before = rec->seq;
-			pg_read_barrier();
-			if (seq_before & 1)
-				continue;
-
-			rtype = rec->record_type;
-			if (rtype == TRACE_WAIT_EVENT)
-			{
-				evt = rec->data.wait.event;
-				dur_ns = rec->data.wait.duration_ns;
-			}
-			else
-			{
-				qid = rec->data.query.query_id;
-			}
-
-			pg_read_barrier();
-			seq_after = rec->seq;
-			if (seq_before != seq_after)
-				continue;
-
-			if (rtype == TRACE_QUERY_START)
-			{
-				current_qid = qid;
-				current_phase = 0;	/* planning */
-			}
-			else if (rtype == TRACE_EXEC_START)
-			{
-				current_phase = 1;	/* execution */
-			}
-			else if (rtype == TRACE_QUERY_END)
-			{
-				current_qid = 0;
-				current_phase = 0;
-			}
-			else if (rtype == TRACE_WAIT_EVENT && current_qid != 0 && evt != 0)
-			{
-				QueryAttrKey k;
-				QueryAttrEntry *e;
-
-				k.query_id = current_qid;
-				k.event = evt;
-				k.phase = current_phase;
-				e = queryattr_insert(ht, k, &found);
-				if (!found)
-				{
-					e->count = 0;
-					e->total_ns = 0;
-				}
-				e->count++;
-				e->total_ns += dur_ns;
-			}
-		}
-
-		/* Emit rows from local hash */
-		queryattr_start_iterate(ht, &iter);
-		while ((entry = queryattr_iterate(ht, &iter)) != NULL)
-		{
-			Datum		values[9];
-			bool		nulls[9];
-			const char *event_type;
-			const char *event_name;
-
-			event_type = pgstat_get_wait_event_type(entry->key.event);
-			event_name = pgstat_get_wait_event(entry->key.event);
-			if (event_type == NULL || event_name == NULL)
-				continue;
-
-			memset(nulls, 0, sizeof(nulls));
-
-			values[0] = Int32GetDatum(beentry->st_procpid);
-			values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
-			values[2] = Int32GetDatum(backend_idx + 1);
-			values[3] = Int64GetDatum(entry->key.query_id);
-			values[4] = CStringGetTextDatum(entry->key.phase == 0 ? "plan" : "exec");
-			values[5] = CStringGetTextDatum(event_type);
-			values[6] = CStringGetTextDatum(event_name);
-			values[7] = Int64GetDatum(entry->count);
-			values[8] = Float8GetDatum((double) entry->total_ns / 1000000.0);
-
-			tuplestore_putvalues(rsinfo->setResult,
-								rsinfo->setDesc,
-								values, nulls);
-		}
-
-		queryattr_destroy(ht);
-	}
-
-	PG_RETURN_VOID();
-}
-
-/*
  * SQL function: pg_stat_get_wait_event_trace(backend_id int4)
  *
- * Returns trace records from a backend's ring buffer in chronological order.
- * Pass NULL or 0 for own backend.
+ * Returns trace records from the current backend's own ring buffer.
+ * The backend_id argument is accepted for forward compatibility but
+ * ignored -- always reads own session.  A backend cannot exit while
+ * running its own query, so no DSA lifetime issue exists.
+ *
+ * Cross-backend ring reading is the responsibility of external consumers
+ * (background workers, extensions) that manage their own synchronization
+ * via WaitEventTraceCtl->lock.
+ *
+ * Uses InitMaterializedSRF (materialize-all).  The ring holds up to
+ * WAIT_EVENT_TRACE_RING_SIZE (131072) records; full materialization is
+ * acceptable for own-session diagnostics.  A max_records parameter can
+ * be added in a future iteration without ABI break.
  */
 Datum
 pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	int			backend_idx;
 	WaitEventTraceState *ts;
 	uint64		write_pos;
 	uint64		read_start;
@@ -913,47 +938,11 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	if (WaitEventTraceCtl == NULL)
+	/* Always read own backend's ring -- ignore backend_id argument */
+	if (my_wait_event_trace == NULL)
 		PG_RETURN_VOID();
 
-	/* Determine which backend to read */
-	if (PG_ARGISNULL(0) || PG_GETARG_INT32(0) <= 0)
-	{
-		/* Own backend */
-		if (my_wait_event_trace == NULL)
-			PG_RETURN_VOID();
-		backend_idx = my_trace_proc_number;
-	}
-	else
-	{
-		backend_idx = PG_GETARG_INT32(0) - 1;	/* 1-based to 0-based */
-	}
-
-	if (backend_idx < 0 || backend_idx >= NUM_WAIT_EVENT_TIMING_SLOTS)
-		PG_RETURN_VOID();
-
-	/* Permission check: only own backend or privileged roles */
-	if (backend_idx != my_trace_proc_number)
-	{
-		PgBackendStatus *beentry;
-
-		beentry = pgstat_get_beentry_by_proc_number(backend_idx);
-		if (beentry == NULL)
-			PG_RETURN_VOID();
-		if (!HAS_PGSTAT_PERMISSIONS(beentry->st_userid))
-			ereport(ERROR,
-					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("permission denied to read wait event trace for backend %d",
-							backend_idx + 1)));
-	}
-
-	if (!DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[backend_idx]))
-		PG_RETURN_VOID();
-
-	/* Attach to DSA if needed and resolve the pointer */
-	wait_event_trace_ensure_dsa();
-	ts = dsa_get_address(trace_dsa,
-						 WaitEventTraceCtl->trace_ptrs[backend_idx]);
+	ts = my_wait_event_trace;
 
 	write_pos = pg_atomic_read_u64(&ts->write_pos);
 
@@ -997,7 +986,7 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 			query_id = 0;
 		}
 		else if (rtype == TRACE_QUERY_START || rtype == TRACE_QUERY_END ||
-				 rtype == TRACE_EXEC_START)
+				 rtype == TRACE_EXEC_START || rtype == TRACE_EXEC_END)
 		{
 			event_info = 0;
 			duration_ns = 0;
@@ -1033,6 +1022,11 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 		{
 			event_type = "Query";
 			event_name = "ExecStart";
+		}
+		else if (rtype == TRACE_EXEC_END)
+		{
+			event_type = "Query";
+			event_name = "ExecEnd";
 		}
 		else
 		{
@@ -1075,14 +1069,16 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 
 	if (PG_ARGISNULL(0) || PG_GETARG_INT32(0) == 0)
 	{
-		/* Reset own backend -- no privilege check needed */
+		/* Reset own backend -- LW_EXCLUSIVE to synchronize with readers */
 		if (my_wait_event_timing != NULL)
 		{
+			LWLockAcquire(&my_wait_event_timing->lock, LW_EXCLUSIVE);
 			memset(my_wait_event_timing->events, 0,
 				   sizeof(my_wait_event_timing->events));
 			memset(&my_wait_event_timing->lwlock_hash, 0,
 				   sizeof(LWLockTimingHash));
 			my_wait_event_timing->reset_count++;
+			LWLockRelease(&my_wait_event_timing->lock);
 		}
 	}
 	else
@@ -1100,11 +1096,13 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 			/* Reset all backends */
 			for (int i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
 			{
+				LWLockAcquire(&WaitEventTimingArray[i].lock, LW_EXCLUSIVE);
 				memset(WaitEventTimingArray[i].events, 0,
 					   sizeof(WaitEventTimingArray[i].events));
 				memset(&WaitEventTimingArray[i].lwlock_hash, 0,
 					   sizeof(LWLockTimingHash));
 				WaitEventTimingArray[i].reset_count++;
+				LWLockRelease(&WaitEventTimingArray[i].lock);
 			}
 		}
 		else
@@ -1116,11 +1114,13 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("invalid backend_id: %d", target)));
 
+			LWLockAcquire(&WaitEventTimingArray[idx].lock, LW_EXCLUSIVE);
 			memset(WaitEventTimingArray[idx].events, 0,
 				   sizeof(WaitEventTimingArray[idx].events));
 			memset(&WaitEventTimingArray[idx].lwlock_hash, 0,
 				   sizeof(LWLockTimingHash));
 			WaitEventTimingArray[idx].reset_count++;
+			LWLockRelease(&WaitEventTimingArray[idx].lock);
 		}
 	}
 

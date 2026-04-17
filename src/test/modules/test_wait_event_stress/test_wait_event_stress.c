@@ -2,6 +2,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "pgstat.h"
+#include "storage/lwlock.h"
 #include "utils/wait_event.h"
 #include "utils/wait_event_types.h"
 #include "utils/timestamp.h"
@@ -51,4 +52,53 @@ stress_wait_events(PG_FUNCTION_ARGS)
 	INSTR_TIME_SET_CURRENT(end);
 
 	PG_RETURN_INT64(INSTR_TIME_GET_MICROSEC(end) - INSTR_TIME_GET_MICROSEC(start));
+}
+
+/*
+ * test_lwlock_hash_overflow(n_tranches int) -> int
+ *
+ * Registers n_tranches custom LWLock tranches and triggers a
+ * pgstat_report_wait_start()/pgstat_report_wait_end() cycle on each.
+ * Returns the number of tranches that were triggered.
+ *
+ * With n_tranches > LWLOCK_TIMING_MAX_ENTRIES (192), this exercises the
+ * hash overflow path and verifies the one-time WARNING fires.
+ *
+ * Usage:
+ *   SET wait_event_timing = on;
+ *   SET client_min_messages = warning;
+ *   SELECT test_lwlock_hash_overflow(200);
+ *   -- expect WARNING about LWLock hash table full
+ */
+PG_FUNCTION_INFO_V1(test_lwlock_hash_overflow);
+
+Datum
+test_lwlock_hash_overflow(PG_FUNCTION_ARGS)
+{
+	int32		n_tranches = PG_GETARG_INT32(0);
+	int			i;
+	char		name[64];
+
+	if (n_tranches < 0 || n_tranches > 1000)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("n_tranches must be between 0 and 1000")));
+
+	for (i = 0; i < n_tranches; i++)
+	{
+		int		tranche_id;
+		uint32	event;
+
+		tranche_id = LWLockNewTrancheId();
+		snprintf(name, sizeof(name), "test_lwlock_overflow_%d", i);
+		LWLockRegisterTranche(tranche_id, name);
+
+		/* Construct wait_event_info: PG_WAIT_LWLOCK | tranche_id */
+		event = PG_WAIT_LWLOCK | (uint32) tranche_id;
+
+		pgstat_report_wait_start(event);
+		pgstat_report_wait_end();
+	}
+
+	PG_RETURN_INT32(n_tranches);
 }

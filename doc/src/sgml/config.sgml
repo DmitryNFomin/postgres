@@ -8917,7 +8917,12 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         Enables per-session recording of individual wait events into a
         ring buffer.  Each record captures the event type, duration, and
         timestamp.  Requires <varname>wait_event_timing</varname> to be
-        enabled.  Results are visible in the
+        enabled.  Query attribution via <literal>QUERY_START</literal> and
+        <literal>QUERY_END</literal> trace markers requires
+        <xref linkend="guc-track-activities"/> to be enabled; when
+        <varname>track_activities</varname> is off, query markers are
+        not emitted and per-query attribution is unavailable.
+        Results are visible in the
         <link linkend="monitoring-pg-stat-wait-event-trace-view">
         <structname>pg_stat_wait_event_trace</structname></link> view.
         The ring buffer is allocated lazily from a DSA segment when

@@ -2,3 +2,8 @@ CREATE FUNCTION stress_wait_events(integer)
 RETURNS bigint
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT;
+
+CREATE FUNCTION test_lwlock_hash_overflow(integer)
+RETURNS integer
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT;

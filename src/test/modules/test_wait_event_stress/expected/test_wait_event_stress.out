@@ -1,0 +1,30 @@
+CREATE EXTENSION test_wait_event_stress;
+-- Basic stress test: verify function works
+SELECT stress_wait_events(100) > 0 AS stress_ok;
+ stress_ok 
+-----------
+ t
+(1 row)
+
+-- LWLock hash overflow test: register 200 tranches (> 192 limit)
+-- This should trigger a WARNING about hash table being full
+SET wait_event_timing = on;
+SET client_min_messages = warning;
+SELECT test_lwlock_hash_overflow(200);
+WARNING:  wait_event_timing: LWLock hash table full, timing data for some LWLock tranches will be lost
+HINT:  This backend uses more than 192 distinct LWLock tranches.
+ test_lwlock_hash_overflow 
+---------------------------
+                       200
+(1 row)
+
+RESET client_min_messages;
+-- Verify the function returns the count
+SELECT test_lwlock_hash_overflow(10);
+ test_lwlock_hash_overflow 
+---------------------------
+                        10
+(1 row)
+
+RESET wait_event_timing;
+DROP EXTENSION test_wait_event_stress;
