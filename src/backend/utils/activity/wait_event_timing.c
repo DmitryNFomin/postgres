@@ -197,7 +197,7 @@ static WaitEventTimingState *WaitEventTimingArray = NULL;
 /* DSA-based trace ring buffer control */
 static WaitEventTraceControl *WaitEventTraceCtl = NULL;
 static dsa_area *trace_dsa = NULL;
-static int	my_trace_proc_number = -1;
+int			my_trace_proc_number = -1;
 
 /*
  * Mapping arrays for the flat events[] array, generated from
@@ -642,7 +642,11 @@ pgstat_reset_wait_event_timing_storage(void)
 	 */
 	if (my_wait_event_timing != NULL)
 	{
-		LWLockAcquire(&my_wait_event_timing->lock, LW_EXCLUSIVE);
+		/*
+		 * No lock needed: single writer (this backend) is exiting.  The
+		 * SRF reader is lock-free and tolerates partial/stale reads during
+		 * backend exit via pgstat_get_beentry_by_proc_number() filtering.
+		 */
 		memset(my_wait_event_timing->events, 0,
 			   sizeof(my_wait_event_timing->events));
 		memset(&my_wait_event_timing->lwlock_hash, 0,
@@ -652,7 +656,6 @@ pgstat_reset_wait_event_timing_storage(void)
 		my_wait_event_timing->flat_overflow_count = 0;
 		my_wait_event_timing->current_event = 0;
 		INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
-		LWLockRelease(&my_wait_event_timing->lock);
 	}
 
 	/* Trace ring buffer: cleanup via before_shmem_exit callback (Fix #1) */
@@ -690,9 +693,21 @@ pgstat_report_wait_end_timing(void)
 
 		idx = wait_event_timing_index(event);
 
-		LWLockAcquire(&my_wait_event_timing->lock, LW_SHARED);
+		/*
+		 * No lock needed on the hot path: each WaitEventTimingState slot
+		 * has a single writer (the owning backend), and the SRF reader
+		 * pg_stat_get_wait_event_timing() is lock-free by design.  Cross-
+		 * backend reset (target != NULL) is handled separately; see the
+		 * comment in pg_stat_reset_wait_event_timing().
+		 *
+		 * We defer emitting the overflow WARNING to after the critical
+		 * bookkeeping is complete, so ereport() cannot recurse through
+		 * a wait event while counters are in an intermediate state.
+		 */
 		{
 			WaitEventTimingEntry *entry = NULL;
+			bool		warn_lwlock_overflow = false;
+			bool		warn_flat_overflow = false;
 
 			if (idx == WAIT_EVENT_TIMING_IDX_LWLOCK)
 				entry = lwlock_timing_lookup(
@@ -712,21 +727,26 @@ pgstat_report_wait_end_timing(void)
 			else if (idx == WAIT_EVENT_TIMING_IDX_LWLOCK)
 			{
 				if (my_wait_event_timing->lwlock_overflow_count++ == 0)
-					ereport(WARNING,
-							(errmsg("wait_event_timing: LWLock hash table full, "
-									"timing data for some LWLock tranches will be lost"),
-							 errhint("This backend uses more than %d distinct LWLock tranches.",
-									 LWLOCK_TIMING_MAX_ENTRIES)));
+					warn_lwlock_overflow = true;
 			}
 			else if (idx == -1)
 			{
 				if (my_wait_event_timing->flat_overflow_count++ == 0)
-					ereport(WARNING,
-							(errmsg("wait_event_timing: event class overflow, "
-									"some events will not be timed")));
+					warn_flat_overflow = true;
 			}
+
+			/* Emit overflow warnings outside any critical section. */
+			if (unlikely(warn_lwlock_overflow))
+				ereport(WARNING,
+						(errmsg("wait_event_timing: LWLock hash table full, "
+								"timing data for some LWLock tranches will be lost"),
+						 errhint("This backend uses more than %d distinct LWLock tranches.",
+								 LWLOCK_TIMING_MAX_ENTRIES)));
+			else if (unlikely(warn_flat_overflow))
+				ereport(WARNING,
+						(errmsg("wait_event_timing: event class overflow, "
+								"some events will not be timed")));
 		}
-		LWLockRelease(&my_wait_event_timing->lock);
 
 		/* 10046-style per-session trace ring buffer (DSA-backed) */
 		if (unlikely(wait_event_trace && my_wait_event_trace != NULL))
@@ -938,7 +958,24 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	/* Always read own backend's ring -- ignore backend_id argument */
+	/*
+	 * Validate the backend_id argument.  We currently only support reading
+	 * our own backend's ring (cross-session reads require external
+	 * synchronization by an extension/background worker).  Accept NULL, 0,
+	 * or our own backend id; return empty for any other value to preserve
+	 * the public contract that pg_stat_get_wait_event_trace(invalid) is
+	 * empty rather than accidentally exposing our own trace.
+	 */
+	if (!PG_ARGISNULL(0))
+	{
+		int32		target = PG_GETARG_INT32(0);
+
+		if (target != 0 &&
+			(my_trace_proc_number < 0 ||
+			 target != my_trace_proc_number + 1))
+			PG_RETURN_VOID();
+	}
+
 	if (my_wait_event_trace == NULL)
 		PG_RETURN_VOID();
 
@@ -1069,16 +1106,19 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 
 	if (PG_ARGISNULL(0) || PG_GETARG_INT32(0) == 0)
 	{
-		/* Reset own backend -- LW_EXCLUSIVE to synchronize with readers */
+		/*
+		 * Reset own backend.  No LWLock needed: only this backend writes
+		 * to its own slot (from pgstat_report_wait_end_timing) and from
+		 * this function, and we are synchronous.  The reader
+		 * pg_stat_get_wait_event_timing() is lock-free by design.
+		 */
 		if (my_wait_event_timing != NULL)
 		{
-			LWLockAcquire(&my_wait_event_timing->lock, LW_EXCLUSIVE);
 			memset(my_wait_event_timing->events, 0,
 				   sizeof(my_wait_event_timing->events));
 			memset(&my_wait_event_timing->lwlock_hash, 0,
 				   sizeof(LWLockTimingHash));
 			my_wait_event_timing->reset_count++;
-			LWLockRelease(&my_wait_event_timing->lock);
 		}
 	}
 	else

@@ -94,11 +94,19 @@ FROM pg_stat_wait_event_trace;
 SET wait_event_trace = off;
 
 -- Test auxiliary process timing: verify background processes have
--- accumulated wait events (requires wait_event_timing = on)
+-- accumulated wait events.  This requires wait_event_timing to be enabled
+-- cluster-wide, not just in the current session, so we push it through
+-- ALTER SYSTEM + pg_reload_conf() and give the aux processes time to
+-- refresh their GUCs and perform at least one instrumented wait.
+ALTER SYSTEM SET wait_event_timing = on;
+SELECT pg_reload_conf();
+SELECT pg_sleep(0.5);
 SELECT count(*) > 0 AS aux_timing_ok
 FROM pg_stat_wait_event_timing
 WHERE backend_type IN ('checkpointer', 'background writer', 'walwriter')
   AND calls > 0;
+ALTER SYSTEM RESET wait_event_timing;
+SELECT pg_reload_conf();
 
 -- Clean up
 RESET wait_event_timing;

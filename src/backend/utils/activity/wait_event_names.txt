@@ -413,6 +413,7 @@ XactSLRU	"Waiting to access the transaction status SLRU cache."
 ParallelVacuumDSA	"Waiting for parallel vacuum dynamic shared memory allocation."
 AioUringCompletion	"Waiting for another process to complete IO via io_uring."
 WaitEventTraceDSA	"Waiting for wait event trace dynamic shared memory allocation."
+WaitEventTiming	"Waiting to access per-backend wait event timing state."
 
 # No "ABI_compatibility" region here as WaitEventLWLock has its own C code.
 

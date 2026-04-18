@@ -2,7 +2,10 @@
 -- Test wait event timing infrastructure
 --
 -- These tests verify the wait event timing SQL interface.
--- They require --enable-wait-event-timing at compile time.
+-- They require --enable-wait-event-timing (or -Dwait_event_timing=true for
+-- meson) at compile time.  Without it, the alternate expected output
+-- wait_event_timing_1.out is used.  The default CI (Cirrus) runs without
+-- timing enabled, so the non-timing path is tested automatically.
 --
 -- Check GUC default
 SHOW wait_event_trace;
@@ -159,13 +162,36 @@ FROM pg_stat_wait_event_trace;
 
 SET wait_event_trace = off;
 -- Test auxiliary process timing: verify background processes have
--- accumulated wait events (requires wait_event_timing = on)
+-- accumulated wait events.  This requires wait_event_timing to be enabled
+-- cluster-wide, not just in the current session, so we push it through
+-- ALTER SYSTEM + pg_reload_conf() and give the aux processes time to
+-- refresh their GUCs and perform at least one instrumented wait.
+ALTER SYSTEM SET wait_event_timing = on;
+SELECT pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+SELECT pg_sleep(0.5);
+ pg_sleep 
+----------
+ 
+(1 row)
+
 SELECT count(*) > 0 AS aux_timing_ok
 FROM pg_stat_wait_event_timing
 WHERE backend_type IN ('checkpointer', 'background writer', 'walwriter')
   AND calls > 0;
  aux_timing_ok 
 ---------------
+ t
+(1 row)
+
+ALTER SYSTEM RESET wait_event_timing;
+SELECT pg_reload_conf();
+ pg_reload_conf 
+----------------
  t
 (1 row)
 

@@ -230,6 +230,9 @@ extern PGDLLIMPORT WaitEventTimingState *my_wait_event_timing;
 /* Pointer to this backend's trace ring buffer in shared memory */
 extern PGDLLIMPORT WaitEventTraceState *my_wait_event_trace;
 
+/* This backend's procNumber for the trace ring, or -1 if not set */
+extern PGDLLIMPORT int my_trace_proc_number;
+
 /* Shared memory setup */
 extern Size WaitEventTimingShmemSize(void);
 extern void WaitEventTimingShmemInit(void);

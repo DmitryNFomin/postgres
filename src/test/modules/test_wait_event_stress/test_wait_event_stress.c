@@ -89,9 +89,8 @@ test_lwlock_hash_overflow(PG_FUNCTION_ARGS)
 		int		tranche_id;
 		uint32	event;
 
-		tranche_id = LWLockNewTrancheId();
 		snprintf(name, sizeof(name), "test_lwlock_overflow_%d", i);
-		LWLockRegisterTranche(tranche_id, name);
+		tranche_id = LWLockNewTrancheId(name);
 
 		/* Construct wait_event_info: PG_WAIT_LWLOCK | tranche_id */
 		event = PG_WAIT_LWLOCK | (uint32) tranche_id;

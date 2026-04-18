@@ -1,7 +1,10 @@
 CREATE EXTENSION test_wait_event_stress;
 
--- Basic stress test: verify function works
-SELECT stress_wait_events(100) > 0 AS stress_ok;
+-- Basic stress test: verify function works (requires timing to be on so
+-- the instrumentation path actually executes work we can time).
+SET wait_event_timing = on;
+SELECT stress_wait_events(10000) > 0 AS stress_ok;
+RESET wait_event_timing;
 
 -- LWLock hash overflow test: register 200 tranches (> 192 limit)
 -- This should trigger a WARNING about hash table being full
