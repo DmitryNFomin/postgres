@@ -8927,7 +8927,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         <structname>pg_stat_wait_event_trace</structname></link> view.
         The ring buffer is allocated lazily from a DSA segment when
         first enabled, using approximately 4&nbsp;MB per backend.
-        Any user can change this setting for their own session.
+        Only superusers and users with the appropriate <literal>SET</literal>
+        privilege can change this setting.
        </para>
       </listitem>
      </varlistentry>

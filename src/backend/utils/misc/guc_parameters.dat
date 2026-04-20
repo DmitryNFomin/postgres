@@ -3337,7 +3337,7 @@
   check_hook => 'check_wait_event_timing',
 },
 
-{ name => 'wait_event_trace', type => 'bool', context => 'PGC_USERSET', group => 'STATS_CUMULATIVE',
+{ name => 'wait_event_trace', type => 'bool', context => 'PGC_SUSET', group => 'STATS_CUMULATIVE',
   short_desc => 'Enables per-session wait event trace recording into a ring buffer (requires wait_event_timing).',
   variable => 'wait_event_trace',
   boot_val => 'false',
