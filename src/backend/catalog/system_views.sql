@@ -1536,7 +1536,10 @@ REVOKE ALL ON pg_stat_wait_event_timing_overflow FROM PUBLIC;
 GRANT SELECT ON pg_stat_wait_event_timing_overflow TO pg_read_all_stats;
 
 
-CREATE VIEW pg_stat_wait_event_trace AS
+-- Session-local view: mirrors pg_backend_memory_contexts naming.
+-- Only the calling backend's trace ring is ever returned, regardless of
+-- the querying role, so no REVOKE is needed; the view is PUBLIC.
+CREATE VIEW pg_backend_wait_event_trace AS
     SELECT
         t.seq,
         t.timestamp_ns,
@@ -1544,6 +1547,4 @@ CREATE VIEW pg_stat_wait_event_trace AS
         t.wait_event,
         t.duration_us,
         t.query_id
-    FROM pg_stat_get_wait_event_trace() t;
-REVOKE ALL ON pg_stat_wait_event_trace FROM PUBLIC;
-GRANT SELECT ON pg_stat_wait_event_trace TO pg_read_all_stats;
+    FROM pg_get_backend_wait_event_trace() t;

@@ -8912,8 +8912,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         At <literal>trace</literal>, the server additionally records every
         individual wait event into a per-session ring buffer (~4&nbsp;MB of
         DSA per backend, allocated lazily on first enable), exposed via the
-        <link linkend="monitoring-pg-stat-wait-event-trace-view">
-        <structname>pg_stat_wait_event_trace</structname></link> view.
+        <link linkend="monitoring-pg-backend-wait-event-trace-view">
+        <structname>pg_backend_wait_event_trace</structname></link> view.
         Query attribution via <literal>QUERY_START</literal>/<literal>QUERY_END</literal>
         markers requires <xref linkend="guc-track-activities"/> to be
         enabled; when <varname>track_activities</varname> is off, query

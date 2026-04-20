@@ -16,7 +16,7 @@ SET wait_event_capture = stats;
 
 -- Verify views exist (zero rows is fine, just checking structure)
 SELECT * FROM pg_stat_wait_event_timing LIMIT 0;
-SELECT * FROM pg_stat_wait_event_trace LIMIT 0;
+SELECT * FROM pg_backend_wait_event_trace LIMIT 0;
 
 -- Verify column types of timing view
 SELECT
@@ -66,12 +66,12 @@ SELECT
     wait_event,
     duration_us >= 0 AS dur_ok,
     seq >= 0 AS seq_ok
-FROM pg_stat_wait_event_trace
+FROM pg_backend_wait_event_trace
 WHERE wait_event = 'PgSleep';
 
 -- Test query markers exist in trace
 SELECT count(*) > 0 AS has_query_markers
-FROM pg_stat_wait_event_trace
+FROM pg_backend_wait_event_trace
 WHERE wait_event_type = 'Query';
 
 -- Reset does not crash
@@ -82,7 +82,7 @@ SELECT pg_stat_reset_wait_event_timing(99999);
 
 -- Trace read (no arguments; always returns own session)
 SELECT count(*) >= 0 AS trace_readable
-FROM pg_stat_get_wait_event_trace();
+FROM pg_get_backend_wait_event_trace();
 
 -- Test trace lifecycle: drop to stats, then back up to trace
 SET compute_query_id = on;
@@ -90,7 +90,7 @@ SET wait_event_capture = stats;
 SET wait_event_capture = trace;
 SELECT 1 AS reattach_test;
 SELECT count(*) >= 0 AS trace_reattach_ok
-FROM pg_stat_wait_event_trace;
+FROM pg_backend_wait_event_trace;
 SET wait_event_capture = stats;
 
 -- Overflow counters view: should be readable and overflow counts should

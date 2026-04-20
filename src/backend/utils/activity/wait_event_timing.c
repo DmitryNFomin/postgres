@@ -62,7 +62,7 @@ StaticAssertDecl(lengthof(wait_event_capture_options) == (WAIT_EVENT_CAPTURE_TRA
 #include "utils/guc_hooks.h"
 
 Datum		pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS);
-Datum		pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS);
+Datum		pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS);
 Datum		pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS);
 Datum		pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS);
 
@@ -74,7 +74,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 }
 
 Datum
-pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
+pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
 {
 	InitMaterializedSRF(fcinfo, 0);
 	PG_RETURN_VOID();
@@ -1078,7 +1078,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 }
 
 /*
- * SQL function: pg_stat_get_wait_event_trace()
+ * SQL function: pg_get_backend_wait_event_trace()
  *
  * Returns trace records from the current backend's own ring buffer.
  * Cross-backend ring reading is intentionally not supported: the ring
@@ -1086,14 +1086,16 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
  * require attaching/detaching under the trace control lock, which is
  * the responsibility of external consumers (extensions, background
  * workers) that can manage their own synchronization via
- * WaitEventTraceCtl->lock.
+ * WaitEventTraceCtl->lock.  The name mirrors
+ * pg_get_backend_memory_contexts() to make the session-local scope
+ * explicit at the API level.
  *
  * Uses InitMaterializedSRF (materialize-all).  The ring holds up to
  * WAIT_EVENT_TRACE_RING_SIZE (131072) records; full materialization is
  * acceptable for own-session diagnostics.
  */
 Datum
-pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
+pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	WaitEventTraceState *ts;

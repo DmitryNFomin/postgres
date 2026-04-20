@@ -148,7 +148,7 @@ typedef struct WaitEventTimingState
  * Per-session wait event trace ring buffer (10046-style).
  * When wait_event_trace GUC is on for a session, every wait_end writes
  * a record to a per-backend ring buffer.  External tools read the buffer
- * via pg_stat_get_wait_event_trace().
+ * via pg_get_backend_wait_event_trace().
  *
  * Query attribution is done by scanning the ring at read time: QUERY_START
  * and QUERY_END markers delimit which wait events belong to which query_id.
@@ -245,7 +245,7 @@ typedef struct WaitEventTraceControl
  *           around every wait.
  *   TRACE - Everything in STATS plus a per-session ring buffer of
  *           individual events and query markers, exposed via
- *           pg_stat_wait_event_trace.  Adds ~4 MB DSA per session.
+ *           pg_backend_wait_event_trace.  Adds ~4 MB DSA per session.
  */
 typedef enum WaitEventCaptureLevel
 {

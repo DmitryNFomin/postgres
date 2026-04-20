@@ -22,7 +22,7 @@ SELECT * FROM pg_stat_wait_event_timing LIMIT 0;
 -----+--------------+------------+-----------------+------------+-------+---------------+-------------+-------------+-----------
 (0 rows)
 
-SELECT * FROM pg_stat_wait_event_trace LIMIT 0;
+SELECT * FROM pg_backend_wait_event_trace LIMIT 0;
  seq | timestamp_ns | wait_event_type | wait_event | duration_us | query_id 
 -----+--------------+-----------------+------------+-------------+----------
 (0 rows)
@@ -109,7 +109,7 @@ SELECT
     wait_event,
     duration_us >= 0 AS dur_ok,
     seq >= 0 AS seq_ok
-FROM pg_stat_wait_event_trace
+FROM pg_backend_wait_event_trace
 WHERE wait_event = 'PgSleep';
  wait_event_type | wait_event | dur_ok | seq_ok 
 -----------------+------------+--------+--------
@@ -118,7 +118,7 @@ WHERE wait_event = 'PgSleep';
 
 -- Test query markers exist in trace
 SELECT count(*) > 0 AS has_query_markers
-FROM pg_stat_wait_event_trace
+FROM pg_backend_wait_event_trace
 WHERE wait_event_type = 'Query';
  has_query_markers 
 -------------------
@@ -137,7 +137,7 @@ SELECT pg_stat_reset_wait_event_timing(99999);
 ERROR:  invalid backend_id: 99999
 -- Trace read (no arguments; always returns own session)
 SELECT count(*) >= 0 AS trace_readable
-FROM pg_stat_get_wait_event_trace();
+FROM pg_get_backend_wait_event_trace();
  trace_readable 
 ----------------
  t
@@ -154,7 +154,7 @@ SELECT 1 AS reattach_test;
 (1 row)
 
 SELECT count(*) >= 0 AS trace_reattach_ok
-FROM pg_stat_wait_event_trace;
+FROM pg_backend_wait_event_trace;
  trace_reattach_ok 
 -------------------
  t

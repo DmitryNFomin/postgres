@@ -552,11 +552,11 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      </row>
 
      <row>
-      <entry><structname>pg_stat_wait_event_trace</structname><indexterm><primary>pg_stat_wait_event_trace</primary></indexterm></entry>
+      <entry><structname>pg_backend_wait_event_trace</structname><indexterm><primary>pg_backend_wait_event_trace</primary></indexterm></entry>
       <entry>Individual wait event records from the current backend's trace
        ring buffer.  See
-       <link linkend="monitoring-pg-stat-wait-event-trace-view">
-       <structname>pg_stat_wait_event_trace</structname></link> for details.
+       <link linkend="monitoring-pg-backend-wait-event-trace-view">
+       <structname>pg_backend_wait_event_trace</structname></link> for details.
       </entry>
      </row>
 
@@ -3829,21 +3829,27 @@ description | Waiting for a newly initialized WAL file to reach durable storage
   </table>
  </sect2>
 
- <sect2 id="monitoring-pg-stat-wait-event-trace-view">
-  <title><structname>pg_stat_wait_event_trace</structname></title>
+ <sect2 id="monitoring-pg-backend-wait-event-trace-view">
+  <title><structname>pg_backend_wait_event_trace</structname></title>
 
   <indexterm>
-   <primary>pg_stat_wait_event_trace</primary>
+   <primary>pg_backend_wait_event_trace</primary>
   </indexterm>
 
   <para>
-   The <structname>pg_stat_wait_event_trace</structname> view shows
-   individual wait event records from the current backend's trace ring
-   buffer.  Each record captures a single wait event with its timestamp
-   and duration, or a <literal>QUERY_START</literal>/<literal>QUERY_END</literal>
-   marker.  Requires <xref linkend="guc-wait-event-capture"/> to be set
-   to <literal>trace</literal>.  The ring buffer holds up to 131072
-   records; older records are overwritten in FIFO order.
+   The <structname>pg_backend_wait_event_trace</structname> view shows
+   individual wait event records from the <emphasis>current backend's</emphasis>
+   trace ring buffer.  Each record captures a single wait event with
+   its timestamp and duration, or a
+   <literal>QUERY_START</literal>/<literal>QUERY_END</literal> marker.
+   Requires <xref linkend="guc-wait-event-capture"/> to be set to
+   <literal>trace</literal>.  The ring buffer holds up to 131072 records;
+   older records are overwritten in FIFO order.  The view is session-local
+   and analogous in scope to
+   <link linkend="view-pg-backend-memory-contexts">
+   <structname>pg_backend_memory_contexts</structname></link>; querying it
+   from a superuser session still returns only that session's own
+   records, never another backend's.
   </para>
 
   <para>
@@ -3859,8 +3865,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    query context.
   </para>
 
-  <table id="pg-stat-wait-event-trace-view" xreflabel="pg_stat_wait_event_trace">
-   <title><structname>pg_stat_wait_event_trace</structname> View</title>
+  <table id="pg-backend-wait-event-trace-view" xreflabel="pg_backend_wait_event_trace">
+   <title><structname>pg_backend_wait_event_trace</structname> View</title>
    <tgroup cols="1">
     <thead>
      <row>
@@ -5812,9 +5818,9 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
-         <primary>pg_stat_get_wait_event_trace</primary>
+         <primary>pg_get_backend_wait_event_trace</primary>
         </indexterm>
-        <function>pg_stat_get_wait_event_trace</function> ()
+        <function>pg_get_backend_wait_event_trace</function> ()
         <returnvalue>setof record</returnvalue>
        </para>
        <para>
