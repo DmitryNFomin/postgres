@@ -26,6 +26,11 @@ extern void pgstat_reset_wait_event_storage(void);
 
 extern PGDLLIMPORT uint32 *my_wait_event_info;
 
+#ifdef USE_WAIT_EVENT_TIMING
+extern void pgstat_report_wait_end_timing(void);
+extern void pgstat_wait_event_timing_lazy_attach(void);
+#endif
+
 
 /*
  * Wait Events - Extension, InjectionPoint
@@ -82,11 +87,23 @@ pgstat_report_wait_start(uint32 wait_event_info)
 	*(volatile uint32 *) my_wait_event_info = wait_event_info;
 
 #ifdef USE_WAIT_EVENT_TIMING
-	if (wait_event_capture >= WAIT_EVENT_CAPTURE_STATS &&
-		likely(my_wait_event_timing != NULL))
+	if (wait_event_capture >= WAIT_EVENT_CAPTURE_STATS)
 	{
-		INSTR_TIME_SET_CURRENT(my_wait_event_timing->wait_start);
-		my_wait_event_timing->current_event = wait_event_info;
+		/*
+		 * Lazy attach: the per-backend timing slot lives in a DSA that is
+		 * created the first time any backend in the cluster enables
+		 * wait_event_capture.  After the first successful attach, the
+		 * cached pointer stays valid for the backend's lifetime, so this
+		 * branch is cold and perfectly predicted.
+		 */
+		if (unlikely(my_wait_event_timing == NULL))
+			pgstat_wait_event_timing_lazy_attach();
+
+		if (likely(my_wait_event_timing != NULL))
+		{
+			INSTR_TIME_SET_CURRENT(my_wait_event_timing->wait_start);
+			my_wait_event_timing->current_event = wait_event_info;
+		}
 	}
 #endif
 }
@@ -102,17 +119,18 @@ pgstat_report_wait_start(uint32 wait_event_info)
  *	to reduce I-cache pressure at the many call sites.
  * ----------
  */
-#ifdef USE_WAIT_EVENT_TIMING
-extern void pgstat_report_wait_end_timing(void);
-#endif
-
 static inline void
 pgstat_report_wait_end(void)
 {
 #ifdef USE_WAIT_EVENT_TIMING
-	if (wait_event_capture >= WAIT_EVENT_CAPTURE_STATS &&
-		likely(my_wait_event_timing != NULL))
-		pgstat_report_wait_end_timing();
+	if (wait_event_capture >= WAIT_EVENT_CAPTURE_STATS)
+	{
+		if (unlikely(my_wait_event_timing == NULL))
+			pgstat_wait_event_timing_lazy_attach();
+
+		if (likely(my_wait_event_timing != NULL))
+			pgstat_report_wait_end_timing();
+	}
 #endif
 
 	/* see pgstat_report_wait_start() */

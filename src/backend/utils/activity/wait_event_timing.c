@@ -214,13 +214,44 @@ WaitEventTraceState *my_wait_event_trace = NULL;
  */
 static uint32 my_last_reset_generation = 0;
 
-/* Shared memory base pointers */
+/*
+ * DSA-based shared timing array control.
+ *
+ * The per-backend WaitEventTimingState array is allocated lazily in DSA
+ * on the first SET wait_event_capture = stats|trace in the cluster.
+ * This avoids ~11-113 MB of eager shmem allocation at postmaster start
+ * when the feature is compiled in but turned off at runtime (the common
+ * case).  See wait_event_timing_attach_array().
+ *
+ * The control struct itself lives in the small fixed shmem region; it
+ * holds a DSA handle and a dsa_pointer to the allocated array.
+ */
+typedef struct WaitEventTimingControl
+{
+	LWLock		lock;			/* protects first-time DSA create + array alloc */
+	dsa_handle	timing_dsa_handle;	/* DSA_HANDLE_INVALID until first enable */
+	dsa_pointer timing_array;	/* InvalidDsaPointer until first enable */
+} WaitEventTimingControl;
+
+static WaitEventTimingControl *WaitEventTimingCtl = NULL;
+static dsa_area *timing_dsa = NULL;
+
+/*
+ * Backend-local cached pointer to the shared array, set on first
+ * lazy-attach.  Readers of other backends' slots (pg_stat_*) attach
+ * on demand and use this cache for the rest of the SRF call.  Writers
+ * access their own slot exclusively via my_wait_event_timing.
+ */
 static WaitEventTimingState *WaitEventTimingArray = NULL;
 
 /* DSA-based trace ring buffer control */
 static WaitEventTraceControl *WaitEventTraceCtl = NULL;
 static dsa_area *trace_dsa = NULL;
 int			my_trace_proc_number = -1;
+
+/* Forward declarations for lazy-attach helpers */
+static void wait_event_timing_ensure_dsa(void);
+static bool wait_event_timing_attach_array(bool allocate_if_missing);
 
 /*
  * Mapping arrays for the flat events[] array, generated from
@@ -392,34 +423,226 @@ wait_event_trace_exec_end(int64 query_id)
 
 /*
  * Report the shared memory space needed.
+ *
+ * Only the small control struct is in fixed shmem.  The per-backend
+ * WaitEventTimingState array (~11-113 MB depending on max_connections)
+ * is allocated lazily in DSA on first enable by any backend.
  */
 Size
 WaitEventTimingShmemSize(void)
 {
-	return mul_size(NUM_WAIT_EVENT_TIMING_SLOTS, sizeof(WaitEventTimingState));
+	return sizeof(WaitEventTimingControl);
 }
 
 /*
  * Initialize shared memory for wait event timing.
+ *
+ * Only a small control struct is created here.  The actual per-backend
+ * timing array is allocated via DSA the first time a backend sets
+ * wait_event_capture to a non-OFF value (see wait_event_timing_attach_array).
  */
 void
 WaitEventTimingShmemInit(void)
 {
 	bool		found;
-	Size		size;
 
-	size = WaitEventTimingShmemSize();
-
-	WaitEventTimingArray = (WaitEventTimingState *)
-		ShmemInitStruct("WaitEventTimingArray", size, &found);
+	WaitEventTimingCtl = (WaitEventTimingControl *)
+		ShmemInitStruct("WaitEventTimingControl",
+						sizeof(WaitEventTimingControl), &found);
 
 	if (!found)
 	{
-		memset(WaitEventTimingArray, 0, size);
-
-		for (int i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
-			pg_atomic_init_u32(&WaitEventTimingArray[i].reset_generation, 0);
+		LWLockInitialize(&WaitEventTimingCtl->lock,
+						 LWTRANCHE_WAIT_EVENT_TIMING_DSA);
+		WaitEventTimingCtl->timing_dsa_handle = DSA_HANDLE_INVALID;
+		WaitEventTimingCtl->timing_array = InvalidDsaPointer;
 	}
+
+	WaitEventTimingArray = NULL;
+}
+
+/*
+ * Ensure the backend is attached to the timing DSA.
+ *
+ * The DSA is created by whichever backend first hits this function with
+ * an empty control struct; subsequent callers just attach to the
+ * existing handle.  The backend-local dsa_area pointer is cached in
+ * timing_dsa for the backend's lifetime.
+ */
+static void
+wait_event_timing_ensure_dsa(void)
+{
+	MemoryContext oldcontext;
+
+	if (timing_dsa != NULL)
+		return;
+
+	if (WaitEventTimingCtl == NULL)
+		return;					/* pre-ShmemInit; nothing to attach to */
+
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+	LWLockAcquire(&WaitEventTimingCtl->lock, LW_EXCLUSIVE);
+
+	if (WaitEventTimingCtl->timing_dsa_handle == DSA_HANDLE_INVALID)
+	{
+		timing_dsa = dsa_create(LWTRANCHE_WAIT_EVENT_TIMING_DSA);
+		dsa_pin(timing_dsa);
+		dsa_pin_mapping(timing_dsa);
+		WaitEventTimingCtl->timing_dsa_handle = dsa_get_handle(timing_dsa);
+	}
+	else
+	{
+		timing_dsa = dsa_attach(WaitEventTimingCtl->timing_dsa_handle);
+		dsa_pin_mapping(timing_dsa);
+	}
+
+	LWLockRelease(&WaitEventTimingCtl->lock);
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+/*
+ * Attach this backend to the shared WaitEventTimingArray, allocating
+ * it in DSA on first use if allocate_if_missing is true.
+ *
+ * Returns true if the array is now available (WaitEventTimingArray is
+ * non-NULL on return); false otherwise.  Readers pass allocate_if_missing
+ * = false to avoid allocating a big array just because somebody ran
+ * SELECT against an empty pg_stat view.  Writers (hot path) pass true
+ * so that the first wait event under wait_event_capture != off creates
+ * the storage.
+ *
+ * Re-entrancy guard: dsa_create() / dsa_allocate_extended() below can
+ * emit LWLock wait events internally, which reach the hot path and
+ * re-enter this function.  Without the guard we would deadlock on
+ * WaitEventTimingCtl->lock.
+ */
+static bool
+wait_event_timing_attach_array(bool allocate_if_missing)
+{
+	static bool in_attach = false;
+	bool		attached = false;
+
+	if (WaitEventTimingArray != NULL)
+		return true;
+
+	if (WaitEventTimingCtl == NULL)
+		return false;
+
+	if (in_attach)
+		return false;
+
+	in_attach = true;
+	PG_TRY();
+	{
+		wait_event_timing_ensure_dsa();
+
+		if (WaitEventTimingCtl->timing_array == InvalidDsaPointer)
+		{
+			if (!allocate_if_missing)
+			{
+				attached = false;
+			}
+			else
+			{
+				Size		size;
+
+				size = mul_size(NUM_WAIT_EVENT_TIMING_SLOTS,
+								sizeof(WaitEventTimingState));
+
+				LWLockAcquire(&WaitEventTimingCtl->lock, LW_EXCLUSIVE);
+
+				if (WaitEventTimingCtl->timing_array == InvalidDsaPointer)
+				{
+					dsa_pointer p;
+					WaitEventTimingState *array;
+
+					p = dsa_allocate_extended(timing_dsa, size,
+											  DSA_ALLOC_ZERO);
+					array = (WaitEventTimingState *)
+						dsa_get_address(timing_dsa, p);
+
+					for (int i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
+						pg_atomic_init_u32(&array[i].reset_generation, 0);
+
+					WaitEventTimingCtl->timing_array = p;
+				}
+
+				LWLockRelease(&WaitEventTimingCtl->lock);
+
+				attached = true;
+			}
+		}
+		else
+		{
+			attached = true;
+		}
+
+		if (attached)
+			WaitEventTimingArray = (WaitEventTimingState *)
+				dsa_get_address(timing_dsa,
+								WaitEventTimingCtl->timing_array);
+	}
+	PG_FINALLY();
+	{
+		in_attach = false;
+	}
+	PG_END_TRY();
+
+	return WaitEventTimingArray != NULL;
+}
+
+/*
+ * Point my_wait_event_timing at this backend's slot within the shared
+ * timing array, allocating the array in DSA on first call.
+ *
+ * Called from the hot path (pgstat_report_wait_start / _end) out of line
+ * when wait_event_capture is non-OFF and my_wait_event_timing is still
+ * NULL.  Also called explicitly from the reset SQL function to provide
+ * synchronous "reset own backend" semantics immediately after SET
+ * wait_event_capture = stats.
+ */
+void
+pgstat_wait_event_timing_lazy_attach(void)
+{
+	int			procNumber;
+
+	if (my_wait_event_timing != NULL)
+		return;
+
+	if (MyProc == NULL)
+		return;
+
+	procNumber = GetNumberFromPGProc(MyProc);
+	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
+		return;
+
+	if (!wait_event_timing_attach_array(true))
+		return;
+
+	my_wait_event_timing = &WaitEventTimingArray[procNumber];
+
+	/*
+	 * Clear this backend's slot the first time it is used after backend
+	 * start.  The DSA-allocated region is zeroed on creation, but a later
+	 * backend may inherit a slot previously occupied by an exited
+	 * backend; explicit zero here keeps stats accurate across slot reuse.
+	 * Matches the old per-backend init performed by
+	 * pgstat_set_wait_event_timing_storage() in the eager-shmem design.
+	 */
+	memset(my_wait_event_timing->events, 0,
+		   sizeof(my_wait_event_timing->events));
+	memset(&my_wait_event_timing->lwlock_hash, 0,
+		   sizeof(LWLockTimingHash));
+	my_wait_event_timing->reset_count = 0;
+	my_wait_event_timing->lwlock_overflow_count = 0;
+	my_wait_event_timing->flat_overflow_count = 0;
+	my_wait_event_timing->current_event = 0;
+	INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
+
+	my_last_reset_generation =
+		pg_atomic_read_u32(&my_wait_event_timing->reset_generation);
 }
 
 /*
@@ -695,77 +918,46 @@ assign_wait_event_capture(int newval, void *extra)
 void
 pgstat_set_wait_event_timing_storage(int procNumber)
 {
-	if (WaitEventTimingArray == NULL)
-		return;
-
-	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
-	{
-		my_wait_event_timing = NULL;
-		return;
-	}
-
-	my_wait_event_timing = &WaitEventTimingArray[procNumber];
-
 	/*
-	 * Zero the stats for this new backend session.  The reset_generation
-	 * counter in the slot is deliberately NOT zeroed: it is a monotonic
-	 * cluster-wide sequence and may have been bumped by admin-issued
-	 * resets while this slot was unoccupied.  We sync our local tracker
-	 * to the current value so the first wait_end does not trigger a
-	 * redundant (already-zeroed) self-reset.
-	 */
-	memset(my_wait_event_timing->events, 0,
-		   sizeof(my_wait_event_timing->events));
-	memset(&my_wait_event_timing->lwlock_hash, 0,
-		   sizeof(LWLockTimingHash));
-	my_wait_event_timing->reset_count = 0;
-	my_wait_event_timing->lwlock_overflow_count = 0;
-	my_wait_event_timing->flat_overflow_count = 0;
-	my_wait_event_timing->current_event = 0;
-	INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
-
-	my_last_reset_generation =
-		pg_atomic_read_u32(&my_wait_event_timing->reset_generation);
-
-	/*
+	 * Do NOT attach to the timing array here: the array is allocated in
+	 * DSA on first enable of wait_event_capture (see
+	 * pgstat_wait_event_timing_lazy_attach).  A backend that never enables
+	 * capture pays zero shmem cost.
+	 *
 	 * Trace ring buffer is allocated lazily via DSA when
 	 * wait_event_capture is set to 'trace'.  Save procNumber for later
 	 * use by trace_attach/detach.
 	 */
+	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
+	{
+		my_wait_event_timing = NULL;
+		my_trace_proc_number = -1;
+		my_wait_event_trace = NULL;
+		return;
+	}
+
+	my_wait_event_timing = NULL;
 	my_trace_proc_number = procNumber;
 	my_wait_event_trace = NULL;
 }
 
 /*
  * Detach from timing state on backend exit.
+ *
+ * This function is invoked from ProcKill() as an on_shmem_exit callback,
+ * which runs AFTER dsm_backend_shutdown() has detached DSA mappings.
+ * Writing to my_wait_event_timing at this point would touch DSA-backed
+ * memory that is no longer mapped and would segfault.
+ *
+ * We therefore only clear the backend-local pointers here.  Zeroing of
+ * the shared slot itself happens in two safe places:
+ *   - the next time a backend attaches to the slot (lazy_attach memsets),
+ *   - the SRF readers filter dead backends via pgstat_get_beentry_by_proc_number,
+ * so stale data in the slot never becomes user-visible.
  */
 void
 pgstat_reset_wait_event_timing_storage(void)
 {
-	/*
-	 * Zero shared memory so stale data is not visible even at shmem level.
-	 * Reader-side filtering (Fix #2) skips dead backends via beentry==NULL,
-	 * but zeroing here handles the crash recovery case and ensures clean
-	 * state for the next backend on this slot.
-	 */
-	if (my_wait_event_timing != NULL)
-	{
-		/*
-		 * No lock needed: single writer (this backend) is exiting.  The
-		 * SRF reader is lock-free and tolerates partial/stale reads during
-		 * backend exit via pgstat_get_beentry_by_proc_number() filtering.
-		 */
-		memset(my_wait_event_timing->events, 0,
-			   sizeof(my_wait_event_timing->events));
-		memset(&my_wait_event_timing->lwlock_hash, 0,
-			   sizeof(LWLockTimingHash));
-		my_wait_event_timing->reset_count = 0;
-		my_wait_event_timing->lwlock_overflow_count = 0;
-		my_wait_event_timing->flat_overflow_count = 0;
-		my_wait_event_timing->current_event = 0;
-		INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
-	}
-
 	/* Trace ring buffer: cleanup via before_shmem_exit callback (Fix #1) */
 	if (my_trace_proc_number >= 0)
 		wait_event_trace_detach(my_trace_proc_number);
@@ -937,7 +1129,13 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	if (WaitEventTimingArray == NULL)
+	/*
+	 * If no backend has ever enabled wait_event_capture since the last
+	 * postmaster start, the shared timing array has not been allocated
+	 * yet -- return zero rows rather than forcing an allocation just for
+	 * a read.
+	 */
+	if (!wait_event_timing_attach_array(false))
 		PG_RETURN_VOID();
 
 	for (backend_idx = 0; backend_idx < NUM_WAIT_EVENT_TIMING_SLOTS; backend_idx++)
@@ -1234,6 +1432,16 @@ wait_event_timing_request_reset(int slot_idx)
 {
 	Assert(slot_idx >= 0 && slot_idx < NUM_WAIT_EVENT_TIMING_SLOTS);
 
+	/*
+	 * If no backend has ever enabled capture, the shared array does not
+	 * exist yet -- there is nothing to reset.  Attach read-only; callers
+	 * ultimately want the target backend to observe a generation bump,
+	 * so if the array isn't allocated the latch set below is also a
+	 * harmless no-op (no live backend is tracking).
+	 */
+	if (!wait_event_timing_attach_array(false))
+		return;
+
 	pg_atomic_fetch_add_u32(&WaitEventTimingArray[slot_idx].reset_generation, 1);
 
 	/*
@@ -1276,7 +1484,7 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	if (WaitEventTimingArray == NULL)
+	if (!wait_event_timing_attach_array(false))
 		PG_RETURN_VOID();
 
 	for (backend_idx = 0; backend_idx < NUM_WAIT_EVENT_TIMING_SLOTS; backend_idx++)
@@ -1341,6 +1549,9 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 		 * atomic indirection needed.  We also clear the in-flight wait
 		 * fields here because a user resetting their own session has the
 		 * clearest intent; any upcoming wait will re-initialise them.
+		 *
+		 * If capture has never been enabled in this backend yet,
+		 * my_wait_event_timing is still NULL; nothing to reset.
 		 */
 		if (my_wait_event_timing != NULL)
 		{
