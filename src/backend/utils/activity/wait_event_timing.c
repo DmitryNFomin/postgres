@@ -63,6 +63,7 @@ StaticAssertDecl(lengthof(wait_event_capture_options) == (WAIT_EVENT_CAPTURE_TRA
 
 Datum		pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS);
 Datum		pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS);
+Datum		pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS);
 Datum		pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS);
 
 Datum
@@ -74,6 +75,13 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 Datum
 pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
+{
+	InitMaterializedSRF(fcinfo, 0);
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 {
 	InitMaterializedSRF(fcinfo, 0);
 	PG_RETURN_VOID();
@@ -1238,6 +1246,63 @@ wait_event_timing_request_reset(int slot_idx)
 	 */
 	if (ProcGlobal != NULL && ProcGlobal->allProcs != NULL)
 		SetLatch(&ProcGlobal->allProcs[slot_idx].procLatch);
+}
+
+/*
+ * SQL function: pg_stat_get_wait_event_timing_overflow()
+ *
+ * Exposes the per-backend truncation counters that are otherwise
+ * write-only: without these, a user has no way to tell from SQL whether
+ * their stats are complete or whether the hash table / flat array was
+ * saturated mid-session and silently dropped events.
+ *
+ *   lwlock_overflow_count: number of LWLock wait events that could not
+ *       be recorded because the per-backend LWLock timing hash
+ *       (LWLOCK_TIMING_MAX_ENTRIES tranches) was full.
+ *   flat_overflow_count:   number of non-LWLock wait events that
+ *       resolved to an unknown / out-of-range class index and therefore
+ *       could not be mapped to a histogram slot.
+ *
+ * One row per live backend; filtered by HAS_PGSTAT_PERMISSIONS like
+ * pg_stat_get_wait_event_timing().
+ */
+Datum
+pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int			backend_idx;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (WaitEventTimingArray == NULL)
+		PG_RETURN_VOID();
+
+	for (backend_idx = 0; backend_idx < NUM_WAIT_EVENT_TIMING_SLOTS; backend_idx++)
+	{
+		WaitEventTimingState *state = &WaitEventTimingArray[backend_idx];
+		PgBackendStatus *beentry;
+		Datum		values[5];
+		bool		nulls[5];
+
+		beentry = pgstat_get_beentry_by_proc_number(backend_idx);
+		if (beentry == NULL)
+			continue;
+		if (!HAS_PGSTAT_PERMISSIONS(beentry->st_userid))
+			continue;
+
+		memset(nulls, 0, sizeof(nulls));
+
+		values[0] = Int32GetDatum(beentry->st_procpid);
+		values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
+		values[2] = Int32GetDatum(backend_idx + 1);
+		values[3] = Int64GetDatum(state->lwlock_overflow_count);
+		values[4] = Int64GetDatum(state->flat_overflow_count);
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	PG_RETURN_VOID();
 }
 
 /*

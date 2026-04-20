@@ -2367,6 +2367,12 @@ pg_stat_wait_event_timing| SELECT pid,
     max_time_us,
     histogram
    FROM pg_stat_get_wait_event_timing() t(pid, backend_type, backend_id, wait_event_type, wait_event, calls, total_time_ms, avg_time_us, max_time_us, histogram);
+pg_stat_wait_event_timing_overflow| SELECT pid,
+    backend_type,
+    backend_id,
+    lwlock_overflow_count,
+    flat_overflow_count
+   FROM pg_stat_get_wait_event_timing_overflow() t(pid, backend_type, backend_id, lwlock_overflow_count, flat_overflow_count);
 pg_stat_wait_event_trace| SELECT seq,
     timestamp_ns,
     wait_event_type,

@@ -3736,6 +3736,99 @@ description | Waiting for a newly initialized WAL file to reach durable storage
   </table>
  </sect2>
 
+ <sect2 id="monitoring-pg-stat-wait-event-timing-overflow-view">
+  <title><structname>pg_stat_wait_event_timing_overflow</structname></title>
+
+  <indexterm>
+   <primary>pg_stat_wait_event_timing_overflow</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_stat_wait_event_timing_overflow</structname> view
+   exposes per-backend truncation counters for the wait-event timing
+   subsystem.  Each backend owns a bounded LWLock timing hash
+   (192 tranches) and a bounded flat event array; events that cannot
+   be mapped to a slot are counted here.  A non-zero value means the
+   corresponding row(s) in
+   <link linkend="monitoring-pg-stat-wait-event-timing-view">
+   <structname>pg_stat_wait_event_timing</structname></link>
+   are incomplete for that backend.  Requires the server to be
+   compiled with <option>--enable-wait-event-timing</option>.
+  </para>
+
+  <table id="pg-stat-wait-event-timing-overflow-view" xreflabel="pg_stat_wait_event_timing_overflow">
+   <title><structname>pg_stat_wait_event_timing_overflow</structname> View</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>pid</structfield> <type>integer</type>
+      </para>
+      <para>
+       Process ID of the backend
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>backend_type</structfield> <type>text</type>
+      </para>
+      <para>
+       Type of the backend (e.g. <literal>client backend</literal>,
+       <literal>checkpointer</literal>, <literal>walwriter</literal>)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>backend_id</structfield> <type>integer</type>
+      </para>
+      <para>
+       Internal slot number (1-based process number)
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>lwlock_overflow_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of LWLock wait events dropped because the per-backend
+       LWLock timing hash was already full (more than 192 distinct
+       tranches observed in this session).  Zero means no LWLock
+       truncation.  A one-time <literal>WARNING</literal> is also
+       emitted to the server log on first overflow.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>flat_overflow_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of non-LWLock wait events dropped because the event
+       could not be mapped to a known class / index.  This almost
+       always indicates a code path emitting a wait event of a class
+       the timing infrastructure was not compiled for; it should be
+       zero in supported builds.
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
+
  <sect2 id="monitoring-pg-stat-wait-event-trace-view">
   <title><structname>pg_stat_wait_event_trace</structname></title>
 
@@ -5730,6 +5823,27 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         supported through this function; the ring lives in per-backend
         DSA and cross-session access must be arranged by an external
         consumer (extension or background worker).
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_stat_get_wait_event_timing_overflow</primary>
+        </indexterm>
+        <function>pg_stat_get_wait_event_timing_overflow</function> ()
+        <returnvalue>setof record</returnvalue>
+       </para>
+       <para>
+        Returns one row per live backend with per-backend truncation
+        counters for the wait event timing subsystem.  Use this view to
+        confirm that
+        <link linkend="monitoring-pg-stat-wait-event-timing-view">
+        <structname>pg_stat_wait_event_timing</structname></link>
+        rows for a backend are complete rather than truncated.
+        Unprivileged users see only their own backend; superusers and
+        members of <literal>pg_read_all_stats</literal> see all
+        backends.  Requires <option>--enable-wait-event-timing</option>.
        </para></entry>
       </row>
 

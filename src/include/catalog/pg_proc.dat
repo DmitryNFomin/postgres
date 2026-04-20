@@ -12871,4 +12871,14 @@
   proargnames => '{backend_id}',
   prosrc => 'pg_stat_reset_wait_event_timing' },
 
+{ oid => '9954',
+  descr => 'statistics: per-backend wait event timing overflow counters (rows lost to LWLock hash / flat array overflow)',
+  proname => 'pg_stat_get_wait_event_timing_overflow', prorows => '100',
+  proretset => 't', provolatile => 's', proparallel => 'r',
+  prorettype => 'record', proargtypes => '',
+  proallargtypes => '{int4,text,int4,int8,int8}',
+  proargmodes => '{o,o,o,o,o}',
+  proargnames => '{pid,backend_type,backend_id,lwlock_overflow_count,flat_overflow_count}',
+  prosrc => 'pg_stat_get_wait_event_timing_overflow' },
+
 ]

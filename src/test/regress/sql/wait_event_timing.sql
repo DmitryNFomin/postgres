@@ -93,6 +93,15 @@ SELECT count(*) >= 0 AS trace_reattach_ok
 FROM pg_stat_wait_event_trace;
 SET wait_event_capture = stats;
 
+-- Overflow counters view: should be readable and overflow counts should
+-- be zero for a freshly-reset session that hasn't exceeded limits.
+SELECT
+    pid = pg_backend_pid() AS pid_ok,
+    lwlock_overflow_count >= 0 AS lw_nonneg,
+    flat_overflow_count >= 0 AS flat_nonneg
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid();
+
 -- Clean up
 RESET wait_event_capture;
 RESET compute_query_id;

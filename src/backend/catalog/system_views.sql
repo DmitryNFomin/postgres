@@ -1524,6 +1524,17 @@ CREATE VIEW pg_stat_wait_event_timing AS
 REVOKE ALL ON pg_stat_wait_event_timing FROM PUBLIC;
 GRANT SELECT ON pg_stat_wait_event_timing TO pg_read_all_stats;
 
+CREATE VIEW pg_stat_wait_event_timing_overflow AS
+    SELECT
+        t.pid,
+        t.backend_type,
+        t.backend_id,
+        t.lwlock_overflow_count,
+        t.flat_overflow_count
+    FROM pg_stat_get_wait_event_timing_overflow() t;
+REVOKE ALL ON pg_stat_wait_event_timing_overflow FROM PUBLIC;
+GRANT SELECT ON pg_stat_wait_event_timing_overflow TO pg_read_all_stats;
+
 
 CREATE VIEW pg_stat_wait_event_trace AS
     SELECT
