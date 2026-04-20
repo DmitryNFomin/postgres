@@ -191,6 +191,21 @@ WaitEventTimingState *my_wait_event_timing = NULL;
 /* Pointer to this backend's trace ring buffer */
 WaitEventTraceState *my_wait_event_trace = NULL;
 
+/*
+ * Backend-local copy of the last reset generation we acted on.  Compared
+ * against the shared pg_atomic_uint32 reset_generation in this backend's
+ * WaitEventTimingState slot at every wait_end.  When the shared value
+ * differs, the owning backend performs the reset of its own counters on
+ * behalf of whoever called pg_stat_reset_wait_event_timing(target).
+ *
+ * This makes cross-backend reset a lock-free request-response: the caller
+ * bumps the atomic (and wakes the target's latch so idle backends notice);
+ * the owning backend clears its counters at a safe point.  Because only the
+ * owning backend ever writes its slot, there is no race between writers and
+ * resetters -- the reset happens inline inside the single-writer hot path.
+ */
+static uint32 my_last_reset_generation = 0;
+
 /* Shared memory base pointers */
 static WaitEventTimingState *WaitEventTimingArray = NULL;
 
@@ -371,8 +386,7 @@ WaitEventTimingShmemInit(void)
 		memset(WaitEventTimingArray, 0, size);
 
 		for (int i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
-			LWLockInitialize(&WaitEventTimingArray[i].lock,
-							 LWTRANCHE_WAIT_EVENT_TIMING);
+			pg_atomic_init_u32(&WaitEventTimingArray[i].reset_generation, 0);
 	}
 }
 
@@ -609,7 +623,14 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 
 	my_wait_event_timing = &WaitEventTimingArray[procNumber];
 
-	/* Zero the stats for this new backend session, preserving the LWLock */
+	/*
+	 * Zero the stats for this new backend session.  The reset_generation
+	 * counter in the slot is deliberately NOT zeroed: it is a monotonic
+	 * cluster-wide sequence and may have been bumped by admin-issued
+	 * resets while this slot was unoccupied.  We sync our local tracker
+	 * to the current value so the first wait_end does not trigger a
+	 * redundant (already-zeroed) self-reset.
+	 */
 	memset(my_wait_event_timing->events, 0,
 		   sizeof(my_wait_event_timing->events));
 	memset(&my_wait_event_timing->lwlock_hash, 0,
@@ -619,6 +640,9 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 	my_wait_event_timing->flat_overflow_count = 0;
 	my_wait_event_timing->current_event = 0;
 	INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
+
+	my_last_reset_generation =
+		pg_atomic_read_u32(&my_wait_event_timing->reset_generation);
 
 	/*
 	 * Trace ring buffer is allocated lazily via DSA when wait_event_trace
@@ -677,6 +701,31 @@ void
 pgstat_report_wait_end_timing(void)
 {
 	uint32		event = my_wait_event_timing->current_event;
+	uint32		cur_reset_gen;
+
+	/*
+	 * Fast check for a pending cross-backend reset request.  Single
+	 * atomic load; almost always hits the fast path (branch well
+	 * predicted).  When we detect that our shared reset_generation has
+	 * advanced, clear our own counters on behalf of the requester, then
+	 * continue with normal accumulation.  The in-flight wait fields
+	 * (wait_start / current_event) are deliberately left untouched so we
+	 * don't lose the measurement that's already running; the completing
+	 * event will land in the freshly-zeroed counters, which is the
+	 * desired behaviour.
+	 */
+	cur_reset_gen = pg_atomic_read_u32(&my_wait_event_timing->reset_generation);
+	if (unlikely(cur_reset_gen != my_last_reset_generation))
+	{
+		memset(my_wait_event_timing->events, 0,
+			   sizeof(my_wait_event_timing->events));
+		memset(&my_wait_event_timing->lwlock_hash, 0,
+			   sizeof(LWLockTimingHash));
+		my_wait_event_timing->reset_count++;
+		my_wait_event_timing->lwlock_overflow_count = 0;
+		my_wait_event_timing->flat_overflow_count = 0;
+		my_last_reset_generation = cur_reset_gen;
+	}
 
 	if (event != 0 && !INSTR_TIME_IS_ZERO(my_wait_event_timing->wait_start))
 	{
@@ -697,8 +746,9 @@ pgstat_report_wait_end_timing(void)
 		 * No lock needed on the hot path: each WaitEventTimingState slot
 		 * has a single writer (the owning backend), and the SRF reader
 		 * pg_stat_get_wait_event_timing() is lock-free by design.  Cross-
-		 * backend reset (target != NULL) is handled separately; see the
-		 * comment in pg_stat_reset_wait_event_timing().
+		 * backend reset is handled by the reset_generation check at the
+		 * top of this function: the requester bumps the atomic and the
+		 * owning backend (us) clears the counters at the next wait_end.
 		 *
 		 * We defer emitting the overflow WARNING to after the critical
 		 * bookkeeping is complete, so ereport() cannot recurse through
@@ -1092,12 +1142,56 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Request a self-reset on the given backend slot.
+ *
+ * Lock-free: atomically bumps the slot's reset_generation, then sets the
+ * target's process latch so an idle backend wakes up and completes its
+ * current wait event (which triggers pgstat_report_wait_end_timing, which
+ * observes the generation change and performs the reset).  If the target
+ * slot is currently unoccupied the SetLatch is a harmless no-op.
+ */
+static void
+wait_event_timing_request_reset(int slot_idx)
+{
+	Assert(slot_idx >= 0 && slot_idx < NUM_WAIT_EVENT_TIMING_SLOTS);
+
+	pg_atomic_fetch_add_u32(&WaitEventTimingArray[slot_idx].reset_generation, 1);
+
+	/*
+	 * Wake the target if it is sleeping in WaitLatch/WaitEventSetWait so
+	 * that it completes its current wait promptly and observes the reset
+	 * request.  The slot index is also the PGPROC array index
+	 * (pgstat_set_wait_event_timing_storage is called with procNumber).
+	 *
+	 * Even if no live backend currently owns the slot, setting the latch
+	 * on the stale PGPROC is harmless -- latches in shared memory are
+	 * durable and no process is waiting on it.
+	 */
+	if (ProcGlobal != NULL && ProcGlobal->allProcs != NULL)
+		SetLatch(&ProcGlobal->allProcs[slot_idx].procLatch);
+}
+
+/*
  * SQL function: pg_stat_reset_wait_event_timing(backend_id int4)
  *
  * Resets wait event timing counters.
- *   backend_id = NULL or 0: reset own backend
- *   backend_id > 0: reset specific backend (superuser only)
- *   backend_id = -1: reset ALL backends (superuser only)
+ *   backend_id = NULL or 0: reset own backend (synchronous)
+ *   backend_id > 0:         request reset of a specific backend (superuser)
+ *   backend_id = -1:        request reset of ALL backends (superuser)
+ *
+ * Cross-backend resets are asynchronous by design: the function atomically
+ * bumps a per-slot reset_generation counter and wakes the target's latch;
+ * the owning backend observes the change on its next wait_end and clears
+ * its own counters.  This keeps the hot path lock-free and avoids the
+ * cross-writer races that plagued an earlier LWLock-based implementation.
+ *
+ * Visibility is near-immediate for active backends (the next event ends
+ * within microseconds) and is bounded by the target's wait duration for
+ * idle backends -- SetLatch shortens that by interrupting any current
+ * WaitLatch.  The function returns before the reset has been observed;
+ * callers that need strict read-after-reset semantics should either
+ * target their own backend (where reset is synchronous) or poll the
+ * target until its reset_count increments.
  */
 Datum
 pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
@@ -1107,10 +1201,10 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(0) || PG_GETARG_INT32(0) == 0)
 	{
 		/*
-		 * Reset own backend.  No LWLock needed: only this backend writes
-		 * to its own slot (from pgstat_report_wait_end_timing) and from
-		 * this function, and we are synchronous.  The reader
-		 * pg_stat_get_wait_event_timing() is lock-free by design.
+		 * Reset own backend.  Single writer (us), synchronous: no lock or
+		 * atomic indirection needed.  We also clear the in-flight wait
+		 * fields here because a user resetting their own session has the
+		 * clearest intent; any upcoming wait will re-initialise them.
 		 */
 		if (my_wait_event_timing != NULL)
 		{
@@ -1119,6 +1213,8 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 			memset(&my_wait_event_timing->lwlock_hash, 0,
 				   sizeof(LWLockTimingHash));
 			my_wait_event_timing->reset_count++;
+			my_wait_event_timing->lwlock_overflow_count = 0;
+			my_wait_event_timing->flat_overflow_count = 0;
 		}
 	}
 	else
@@ -1133,17 +1229,9 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 
 		if (target == -1)
 		{
-			/* Reset all backends */
+			/* Request reset on every slot; owners self-clear on next event */
 			for (int i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
-			{
-				LWLockAcquire(&WaitEventTimingArray[i].lock, LW_EXCLUSIVE);
-				memset(WaitEventTimingArray[i].events, 0,
-					   sizeof(WaitEventTimingArray[i].events));
-				memset(&WaitEventTimingArray[i].lwlock_hash, 0,
-					   sizeof(LWLockTimingHash));
-				WaitEventTimingArray[i].reset_count++;
-				LWLockRelease(&WaitEventTimingArray[i].lock);
-			}
+				wait_event_timing_request_reset(i);
 		}
 		else
 		{
@@ -1154,13 +1242,7 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("invalid backend_id: %d", target)));
 
-			LWLockAcquire(&WaitEventTimingArray[idx].lock, LW_EXCLUSIVE);
-			memset(WaitEventTimingArray[idx].events, 0,
-				   sizeof(WaitEventTimingArray[idx].events));
-			memset(&WaitEventTimingArray[idx].lwlock_hash, 0,
-				   sizeof(LWLockTimingHash));
-			WaitEventTimingArray[idx].reset_count++;
-			LWLockRelease(&WaitEventTimingArray[idx].lock);
+			wait_event_timing_request_reset(idx);
 		}
 	}
 

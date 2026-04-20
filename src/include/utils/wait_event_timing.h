@@ -101,11 +101,25 @@ typedef struct LWLockTimingHash
 /*
  * Per-backend wait event timing state.  Allocated in shared memory,
  * one per MaxBackends slot.
+ *
+ * Synchronization: each slot is written exclusively by its owning backend.
+ * Cross-backend readers (pg_stat_get_wait_event_timing) are lock-free and
+ * tolerate torn reads of 64-bit fields on 32-bit platforms (acceptable for
+ * statistics).  Cross-backend reset is request-based: the caller atomically
+ * bumps reset_generation, and the owning backend observes the change on
+ * its next wait_end and performs the reset itself.  This keeps the hot
+ * path lock-free while guaranteeing atomic, race-free resets.
  */
 typedef struct WaitEventTimingState
 {
-	/* Per-backend lock for cross-backend reset (pgstat_reset_entry pattern) */
-	LWLock		lock;
+	/*
+	 * Generation counter for cross-backend reset requests.  Incremented
+	 * atomically by pg_stat_reset_wait_event_timing(target).  The owning
+	 * backend tracks a local last-observed value; when it differs from the
+	 * shared value, the owner performs the reset before the next event
+	 * accumulation.  Pure request-response: no locks needed on any path.
+	 */
+	pg_atomic_uint32 reset_generation;
 
 	/* Current wait start timestamp (set by pgstat_report_wait_start) */
 	instr_time	wait_start;
