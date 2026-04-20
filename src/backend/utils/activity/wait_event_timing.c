@@ -12,7 +12,10 @@
  * (~40-100 ns total), plus a few memory writes to per-backend arrays.
  * No locking is needed since each backend writes only to its own slot.
  *
- * Controlled by the wait_event_timing GUC (default: off).
+ * Controlled by the wait_event_capture GUC (off | stats | trace,
+ * default off).  The 'stats' level activates the aggregated per-event
+ * counters; 'trace' additionally enables a per-session DSA-backed ring
+ * buffer of individual events for 10046-style analysis.
  *
  * Copyright (c) 2026, PostgreSQL Global Development Group
  *
@@ -23,15 +26,30 @@
  */
 #include "postgres.h"
 
+#include "utils/guc.h"
 #include "utils/wait_event_timing.h"
 
 /*
- * GUC variables — always defined so the GUC system works even when
- * compiled without --enable-wait-event-timing.  Setting them to 'on'
- * without the compile flag is harmless (no-op).
+ * GUC variable -- always defined so the GUC system works even when
+ * compiled without --enable-wait-event-timing.  In stub builds the
+ * check_hook below rejects any value other than OFF.
  */
-bool		wait_event_timing = false;
-bool		wait_event_trace = false;
+int			wait_event_capture = WAIT_EVENT_CAPTURE_OFF;
+
+/*
+ * Enum value table consumed by guc.c.  Order matches the
+ * WaitEventCaptureLevel enum and the documented "off < stats < trace"
+ * ordering.
+ */
+const struct config_enum_entry wait_event_capture_options[] = {
+	{"off", WAIT_EVENT_CAPTURE_OFF, false},
+	{"stats", WAIT_EVENT_CAPTURE_STATS, false},
+	{"trace", WAIT_EVENT_CAPTURE_TRACE, false},
+	{NULL, 0, false}
+};
+
+StaticAssertDecl(lengthof(wait_event_capture_options) == (WAIT_EVENT_CAPTURE_TRACE + 2),
+				 "wait_event_capture_options length mismatch");
 
 #ifndef USE_WAIT_EVENT_TIMING
 
@@ -66,7 +84,7 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("wait_event_timing is not supported by this build"),
+			 errmsg("wait event capture is not supported by this build"),
 			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
 	PG_RETURN_VOID();
 }
@@ -75,56 +93,38 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
  * Extern variables referenced by backend_status.c unconditionally.
  * In timing builds these are defined after the #else.
  */
-/* GUC check hooks: reject 'on' in unsupported builds */
+/*
+ * GUC check hook for the stub build.  Any value other than 'off' is
+ * meaningless without --enable-wait-event-timing, so we reject it
+ * (or downgrade to 'off' silently when the value comes from the
+ * config file at startup, matching the old per-GUC behavior).
+ */
 bool
-check_wait_event_timing(bool *newval, void **extra, GucSource source)
+check_wait_event_capture(int *newval, void **extra, GucSource source)
 {
-	if (*newval)
+	if (*newval != WAIT_EVENT_CAPTURE_OFF)
 	{
 		if (source < PGC_S_INTERACTIVE)
 		{
 			ereport(WARNING,
-					(errmsg("wait_event_timing is not supported by this build, "
-							"forcing to off"),
+					(errmsg("wait_event_capture is not supported by this build, "
+							"forcing to \"off\""),
 					 errhint("Compile PostgreSQL with "
 							 "--enable-wait-event-timing.")));
-			*newval = false;
+			*newval = WAIT_EVENT_CAPTURE_OFF;
 			return true;
 		}
-		GUC_check_errdetail("This build does not support wait event timing.");
+		GUC_check_errdetail("This build does not support wait event capture.");
 		GUC_check_errhint("Compile PostgreSQL with --enable-wait-event-timing.");
 		return false;
 	}
 	return true;
 }
 
-bool
-check_wait_event_trace(bool *newval, void **extra, GucSource source)
-{
-	if (*newval)
-	{
-		if (source < PGC_S_INTERACTIVE)
-		{
-			ereport(WARNING,
-					(errmsg("wait_event_trace is not supported by this build, "
-							"forcing to off"),
-					 errhint("Compile PostgreSQL with "
-							 "--enable-wait-event-timing.")));
-			*newval = false;
-			return true;
-		}
-		GUC_check_errdetail("This build does not support wait event tracing.");
-		GUC_check_errhint("Compile PostgreSQL with --enable-wait-event-timing.");
-		return false;
-	}
-	return true;
-}
-
-/* Stub GUC assign hook */
+/* Stub GUC assign hook -- nothing to do without compile-time support. */
 void
-assign_wait_event_trace(bool newval, void *extra)
+assign_wait_event_capture(int newval, void *extra)
 {
-	/* no-op in non-timing builds */
 }
 
 /* Stub shmem functions called from ipci.c */
@@ -314,7 +314,16 @@ wait_event_trace_write_marker(uint8 record_type, int64 query_id)
 	uint32	seq;
 	instr_time now;
 
-	if (likely(!(wait_event_trace && my_wait_event_trace != NULL && query_id != 0)))
+	/*
+	 * Single capture-level gate: markers only land in the ring when
+	 * wait_event_capture is at TRACE.  This guarantees consistency with
+	 * the wait-event hot path (also gated on the same level) -- there is
+	 * no configuration in which one half of the trace fires and the
+	 * other doesn't.
+	 */
+	if (likely(!(wait_event_capture == WAIT_EVENT_CAPTURE_TRACE &&
+				 my_wait_event_trace != NULL &&
+				 query_id != 0)))
 		return;
 
 	pos = pg_atomic_fetch_add_u64(&my_wait_event_trace->write_pos, 1);
@@ -494,7 +503,7 @@ wait_event_trace_before_shmem_exit(int code, Datum arg)
 
 /*
  * Allocate a trace ring buffer for this backend via DSA.
- * Called when wait_event_trace is turned on.
+ * Called when wait_event_capture is set to 'trace'.
  */
 void
 wait_event_trace_attach(int procNumber)
@@ -538,8 +547,8 @@ wait_event_trace_attach(int procNumber)
 	 * detach, so dsa_free() is safe at that point.
 	 *
 	 * This branch executes at most once per backend lifetime: subsequent
-	 * SET wait_event_trace = on takes the reattach fast path above because
-	 * trace_ptrs[procNumber] remains valid until exit.
+	 * SET wait_event_capture = trace takes the reattach fast path above
+	 * because trace_ptrs[procNumber] remains valid until exit.
 	 */
 	before_shmem_exit(wait_event_trace_before_shmem_exit,
 					  Int32GetDatum(procNumber));
@@ -561,40 +570,44 @@ wait_event_trace_detach(int procNumber)
 }
 
 /*
- * GUC check hooks -- in timing builds, all values are accepted.
+ * GUC check hook for wait_event_capture (timing build).
+ *
+ * All three enum values are accepted at this level; the assign hook
+ * handles side effects (attaching the trace ring on TRACE, warning
+ * about track_activities, etc.).
  */
 bool
-check_wait_event_timing(bool *newval, void **extra, GucSource source)
-{
-	return true;
-}
-
-bool
-check_wait_event_trace(bool *newval, void **extra, GucSource source)
+check_wait_event_capture(int *newval, void **extra, GucSource source)
 {
 	return true;
 }
 
 /*
- * GUC assign hook for wait_event_trace.
- * Warns if wait_event_timing is off, since trace has no effect without it.
- * Lazily allocates the DSA-backed trace ring buffer on first enable.
+ * GUC assign hook for wait_event_capture.
+ *
+ * On entry to TRACE level, lazily allocate this backend's DSA-backed
+ * trace ring buffer (~4 MB) if it isn't already attached, and warn if
+ * track_activities is off (query attribution then becomes unavailable).
+ *
+ * Stepping down from TRACE to STATS/OFF intentionally does not detach
+ * the ring: keeping the segment around lets a single session toggle
+ * tracing on and off cheaply during an investigation.  The ring is
+ * released on backend exit via the standard before_shmem_exit
+ * callback in wait_event_trace_attach().
  */
 void
-assign_wait_event_trace(bool newval, void *extra)
+assign_wait_event_capture(int newval, void *extra)
 {
-	if (newval && !wait_event_timing)
-		ereport(WARNING,
-				(errmsg("wait_event_trace has no effect unless wait_event_timing is enabled"),
-				 errhint("Ask a superuser to SET wait_event_timing = on.")));
+	if (newval == WAIT_EVENT_CAPTURE_TRACE)
+	{
+		if (!pgstat_track_activities)
+			ereport(WARNING,
+					(errmsg("wait_event_capture = trace query attribution "
+							"requires track_activities to be enabled")));
 
-	if (newval && !pgstat_track_activities)
-		ereport(WARNING,
-				(errmsg("wait_event_trace query attribution requires "
-						"track_activities to be enabled")));
-
-	if (newval && my_wait_event_trace == NULL && my_trace_proc_number >= 0)
-		wait_event_trace_attach(my_trace_proc_number);
+		if (my_wait_event_trace == NULL && my_trace_proc_number >= 0)
+			wait_event_trace_attach(my_trace_proc_number);
+	}
 }
 
 /*
@@ -645,8 +658,9 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 		pg_atomic_read_u32(&my_wait_event_timing->reset_generation);
 
 	/*
-	 * Trace ring buffer is allocated lazily via DSA when wait_event_trace
-	 * is turned on.  Save procNumber for later use by trace_attach/detach.
+	 * Trace ring buffer is allocated lazily via DSA when
+	 * wait_event_capture is set to 'trace'.  Save procNumber for later
+	 * use by trace_attach/detach.
 	 */
 	my_trace_proc_number = procNumber;
 	my_wait_event_trace = NULL;
@@ -693,9 +707,10 @@ pgstat_reset_wait_event_timing_storage(void)
 
 /*
  * Out-of-line body for pgstat_report_wait_end() timing path.
- * Called when wait_event_timing GUC is on and my_wait_event_timing is set.
- * Computes wait duration, accumulates per-event stats, and optionally
- * writes to the trace ring buffer.
+ * Called when wait_event_capture is at STATS or higher and
+ * my_wait_event_timing is set.  Computes wait duration, accumulates
+ * per-event stats, and (at TRACE level) writes the event into the
+ * per-session trace ring buffer.
  */
 void
 pgstat_report_wait_end_timing(void)
@@ -799,7 +814,8 @@ pgstat_report_wait_end_timing(void)
 		}
 
 		/* 10046-style per-session trace ring buffer (DSA-backed) */
-		if (unlikely(wait_event_trace && my_wait_event_trace != NULL))
+		if (unlikely(wait_event_capture == WAIT_EVENT_CAPTURE_TRACE &&
+					 my_wait_event_trace != NULL))
 		{
 			uint64	pos = pg_atomic_fetch_add_u64(&my_wait_event_trace->write_pos, 1);
 			WaitEventTraceRecord *rec =

@@ -234,9 +234,28 @@ typedef struct WaitEventTraceControl
 } WaitEventTraceControl;
 
 
-/* GUC variables */
-extern PGDLLIMPORT bool wait_event_timing;
-extern PGDLLIMPORT bool wait_event_trace;
+/*
+ * Capture levels for the wait_event_capture GUC.  Order is significant:
+ * higher values are strict supersets of lower ones, and code paths use
+ * "level >= WAIT_EVENT_CAPTURE_STATS" to test for activation.
+ *
+ *   OFF   - No instrumentation, no hot-path cost.
+ *   STATS - Aggregated per-event statistics in pg_stat_wait_event_timing
+ *           (counts, durations, histograms).  Hot path samples wall time
+ *           around every wait.
+ *   TRACE - Everything in STATS plus a per-session ring buffer of
+ *           individual events and query markers, exposed via
+ *           pg_stat_wait_event_trace.  Adds ~4 MB DSA per session.
+ */
+typedef enum WaitEventCaptureLevel
+{
+	WAIT_EVENT_CAPTURE_OFF = 0,
+	WAIT_EVENT_CAPTURE_STATS,
+	WAIT_EVENT_CAPTURE_TRACE,
+}			WaitEventCaptureLevel;
+
+/* GUC variable */
+extern PGDLLIMPORT int wait_event_capture;
 
 /* Pointer to this backend's timing state in shared memory */
 extern PGDLLIMPORT WaitEventTimingState *my_wait_event_timing;

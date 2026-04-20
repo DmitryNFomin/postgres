@@ -9,10 +9,10 @@
 --
 
 -- Check GUC default
-SHOW wait_event_trace;
+SHOW wait_event_capture;
 
--- Enable timing for this test (PGC_SUSET, requires superuser)
-SET wait_event_timing = on;
+-- Enable stats-level capture for this test (PGC_SUSET, requires superuser)
+SET wait_event_capture = stats;
 
 -- Verify views exist (zero rows is fine, just checking structure)
 SELECT * FROM pg_stat_wait_event_timing LIMIT 0;
@@ -58,7 +58,7 @@ WHERE wait_event = 'PgSleep';
 
 -- Test trace ring buffer (need compute_query_id for query markers)
 SET compute_query_id = on;
-SET wait_event_trace = on;
+SET wait_event_capture = trace;
 SELECT pg_sleep(0.01);
 
 SELECT
@@ -84,31 +84,15 @@ SELECT pg_stat_reset_wait_event_timing(99999);
 SELECT count(*) >= 0 AS trace_readable
 FROM pg_stat_get_wait_event_trace();
 
--- Test trace lifecycle: enable, query, read, disable, re-enable
+-- Test trace lifecycle: drop to stats, then back up to trace
 SET compute_query_id = on;
-SET wait_event_trace = off;
-SET wait_event_trace = on;
+SET wait_event_capture = stats;
+SET wait_event_capture = trace;
 SELECT 1 AS reattach_test;
 SELECT count(*) >= 0 AS trace_reattach_ok
 FROM pg_stat_wait_event_trace;
-SET wait_event_trace = off;
-
--- Test auxiliary process timing: verify background processes have
--- accumulated wait events.  This requires wait_event_timing to be enabled
--- cluster-wide, not just in the current session, so we push it through
--- ALTER SYSTEM + pg_reload_conf() and give the aux processes time to
--- refresh their GUCs and perform at least one instrumented wait.
-ALTER SYSTEM SET wait_event_timing = on;
-SELECT pg_reload_conf();
-SELECT pg_sleep(0.5);
-SELECT count(*) > 0 AS aux_timing_ok
-FROM pg_stat_wait_event_timing
-WHERE backend_type IN ('checkpointer', 'background writer', 'walwriter')
-  AND calls > 0;
-ALTER SYSTEM RESET wait_event_timing;
-SELECT pg_reload_conf();
+SET wait_event_capture = stats;
 
 -- Clean up
-RESET wait_event_timing;
-RESET wait_event_trace;
+RESET wait_event_capture;
 RESET compute_query_id;

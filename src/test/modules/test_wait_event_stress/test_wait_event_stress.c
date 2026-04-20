@@ -65,7 +65,7 @@ stress_wait_events(PG_FUNCTION_ARGS)
  * hash overflow path and verifies the one-time WARNING fires.
  *
  * Usage:
- *   SET wait_event_timing = on;
+ *   SET wait_event_capture = stats;
  *   SET client_min_messages = warning;
  *   SELECT test_lwlock_hash_overflow(200);
  *   -- expect WARNING about LWLock hash table full

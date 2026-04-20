@@ -82,7 +82,8 @@ pgstat_report_wait_start(uint32 wait_event_info)
 	*(volatile uint32 *) my_wait_event_info = wait_event_info;
 
 #ifdef USE_WAIT_EVENT_TIMING
-	if (wait_event_timing && likely(my_wait_event_timing != NULL))
+	if (wait_event_capture >= WAIT_EVENT_CAPTURE_STATS &&
+		likely(my_wait_event_timing != NULL))
 	{
 		INSTR_TIME_SET_CURRENT(my_wait_event_timing->wait_start);
 		my_wait_event_timing->current_event = wait_event_info;
@@ -109,7 +110,8 @@ static inline void
 pgstat_report_wait_end(void)
 {
 #ifdef USE_WAIT_EVENT_TIMING
-	if (wait_event_timing && likely(my_wait_event_timing != NULL))
+	if (wait_event_capture >= WAIT_EVENT_CAPTURE_STATS &&
+		likely(my_wait_event_timing != NULL))
 		pgstat_report_wait_end_timing();
 #endif
 

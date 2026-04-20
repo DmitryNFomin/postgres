@@ -8883,52 +8883,46 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
-     <varlistentry id="guc-wait-event-timing" xreflabel="wait_event_timing">
-      <term><varname>wait_event_timing</varname> (<type>boolean</type>)
+     <varlistentry id="guc-wait-event-capture" xreflabel="wait_event_capture">
+      <term><varname>wait_event_capture</varname> (<type>enum</type>)
       <indexterm>
-       <primary><varname>wait_event_timing</varname> configuration parameter</primary>
+       <primary><varname>wait_event_capture</varname> configuration parameter</primary>
       </indexterm>
       </term>
       <listitem>
        <para>
-        Enables collection of per-backend wait event timing statistics,
-        including event counts, total and average durations, and log2
-        histograms.  Requires the server to be compiled with
-        <option>--enable-wait-event-timing</option>.  This parameter is off
-        by default because the two <function>clock_gettime()</function> calls
-        per wait event transition add approximately 40&ndash;100 ns of
-        overhead.  Results are visible in the
+        Controls collection of wait event instrumentation data.  Requires
+        the server to be compiled with
+        <option>--enable-wait-event-timing</option>.  Possible values are
+        <literal>off</literal>, <literal>stats</literal>, and
+        <literal>trace</literal>; each level is a strict superset of the
+        previous one.
+       </para>
+       <para>
+        At <literal>stats</literal>, the server records per-backend wait
+        event statistics (counts, total and average durations, log2
+        histograms) visible in the
         <link linkend="monitoring-pg-stat-wait-event-timing-view">
         <structname>pg_stat_wait_event_timing</structname></link> view.
-        Only superusers and users with the appropriate <literal>SET</literal>
-        privilege can change this setting.
+        Two <function>clock_gettime()</function> calls are added around
+        every wait event transition, costing approximately
+        40&ndash;100&nbsp;ns each on modern hardware.
        </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry id="guc-wait-event-trace" xreflabel="wait_event_trace">
-      <term><varname>wait_event_trace</varname> (<type>boolean</type>)
-      <indexterm>
-       <primary><varname>wait_event_trace</varname> configuration parameter</primary>
-      </indexterm>
-      </term>
-      <listitem>
        <para>
-        Enables per-session recording of individual wait events into a
-        ring buffer.  Each record captures the event type, duration, and
-        timestamp.  Requires <varname>wait_event_timing</varname> to be
-        enabled.  Query attribution via <literal>QUERY_START</literal> and
-        <literal>QUERY_END</literal> trace markers requires
-        <xref linkend="guc-track-activities"/> to be enabled; when
-        <varname>track_activities</varname> is off, query markers are
-        not emitted and per-query attribution is unavailable.
-        Results are visible in the
+        At <literal>trace</literal>, the server additionally records every
+        individual wait event into a per-session ring buffer (~4&nbsp;MB of
+        DSA per backend, allocated lazily on first enable), exposed via the
         <link linkend="monitoring-pg-stat-wait-event-trace-view">
         <structname>pg_stat_wait_event_trace</structname></link> view.
-        The ring buffer is allocated lazily from a DSA segment when
-        first enabled, using approximately 4&nbsp;MB per backend.
-        Only superusers and users with the appropriate <literal>SET</literal>
-        privilege can change this setting.
+        Query attribution via <literal>QUERY_START</literal>/<literal>QUERY_END</literal>
+        markers requires <xref linkend="guc-track-activities"/> to be
+        enabled; when <varname>track_activities</varname> is off, query
+        markers are not emitted and per-query attribution is unavailable.
+       </para>
+       <para>
+        The default is <literal>off</literal>.  Only superusers and users
+        with the appropriate <literal>SET</literal> privilege can change
+        this setting.
        </para>
       </listitem>
      </varlistentry>

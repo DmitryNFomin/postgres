@@ -3614,8 +3614,9 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    The <structname>pg_stat_wait_event_timing</structname> view contains one
    row for each combination of backend and wait event that has a non-zero
    call count.  It shows accumulated timing statistics collected when
-   <xref linkend="guc-wait-event-timing"/> is enabled.  Requires the server
-   to be compiled with <option>--enable-wait-event-timing</option>.
+   <xref linkend="guc-wait-event-capture"/> is set to <literal>stats</literal>
+   or <literal>trace</literal>.  Requires the server to be compiled with
+   <option>--enable-wait-event-timing</option>.
   </para>
 
   <table id="pg-stat-wait-event-timing-view" xreflabel="pg_stat_wait_event_timing">
@@ -3747,9 +3748,9 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    individual wait event records from the current backend's trace ring
    buffer.  Each record captures a single wait event with its timestamp
    and duration, or a <literal>QUERY_START</literal>/<literal>QUERY_END</literal>
-   marker.  Requires <xref linkend="guc-wait-event-trace"/> to be enabled.
-   The ring buffer holds up to 131072 records; older records are overwritten
-   in FIFO order.
+   marker.  Requires <xref linkend="guc-wait-event-capture"/> to be set
+   to <literal>trace</literal>.  The ring buffer holds up to 131072
+   records; older records are overwritten in FIFO order.
   </para>
 
   <para>

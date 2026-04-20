@@ -1605,18 +1605,18 @@ build-postgresql:
          (count, total time, histogram) in shared memory.
          The overhead is two <function>clock_gettime(CLOCK_MONOTONIC)</function>
          calls per wait event transition (~40&ndash;100&nbsp;ns via VDSO).
-         When not compiled in, the GUC variables still exist but
-         <literal>SET wait_event_timing = on</literal> is rejected, and the
+         When not compiled in, the <varname>wait_event_capture</varname>
+         GUC still exists but only accepts <literal>off</literal>, and the
          SQL functions return empty result sets.
          The compile flag allocates approximately 120&nbsp;KB of shared
          memory per backend slot for timing statistics (regardless of GUC
          setting).  At <varname>max_connections</varname>&nbsp;=&nbsp;200
          this is roughly 26&nbsp;MB; at 1000 it is roughly 120&nbsp;MB.
          Trace ring buffers are allocated lazily via DSA only when
-         <varname>wait_event_trace</varname> is enabled (~4&nbsp;MB per
-         traced backend).
-         See <xref linkend="guc-wait-event-timing"/> and
-         <xref linkend="guc-wait-event-trace"/> for runtime controls.
+         <varname>wait_event_capture</varname> is set to
+         <literal>trace</literal> (~4&nbsp;MB per traced backend).
+         See <xref linkend="guc-wait-event-capture"/> for the runtime
+         control.
         </para>
        </listitem>
       </varlistentry>
