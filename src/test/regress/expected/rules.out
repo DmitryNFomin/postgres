@@ -2373,7 +2373,7 @@ pg_stat_wait_event_trace| SELECT seq,
     wait_event,
     duration_us,
     query_id
-   FROM pg_stat_get_wait_event_trace(NULL::integer) t(seq, timestamp_ns, wait_event_type, wait_event, duration_us, query_id);
+   FROM pg_stat_get_wait_event_trace() t(seq, timestamp_ns, wait_event_type, wait_event, duration_us, query_id);
 pg_stat_wal| SELECT wal_records,
     wal_fpi,
     wal_bytes,

@@ -135,12 +135,12 @@ SELECT pg_stat_reset_wait_event_timing(NULL);
 -- Invalid backend_id errors
 SELECT pg_stat_reset_wait_event_timing(99999);
 ERROR:  invalid backend_id: 99999
--- Trace read with invalid backend_id returns empty
-SELECT count(*) AS invalid_trace
-FROM pg_stat_get_wait_event_trace(99999);
- invalid_trace 
----------------
-             0
+-- Trace read (no arguments; always returns own session)
+SELECT count(*) >= 0 AS trace_readable
+FROM pg_stat_get_wait_event_trace();
+ trace_readable 
+----------------
+ t
 (1 row)
 
 -- Test trace lifecycle: enable, query, read, disable, re-enable

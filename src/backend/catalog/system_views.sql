@@ -1533,6 +1533,6 @@ CREATE VIEW pg_stat_wait_event_trace AS
         t.wait_event,
         t.duration_us,
         t.query_id
-    FROM pg_stat_get_wait_event_trace(NULL) t;
+    FROM pg_stat_get_wait_event_trace() t;
 REVOKE ALL ON pg_stat_wait_event_trace FROM PUBLIC;
 GRANT SELECT ON pg_stat_wait_event_trace TO pg_read_all_stats;

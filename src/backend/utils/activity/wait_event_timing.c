@@ -981,21 +981,19 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 }
 
 /*
- * SQL function: pg_stat_get_wait_event_trace(backend_id int4)
+ * SQL function: pg_stat_get_wait_event_trace()
  *
  * Returns trace records from the current backend's own ring buffer.
- * The backend_id argument is accepted for forward compatibility but
- * ignored -- always reads own session.  A backend cannot exit while
- * running its own query, so no DSA lifetime issue exists.
- *
- * Cross-backend ring reading is the responsibility of external consumers
- * (background workers, extensions) that manage their own synchronization
- * via WaitEventTraceCtl->lock.
+ * Cross-backend ring reading is intentionally not supported: the ring
+ * lives in per-backend DSA and reading another session's segment would
+ * require attaching/detaching under the trace control lock, which is
+ * the responsibility of external consumers (extensions, background
+ * workers) that can manage their own synchronization via
+ * WaitEventTraceCtl->lock.
  *
  * Uses InitMaterializedSRF (materialize-all).  The ring holds up to
  * WAIT_EVENT_TRACE_RING_SIZE (131072) records; full materialization is
- * acceptable for own-session diagnostics.  A max_records parameter can
- * be added in a future iteration without ABI break.
+ * acceptable for own-session diagnostics.
  */
 Datum
 pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
@@ -1007,24 +1005,6 @@ pg_stat_get_wait_event_trace(PG_FUNCTION_ARGS)
 	uint64		i;
 
 	InitMaterializedSRF(fcinfo, 0);
-
-	/*
-	 * Validate the backend_id argument.  We currently only support reading
-	 * our own backend's ring (cross-session reads require external
-	 * synchronization by an extension/background worker).  Accept NULL, 0,
-	 * or our own backend id; return empty for any other value to preserve
-	 * the public contract that pg_stat_get_wait_event_trace(invalid) is
-	 * empty rather than accidentally exposing our own trace.
-	 */
-	if (!PG_ARGISNULL(0))
-	{
-		int32		target = PG_GETARG_INT32(0);
-
-		if (target != 0 &&
-			(my_trace_proc_number < 0 ||
-			 target != my_trace_proc_number + 1))
-			PG_RETURN_VOID();
-	}
 
 	if (my_wait_event_trace == NULL)
 		PG_RETURN_VOID();

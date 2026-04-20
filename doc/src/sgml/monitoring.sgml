@@ -5720,14 +5720,15 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         <indexterm>
          <primary>pg_stat_get_wait_event_trace</primary>
         </indexterm>
-        <function>pg_stat_get_wait_event_trace</function> ( <type>integer</type> )
+        <function>pg_stat_get_wait_event_trace</function> ()
         <returnvalue>setof record</returnvalue>
        </para>
        <para>
-        Returns individual wait event records from a backend's trace ring
-        buffer.  Pass <literal>NULL</literal> or <literal>0</literal> for
-        the current backend; pass a positive backend_id for another backend
-        (requires superuser or <literal>pg_read_all_stats</literal>).
+        Returns individual wait event records from the current session's
+        trace ring buffer.  Reading another session's trace is not
+        supported through this function; the ring lives in per-backend
+        DSA and cross-session access must be arranged by an external
+        consumer (extension or background worker).
        </para></entry>
       </row>
 
