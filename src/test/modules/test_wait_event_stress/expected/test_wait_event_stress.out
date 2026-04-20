@@ -12,6 +12,22 @@ RESET wait_event_capture;
 -- LWLock hash overflow test: register 200 tranches (> 192 limit)
 -- This should trigger a WARNING about hash table being full
 SET wait_event_capture = stats;
+-- Start from a clean slate so we can make deterministic assertions
+-- about the overflow counter.
+SELECT pg_stat_reset_wait_event_timing(NULL);
+ pg_stat_reset_wait_event_timing 
+---------------------------------
+ 
+(1 row)
+
+SELECT lwlock_overflow_count AS before_overflow
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid();
+ before_overflow 
+-----------------
+               0
+(1 row)
+
 SET client_min_messages = warning;
 SELECT test_lwlock_hash_overflow(200);
 WARNING:  wait_event_timing: LWLock hash table full, timing data for some LWLock tranches will be lost
@@ -22,6 +38,31 @@ HINT:  This backend uses more than 192 distinct LWLock tranches.
 (1 row)
 
 RESET client_min_messages;
+-- After overflow the counter must be visible from SQL.
+SELECT lwlock_overflow_count > 0 AS overflow_visible
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid();
+ overflow_visible 
+------------------
+ t
+(1 row)
+
+-- Reset clears the overflow counter (pins the fix for issue #9).
+SELECT pg_stat_reset_wait_event_timing(NULL);
+ pg_stat_reset_wait_event_timing 
+---------------------------------
+ 
+(1 row)
+
+SELECT lwlock_overflow_count = 0 AS lw_cleared,
+       flat_overflow_count = 0 AS flat_cleared
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid();
+ lw_cleared | flat_cleared 
+------------+--------------
+ t          | t
+(1 row)
+
 -- Verify the function returns the count
 SELECT test_lwlock_hash_overflow(10);
  test_lwlock_hash_overflow 
