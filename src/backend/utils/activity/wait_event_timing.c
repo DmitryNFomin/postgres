@@ -319,12 +319,27 @@ wait_event_trace_write_marker(uint8 record_type, int64 query_id)
 	 * wait_event_capture is at TRACE.  This guarantees consistency with
 	 * the wait-event hot path (also gated on the same level) -- there is
 	 * no configuration in which one half of the trace fires and the
-	 * other doesn't.
+	 * other doesn't.  query_id == 0 means "no query ID available"
+	 * (utility command or compute_query_id = off), which we skip.
 	 */
-	if (likely(!(wait_event_capture == WAIT_EVENT_CAPTURE_TRACE &&
-				 my_wait_event_trace != NULL &&
-				 query_id != 0)))
+	if (likely(wait_event_capture != WAIT_EVENT_CAPTURE_TRACE || query_id == 0))
 		return;
+
+	/*
+	 * Lazy attach on first use.  Allocation lives here (not in the
+	 * assign hook) because dsa_allocate_extended() can ereport(ERROR)
+	 * on OOM, which is forbidden in assign-hook context but legitimate
+	 * here.  Idempotent: wait_event_trace_attach() short-circuits on
+	 * subsequent calls.
+	 */
+	if (my_wait_event_trace == NULL)
+	{
+		if (my_trace_proc_number < 0)
+			return;
+		wait_event_trace_attach(my_trace_proc_number);
+		if (my_wait_event_trace == NULL)
+			return;			/* attach path unable to allocate */
+	}
 
 	pos = pg_atomic_fetch_add_u64(&my_wait_event_trace->write_pos, 1);
 	rec = &my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
@@ -508,8 +523,21 @@ wait_event_trace_before_shmem_exit(int code, Datum arg)
 void
 wait_event_trace_attach(int procNumber)
 {
+	/*
+	 * Re-entrancy guard.  dsa_create() / dsa_allocate_extended() below
+	 * can emit wait events internally (LWLock sleeps during shmem
+	 * allocation, DSM OS calls, ...), and those wait events will reach
+	 * pgstat_report_wait_end_timing() and wait_event_trace_write_marker(),
+	 * both of which perform lazy attach when my_wait_event_trace is
+	 * still NULL.  Without this guard the recursive call tries to
+	 * re-acquire WaitEventTraceCtl->lock, producing a self-deadlock.
+	 */
+	static bool in_attach = false;
 	dsa_pointer p;
 	WaitEventTraceState *ts;
+
+	if (in_attach)
+		return;
 
 	if (WaitEventTraceCtl == NULL)
 		return;
@@ -517,41 +545,53 @@ wait_event_trace_attach(int procNumber)
 	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
 		return;
 
-	/* Already have a ring buffer? */
-	if (DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[procNumber]))
+	in_attach = true;
+	PG_TRY();
 	{
-		wait_event_trace_ensure_dsa();
-		my_wait_event_trace = dsa_get_address(trace_dsa,
-											  WaitEventTraceCtl->trace_ptrs[procNumber]);
-		my_trace_proc_number = procNumber;
-		return;
+		/* Already have a ring buffer? */
+		if (DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[procNumber]))
+		{
+			wait_event_trace_ensure_dsa();
+			my_wait_event_trace = dsa_get_address(trace_dsa,
+												  WaitEventTraceCtl->trace_ptrs[procNumber]);
+			my_trace_proc_number = procNumber;
+		}
+		else
+		{
+			wait_event_trace_ensure_dsa();
+
+			p = dsa_allocate_extended(trace_dsa, sizeof(WaitEventTraceState),
+									  DSA_ALLOC_ZERO);
+			ts = dsa_get_address(trace_dsa, p);
+			pg_atomic_init_u64(&ts->write_pos, 0);
+
+			LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
+			WaitEventTraceCtl->trace_ptrs[procNumber] = p;
+			LWLockRelease(&WaitEventTraceCtl->lock);
+
+			my_wait_event_trace = ts;
+			my_trace_proc_number = procNumber;
+
+			/*
+			 * Register cleanup to run BEFORE dsm_backend_shutdown()
+			 * detaches the DSA.  The before_shmem_exit callbacks run in
+			 * LIFO order before DSM detach, so dsa_free() is safe at
+			 * that point.
+			 *
+			 * This branch executes at most once per backend lifetime:
+			 * subsequent SET wait_event_capture = trace takes the
+			 * reattach fast path above because trace_ptrs[procNumber]
+			 * remains valid until exit.
+			 */
+			before_shmem_exit(wait_event_trace_before_shmem_exit,
+							  Int32GetDatum(procNumber));
+		}
 	}
-
-	wait_event_trace_ensure_dsa();
-
-	p = dsa_allocate_extended(trace_dsa, sizeof(WaitEventTraceState),
-							  DSA_ALLOC_ZERO);
-	ts = dsa_get_address(trace_dsa, p);
-	pg_atomic_init_u64(&ts->write_pos, 0);
-
-	LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
-	WaitEventTraceCtl->trace_ptrs[procNumber] = p;
-	LWLockRelease(&WaitEventTraceCtl->lock);
-
-	my_wait_event_trace = ts;
-	my_trace_proc_number = procNumber;
-
-	/*
-	 * Register cleanup to run BEFORE dsm_backend_shutdown() detaches the
-	 * DSA.  The before_shmem_exit callbacks run in LIFO order before DSM
-	 * detach, so dsa_free() is safe at that point.
-	 *
-	 * This branch executes at most once per backend lifetime: subsequent
-	 * SET wait_event_capture = trace takes the reattach fast path above
-	 * because trace_ptrs[procNumber] remains valid until exit.
-	 */
-	before_shmem_exit(wait_event_trace_before_shmem_exit,
-					  Int32GetDatum(procNumber));
+	PG_FINALLY();
+	{
+		in_attach = false;
+	}
+	PG_END_TRY();
 }
 
 /*
@@ -585,29 +625,51 @@ check_wait_event_capture(int *newval, void **extra, GucSource source)
 /*
  * GUC assign hook for wait_event_capture.
  *
- * On entry to TRACE level, lazily allocate this backend's DSA-backed
- * trace ring buffer (~4 MB) if it isn't already attached, and warn if
- * track_activities is off (query attribution then becomes unavailable).
+ * Two responsibilities, both correctness-critical:
  *
- * Stepping down from TRACE to STATS/OFF intentionally does not detach
- * the ring: keeping the segment around lets a single session toggle
- * tracing on and off cheaply during an investigation.  The ring is
- * released on backend exit via the standard before_shmem_exit
- * callback in wait_event_trace_attach().
+ * 1) Drop any in-flight wait state.  After the capture level changes,
+ *    the existing wait_start / current_event in our per-backend slot can
+ *    no longer be trusted.  Consider this sequence:
+ *
+ *       capture = STATS, wait on E1 starts -> wait_start=T0, current_event=E1
+ *       capture flips to OFF mid-wait
+ *       wait_end inline skips (guard fails) -> state still T0/E1
+ *       new wait on E2 starts under OFF     -> inline skips, state still T0/E1
+ *       capture flips back to STATS
+ *       wait_end for E2 -> guard passes, credits (now - T0) to E1
+ *
+ *    Zeroing both fields on every assignment forfeits at most one
+ *    in-flight sample per GUC change (negligible) but eliminates all
+ *    such miscredits.
+ *
+ * 2) Warn (but never error) about secondary preconditions for TRACE
+ *    level.  GUC assign hooks MUST NOT ereport(ERROR) -- see
+ *    src/backend/utils/misc/README -- because they can run during
+ *    transaction rollback when lookups are unsafe.  In particular, the
+ *    trace ring's DSA allocation is NOT performed here (it can raise on
+ *    OOM).  Instead, the ring is attached lazily on the first write
+ *    from wait_event_trace_write_marker() and
+ *    pgstat_report_wait_end_timing(), where ereport(ERROR) has
+ *    well-defined semantics.  Stepping down from TRACE to STATS/OFF
+ *    intentionally does not detach the ring either: keeping the segment
+ *    around lets a single session toggle tracing on and off cheaply
+ *    during an investigation; the ring is released on backend exit via
+ *    the before_shmem_exit callback registered in
+ *    wait_event_trace_attach().
  */
 void
 assign_wait_event_capture(int newval, void *extra)
 {
-	if (newval == WAIT_EVENT_CAPTURE_TRACE)
+	if (my_wait_event_timing != NULL)
 	{
-		if (!pgstat_track_activities)
-			ereport(WARNING,
-					(errmsg("wait_event_capture = trace query attribution "
-							"requires track_activities to be enabled")));
-
-		if (my_wait_event_trace == NULL && my_trace_proc_number >= 0)
-			wait_event_trace_attach(my_trace_proc_number);
+		INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
+		my_wait_event_timing->current_event = 0;
 	}
+
+	if (newval == WAIT_EVENT_CAPTURE_TRACE && !pgstat_track_activities)
+		ereport(WARNING,
+				(errmsg("wait_event_capture = trace query attribution "
+						"requires track_activities to be enabled")));
 }
 
 /*
@@ -814,25 +876,36 @@ pgstat_report_wait_end_timing(void)
 		}
 
 		/* 10046-style per-session trace ring buffer (DSA-backed) */
-		if (unlikely(wait_event_capture == WAIT_EVENT_CAPTURE_TRACE &&
-					 my_wait_event_trace != NULL))
+		if (unlikely(wait_event_capture == WAIT_EVENT_CAPTURE_TRACE))
 		{
-			uint64	pos = pg_atomic_fetch_add_u64(&my_wait_event_trace->write_pos, 1);
-			WaitEventTraceRecord *rec =
-				&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
-			uint32	seq = (uint32)(pos * 2 + 1);
+			/*
+			 * Lazy attach on first use -- allocation happens here rather
+			 * than in assign_wait_event_capture() to respect the GUC
+			 * assign-hook "must not ereport" contract.  See the comment
+			 * on assign_wait_event_capture() for rationale.
+			 */
+			if (my_wait_event_trace == NULL && my_trace_proc_number >= 0)
+				wait_event_trace_attach(my_trace_proc_number);
 
-			rec->seq = seq;
-			pg_write_barrier();
+			if (my_wait_event_trace != NULL)
+			{
+				uint64	pos = pg_atomic_fetch_add_u64(&my_wait_event_trace->write_pos, 1);
+				WaitEventTraceRecord *rec =
+					&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+				uint32	seq = (uint32)(pos * 2 + 1);
 
-			rec->record_type = TRACE_WAIT_EVENT;
-			rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
-			rec->data.wait.event = event;
-			rec->data.wait.pad2 = 0;
-			rec->data.wait.duration_ns = duration_ns;
+				rec->seq = seq;
+				pg_write_barrier();
 
-			pg_write_barrier();
-			rec->seq = seq + 1;
+				rec->record_type = TRACE_WAIT_EVENT;
+				rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
+				rec->data.wait.event = event;
+				rec->data.wait.pad2 = 0;
+				rec->data.wait.duration_ns = duration_ns;
+
+				pg_write_barrier();
+				rec->seq = seq + 1;
+			}
 		}
 
 		INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
