@@ -97,6 +97,29 @@ SELECT count(*) >= 0 AS trace_reattach_ok
 FROM pg_backend_wait_event_trace;
 SET wait_event_capture = stats;
 
+-- Pin issue #15 fix: TRACE -> OFF (or STATS) must release the DSA ring,
+-- and a subsequent re-enable must allocate a fresh, empty ring.  Old
+-- trace records do NOT survive the disable, but aggregated stats in
+-- pg_stat_wait_event_timing DO (they live in a separate DSA allocation).
+SELECT pg_stat_reset_wait_event_timing(NULL);
+SET wait_event_capture = trace;
+SELECT pg_sleep(0.001);
+SELECT pg_sleep(0.001);
+SELECT count(*) = 2 AS ring_has_both_events
+FROM pg_backend_wait_event_trace
+WHERE wait_event = 'PgSleep';
+SET wait_event_capture = off;
+SET wait_event_capture = trace;
+SELECT pg_sleep(0.001);
+SELECT count(*) = 1 AS ring_freed_and_reallocated
+FROM pg_backend_wait_event_trace
+WHERE wait_event = 'PgSleep';
+-- Aggregated stats survive the disable/re-enable cycle: 2 + 1 = 3
+SELECT calls = 3 AS stats_preserved_across_toggle
+FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
+SET wait_event_capture = stats;
+
 -- Overflow counters view: should be readable and overflow counts should
 -- be zero for a freshly-reset session that hasn't exceeded limits.
 SELECT

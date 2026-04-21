@@ -176,6 +176,68 @@ SET wait_event_capture = stats;
 ERROR:  invalid value for parameter "wait_event_capture": "stats"
 DETAIL:  This build does not support wait event capture.
 HINT:  Compile PostgreSQL with --enable-wait-event-timing.
+-- Pin issue #15 fix: TRACE -> OFF (or STATS) must release the DSA ring,
+-- and a subsequent re-enable must allocate a fresh, empty ring.  Old
+-- trace records do NOT survive the disable, but aggregated stats in
+-- pg_stat_wait_event_timing DO (they live in a separate DSA allocation).
+SELECT pg_stat_reset_wait_event_timing(NULL);
+ERROR:  wait event capture is not supported by this build
+HINT:  Compile PostgreSQL with --enable-wait-event-timing.
+SET wait_event_capture = trace;
+ERROR:  invalid value for parameter "wait_event_capture": "trace"
+DETAIL:  This build does not support wait event capture.
+HINT:  Compile PostgreSQL with --enable-wait-event-timing.
+SELECT pg_sleep(0.001);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT pg_sleep(0.001);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT count(*) = 2 AS ring_has_both_events
+FROM pg_backend_wait_event_trace
+WHERE wait_event = 'PgSleep';
+ ring_has_both_events 
+----------------------
+ f
+(1 row)
+
+SET wait_event_capture = off;
+SET wait_event_capture = trace;
+ERROR:  invalid value for parameter "wait_event_capture": "trace"
+DETAIL:  This build does not support wait event capture.
+HINT:  Compile PostgreSQL with --enable-wait-event-timing.
+SELECT pg_sleep(0.001);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT count(*) = 1 AS ring_freed_and_reallocated
+FROM pg_backend_wait_event_trace
+WHERE wait_event = 'PgSleep';
+ ring_freed_and_reallocated 
+----------------------------
+ f
+(1 row)
+
+-- Aggregated stats survive the disable/re-enable cycle: 2 + 1 = 3
+SELECT calls = 3 AS stats_preserved_across_toggle
+FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
+ stats_preserved_across_toggle 
+-------------------------------
+(0 rows)
+
+SET wait_event_capture = stats;
+ERROR:  invalid value for parameter "wait_event_capture": "stats"
+DETAIL:  This build does not support wait event capture.
+HINT:  Compile PostgreSQL with --enable-wait-event-timing.
 -- Overflow counters view: should be readable and overflow counts should
 -- be zero for a freshly-reset session that hasn't exceeded limits.
 SELECT
