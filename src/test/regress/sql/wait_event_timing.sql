@@ -74,11 +74,15 @@ SELECT count(*) > 0 AS has_query_markers
 FROM pg_backend_wait_event_trace
 WHERE wait_event_type = 'Query';
 
--- Reset does not crash
+-- Reset does not crash: NULL and own PID are equivalent
 SELECT pg_stat_reset_wait_event_timing(NULL);
+SELECT pg_stat_reset_wait_event_timing(pg_backend_pid());
 
--- Invalid backend_id errors
-SELECT pg_stat_reset_wait_event_timing(99999);
+-- Unknown PID is a silent no-op (matches pg_stat_reset_backend_stats)
+SELECT pg_stat_reset_wait_event_timing(2147483647);
+
+-- Cluster-wide reset (superuser-only)
+SELECT pg_stat_reset_wait_event_timing_all();
 
 -- Trace read (no arguments; always returns own session)
 SELECT count(*) >= 0 AS trace_readable

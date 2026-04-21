@@ -65,6 +65,7 @@ Datum		pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS);
 Datum		pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS);
 Datum		pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS);
 Datum		pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS);
+Datum		pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS);
 
 Datum
 pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
@@ -89,6 +90,16 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 
 Datum
 pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("wait event capture is not supported by this build"),
+			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -175,6 +186,7 @@ pgstat_reset_wait_event_timing_storage(void)
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
+#include "storage/procarray.h"
 #include "storage/procnumber.h"
 #include "storage/shmem.h"
 #include "catalog/pg_type_d.h"
@@ -1537,20 +1549,26 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
  * target their own backend (where reset is synchronous) or poll the
  * target until its reset_count increments.
  */
+/*
+ * Reset wait-event-timing counters for a single backend, identified by PID.
+ *
+ * NULL (or MyProcPid) resets the caller's own session synchronously -- single
+ * writer, no lock needed.  A non-NULL PID belonging to another backend uses
+ * the asynchronous request/response protocol and requires superuser.  An
+ * unknown / invalid PID is a silent no-op, matching pg_stat_reset_backend_stats.
+ */
 Datum
 pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 {
-	int			target;
+	int			target_pid;
+	PGPROC	   *proc;
+	int			procNumber;
 
-	if (PG_ARGISNULL(0) || PG_GETARG_INT32(0) == 0)
+	if (PG_ARGISNULL(0) || PG_GETARG_INT32(0) == MyProcPid)
 	{
 		/*
-		 * Reset own backend.  Single writer (us), synchronous: no lock or
-		 * atomic indirection needed.  We also clear the in-flight wait
-		 * fields here because a user resetting their own session has the
-		 * clearest intent; any upcoming wait will re-initialise them.
-		 *
-		 * If capture has never been enabled in this backend yet,
+		 * Reset own backend.  Synchronous: no lock or atomic indirection
+		 * needed.  If capture has never been enabled in this backend yet,
 		 * my_wait_event_timing is still NULL; nothing to reset.
 		 */
 		if (my_wait_event_timing != NULL)
@@ -1563,35 +1581,54 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 			my_wait_event_timing->lwlock_overflow_count = 0;
 			my_wait_event_timing->flat_overflow_count = 0;
 		}
+		PG_RETURN_VOID();
 	}
-	else
-	{
-		target = PG_GETARG_INT32(0);
 
-		/* Resetting other backends requires superuser */
-		if (!superuser())
-			ereport(ERROR,
-					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("must be a superuser to reset other backends' wait event timing")));
+	/* Resetting other backends requires superuser */
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be a superuser to reset other backends' wait event timing")));
 
-		if (target == -1)
-		{
-			/* Request reset on every slot; owners self-clear on next event */
-			for (int i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
-				wait_event_timing_request_reset(i);
-		}
-		else
-		{
-			int			idx = target - 1;	/* 1-based to 0-based */
+	target_pid = PG_GETARG_INT32(0);
 
-			if (idx < 0 || idx >= NUM_WAIT_EVENT_TIMING_SLOTS)
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("invalid backend_id: %d", target)));
+	/* Look up the target.  Try regular backends first, then aux. */
+	proc = BackendPidGetProc(target_pid);
+	if (proc == NULL)
+		proc = AuxiliaryPidGetProc(target_pid);
 
-			wait_event_timing_request_reset(idx);
-		}
-	}
+	/* Unknown / dead PID: silent no-op, matching pg_stat_reset_backend_stats. */
+	if (proc == NULL)
+		PG_RETURN_VOID();
+
+	procNumber = GetNumberFromPGProc(proc);
+
+	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
+		PG_RETURN_VOID();
+
+	wait_event_timing_request_reset(procNumber);
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * Reset wait-event-timing counters for every backend.  Superuser only.
+ *
+ * Each slot is asked to self-reset on its next wait event (owner-cleared);
+ * see wait_event_timing_request_reset for the protocol.  Returns before the
+ * resets have been observed -- callers that need strict read-after-reset
+ * semantics should poll the targets' reset_count columns.
+ */
+Datum
+pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)
+{
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be a superuser to reset wait event timing for all backends")));
+
+	for (int i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
+		wait_event_timing_request_reset(i);
 
 	PG_RETURN_VOID();
 }
