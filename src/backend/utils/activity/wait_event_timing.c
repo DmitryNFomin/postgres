@@ -776,6 +776,7 @@ wait_event_trace_attach(int procNumber)
 	 * re-acquire WaitEventTraceCtl->lock, producing a self-deadlock.
 	 */
 	static bool in_attach = false;
+	static bool shmem_exit_registered = false;
 	dsa_pointer p;
 	WaitEventTraceState *ts;
 
@@ -821,13 +822,21 @@ wait_event_trace_attach(int procNumber)
 			 * LIFO order before DSM detach, so dsa_free() is safe at
 			 * that point.
 			 *
-			 * This branch executes at most once per backend lifetime:
-			 * subsequent SET wait_event_capture = trace takes the
-			 * reattach fast path above because trace_ptrs[procNumber]
-			 * remains valid until exit.
+			 * Guarded by shmem_exit_registered because under the
+			 * release-on-disable policy (see wait_event_trace_release_slot
+			 * and assign_wait_event_capture) the allocate branch can run
+			 * multiple times per backend lifetime -- once per
+			 * off/stats -> trace re-enable cycle.  The cleanup itself is
+			 * idempotent (it short-circuits when trace_ptrs[procNumber]
+			 * is InvalidDsaPointer), but we avoid growing the
+			 * before_shmem_exit callback list.
 			 */
-			before_shmem_exit(wait_event_trace_before_shmem_exit,
-							  Int32GetDatum(procNumber));
+			if (!shmem_exit_registered)
+			{
+				before_shmem_exit(wait_event_trace_before_shmem_exit,
+								  Int32GetDatum(procNumber));
+				shmem_exit_registered = true;
+			}
 		}
 	}
 	PG_FINALLY();
@@ -853,6 +862,59 @@ wait_event_trace_detach(int procNumber)
 }
 
 /*
+ * Release this backend's trace ring buffer back to DSA immediately.
+ *
+ * Called from assign_wait_event_capture when the user steps down from
+ * TRACE to STATS or OFF.  Without this, a ~4 MB ring allocated by a
+ * brief investigation would remain pinned for the rest of the session's
+ * lifetime, which can leak gigabytes across large connection pools.
+ *
+ * The operation is LWLock-safe and does not raise -- dsa_free is pure
+ * bookkeeping on the DSA freelist, no allocation and no ereport paths.
+ * Safe to call from a GUC assign hook.  If the ring is later re-attached
+ * (user re-enables TRACE), wait_event_trace_attach takes the "allocate"
+ * branch again and a fresh ring is created on first wait event.
+ */
+static void
+wait_event_trace_release_slot(int procNumber)
+{
+	/*
+	 * Re-entrancy guard.  dsa_free takes a DSA-internal LWLock which can
+	 * in principle emit a wait event; if the writer hot path re-enters
+	 * via a nested assign hook we must not recurse into ourselves.
+	 */
+	static bool in_release = false;
+
+	if (in_release)
+		return;
+
+	if (WaitEventTraceCtl == NULL || trace_dsa == NULL)
+		return;
+
+	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
+		return;
+
+	in_release = true;
+	PG_TRY();
+	{
+		LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
+		if (DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[procNumber]))
+		{
+			dsa_free(trace_dsa, WaitEventTraceCtl->trace_ptrs[procNumber]);
+			WaitEventTraceCtl->trace_ptrs[procNumber] = InvalidDsaPointer;
+		}
+		LWLockRelease(&WaitEventTraceCtl->lock);
+
+		my_wait_event_trace = NULL;
+	}
+	PG_FINALLY();
+	{
+		in_release = false;
+	}
+	PG_END_TRY();
+}
+
+/*
  * GUC check hook for wait_event_capture (timing build).
  *
  * All three enum values are accepted at this level; the assign hook
@@ -868,7 +930,7 @@ check_wait_event_capture(int *newval, void **extra, GucSource source)
 /*
  * GUC assign hook for wait_event_capture.
  *
- * Two responsibilities, both correctness-critical:
+ * Three responsibilities, all correctness- or resource-critical:
  *
  * 1) Drop any in-flight wait state.  After the capture level changes,
  *    the existing wait_start / current_event in our per-backend slot can
@@ -885,7 +947,15 @@ check_wait_event_capture(int *newval, void **extra, GucSource source)
  *    in-flight sample per GUC change (negligible) but eliminates all
  *    such miscredits.
  *
- * 2) Warn (but never error) about secondary preconditions for TRACE
+ * 2) Release the trace ring buffer when stepping down from TRACE.
+ *    The per-backend trace ring is ~4 MB of DSA memory, and leaving it
+ *    pinned for the rest of the session's lifetime leaks shmem across
+ *    large connection pools that briefly sample trace.  Freeing here
+ *    makes "wait_event_capture = off" semantically release resources.
+ *    The next re-enable re-allocates a fresh ring on first wait event
+ *    via wait_event_trace_attach.
+ *
+ * 3) Warn (but never error) about secondary preconditions for TRACE
  *    level.  GUC assign hooks MUST NOT ereport(ERROR) -- see
  *    src/backend/utils/misc/README -- because they can run during
  *    transaction rollback when lookups are unsafe.  In particular, the
@@ -893,12 +963,8 @@ check_wait_event_capture(int *newval, void **extra, GucSource source)
  *    OOM).  Instead, the ring is attached lazily on the first write
  *    from wait_event_trace_write_marker() and
  *    pgstat_report_wait_end_timing(), where ereport(ERROR) has
- *    well-defined semantics.  Stepping down from TRACE to STATS/OFF
- *    intentionally does not detach the ring either: keeping the segment
- *    around lets a single session toggle tracing on and off cheaply
- *    during an investigation; the ring is released on backend exit via
- *    the before_shmem_exit callback registered in
- *    wait_event_trace_attach().
+ *    well-defined semantics.  The release path above is safe to call
+ *    from the hook because dsa_free is non-raising LWLock bookkeeping.
  */
 void
 assign_wait_event_capture(int newval, void *extra)
@@ -908,6 +974,15 @@ assign_wait_event_capture(int newval, void *extra)
 		INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
 		my_wait_event_timing->current_event = 0;
 	}
+
+	/*
+	 * Step-down from TRACE: release the ring now instead of at backend
+	 * exit.  Only fires when a ring is actually attached, so going
+	 * directly OFF -> TRACE -> OFF without ever having emitted a trace
+	 * record is still a no-op.
+	 */
+	if (newval != WAIT_EVENT_CAPTURE_TRACE && my_wait_event_trace != NULL)
+		wait_event_trace_release_slot(my_trace_proc_number);
 
 	if (newval == WAIT_EVENT_CAPTURE_TRACE && !pgstat_track_activities)
 		ereport(WARNING,
