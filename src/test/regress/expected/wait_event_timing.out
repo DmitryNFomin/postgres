@@ -27,6 +27,21 @@ SELECT * FROM pg_backend_wait_event_trace LIMIT 0;
 -----+--------------+-----------------+------------+-------------+----------
 (0 rows)
 
+-- The histogram-buckets taxonomy view is constant: 16 ordered rows,
+-- ascending bin edges, last bucket open-ended.  Available in both
+-- timing and non-timing builds (defined in system_views.sql, not gated
+-- on the compile flag).
+SELECT count(*) = 16 AS sixteen_rows,
+       min(bucket_idx) = 0 AS idx_starts_at_zero,
+       max(bucket_idx) = 15 AS idx_ends_at_fifteen,
+       bool_and(lower_ns IS NOT NULL) AS all_lowers_present,
+       count(*) FILTER (WHERE upper_ns IS NULL) = 1 AS one_open_bucket
+FROM pg_wait_event_timing_histogram_buckets;
+ sixteen_rows | idx_starts_at_zero | idx_ends_at_fifteen | all_lowers_present | one_open_bucket 
+--------------+--------------------+---------------------+--------------------+-----------------
+ t            | t                  | t                   | t                  | t
+(1 row)
+
 -- Verify column types of timing view
 SELECT
     a.attname,

@@ -3731,10 +3731,102 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        [2^24, &infin;) ns.  The boundaries approximate the
        decimal-microsecond grid (1024 ns &asymp; 1 &mu;s, 2048 ns &asymp;
        2 &mu;s, ..., 2^24 ns &asymp; 16 ms); the exact edges are chosen
-       to let the hot path skip a division by 1000.
+       to let the hot path skip a division by 1000.  The
+       <link linkend="monitoring-pg-wait-event-timing-histogram-buckets-view">
+       <structname>pg_wait_event_timing_histogram_buckets</structname></link>
+       view provides the numeric bin edges and human-readable labels for
+       each index; the canonical join pattern is:
+<programlisting>
+SELECT w.wait_event, b.label, h.count
+FROM   pg_stat_wait_event_timing w,
+       LATERAL unnest(w.histogram) WITH ORDINALITY AS h(count, idx)
+JOIN   pg_wait_event_timing_histogram_buckets b ON b.bucket_idx = h.idx - 1
+WHERE  w.wait_event = 'PgSleep'
+ORDER  BY b.bucket_idx;
+</programlisting>
       </para></entry>
      </row>
 
+    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
+
+ <sect2 id="monitoring-pg-wait-event-timing-histogram-buckets-view">
+  <title><structname>pg_wait_event_timing_histogram_buckets</structname></title>
+
+  <indexterm>
+   <primary>pg_wait_event_timing_histogram_buckets</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_wait_event_timing_histogram_buckets</structname>
+   view describes the 16 bins used by the
+   <structfield>histogram</structfield> column of
+   <link linkend="monitoring-pg-stat-wait-event-timing-view">
+   <structname>pg_stat_wait_event_timing</structname></link>.  It always
+   contains 16 rows in ascending order of <structfield>bucket_idx</structfield>,
+   and is independent of runtime state; a join against it attaches
+   numeric bin edges and human labels to any histogram array.
+  </para>
+
+  <table id="pg-wait-event-timing-histogram-buckets-view" xreflabel="pg_wait_event_timing_histogram_buckets">
+   <title><structname>pg_wait_event_timing_histogram_buckets</structname> View</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>bucket_idx</structfield> <type>integer</type>
+      </para>
+      <para>
+       Zero-based bin index (0&ndash;15).  Matches the offset into the
+       <structfield>histogram</structfield> array of
+       <structname>pg_stat_wait_event_timing</structname>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>lower_ns</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Inclusive lower edge of this bin in nanoseconds.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>upper_ns</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Exclusive upper edge of this bin in nanoseconds, or
+       <literal>NULL</literal> for the final bin which extends to
+       infinity.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>label</structfield> <type>text</type>
+      </para>
+      <para>
+       Short human-readable label for the bin (e.g.
+       <literal>&lt;1us</literal>, <literal>1-2us</literal>,
+       <literal>&gt;=16ms</literal>), expressed on the approximate
+       decimal-microsecond grid the bin edges are aligned to.
+      </para></entry>
+     </row>
     </tbody>
    </tgroup>
   </table>
