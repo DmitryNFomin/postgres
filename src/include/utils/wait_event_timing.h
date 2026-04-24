@@ -81,8 +81,22 @@ typedef struct WaitEventTimingEntry
  * at LWTRANCHE_FIRST_USER_DEFINED (~88) with no upper bound.  The hash
  * maps tranche_id -> dense index into lwlock_events[].
  */
-#define LWLOCK_TIMING_HASH_SIZE		256		/* must be power of 2 */
-#define LWLOCK_TIMING_MAX_ENTRIES	192		/* ~75% load factor */
+/*
+ * Hash slot count vs. entry cap.
+ *
+ * The entry cap (192) matches the real-world ceiling called out in the
+ * LWLockTimingHashEntry comment below: "real deployments use <200"
+ * distinct tranches per backend.  We keep that cap and instead oversize
+ * the slot array to 512 so the load factor stays around 37.5% at full
+ * occupancy.  Linear probing gets expensive fast above 50% load (avg
+ * ~8.5 probes on unsuccessful lookup at 75%, ~1.6 at 37.5%), and this
+ * table sits inside the single-writer hot path in
+ * pgstat_report_wait_end_timing, so probe length matters.  The extra
+ * memory cost is 1 KB per backend -- negligible compared to the ~30 KB
+ * WaitEventTimingEntry array that already lives alongside it.
+ */
+#define LWLOCK_TIMING_HASH_SIZE		512		/* must be power of 2 */
+#define LWLOCK_TIMING_MAX_ENTRIES	192		/* ~37.5% load factor at cap */
 
 typedef struct LWLockTimingHashEntry
 {
