@@ -336,17 +336,28 @@ lwlock_timing_lookup(LWLockTimingHash *ht, uint16 tranche_id)
 
 /*
  * Compute histogram bucket index for a duration in nanoseconds.
+ *
+ * Bin edges are powers of two directly on nanoseconds: bucket i covers
+ * [2^(i+9), 2^(i+10)) ns for 0 < i < NBUCKETS-1, bucket 0 covers
+ * [0, 1024) ns, and the last bucket covers [2^(NBUCKETS+8), inf) ns.
+ * The boundaries approximate the decimal-microsecond grid (1024 ≈ 1 us,
+ * 2048 ≈ 2 us, ... 2^24 ≈ 16 ms) close enough for a diagnostic histogram
+ * while letting us skip the strength-reduced /1000 on the hot path.
  */
 static int
 wait_event_timing_bucket(int64 duration_ns)
 {
-	int64		duration_us = duration_ns / 1000;
 	int			bucket;
 
-	if (duration_us <= 0)
+	/*
+	 * Everything under 1024 ns ("~1 us") lands in bucket 0.  Also handles
+	 * duration_ns == 0, which would otherwise be undefined input to
+	 * pg_leftmost_one_pos64.
+	 */
+	if (duration_ns < 1024)
 		return 0;
 
-	bucket = pg_leftmost_one_pos64((uint64) duration_us) + 1;
+	bucket = pg_leftmost_one_pos64((uint64) duration_ns) - 9;
 
 	if (bucket >= WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS)
 		bucket = WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS - 1;

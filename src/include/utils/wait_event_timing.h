@@ -32,11 +32,15 @@
 #include "utils/wait_event_types.h"
 
 /*
- * Number of log2 histogram buckets.  Bucket i covers durations in
- * [2^i, 2^(i+1)) microseconds, except bucket 0 which covers [0, 1) us
- * and the last bucket which covers [2^(NBUCKETS-1), infinity).
+ * Number of log2 histogram buckets.  Bin edges are powers of two on the
+ * nanosecond axis: bucket i covers [2^(i+9), 2^(i+10)) ns, except bucket
+ * 0 which covers [0, 1024) ns and the last bucket which covers
+ * [2^(NBUCKETS+8), infinity) ns.  These boundaries approximate the
+ * decimal-microsecond grid (1024 ≈ 1 us, 2048 ≈ 2 us, ... 2^24 ≈ 16 ms),
+ * which lets wait_event_timing_bucket() avoid a /1000 on the hot path.
  *
- * 16 buckets cover: <1us, 1-2us, 2-4us, ... 8-16ms, >=16ms
+ * 16 buckets cover, approximately: <1us, 1-2us, 2-4us, ... 8-16ms, >=16ms
+ * (exact boundaries: 1024, 2048, 4096, ... 2^24 ns).
  */
 #define WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS	16
 

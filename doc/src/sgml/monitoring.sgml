@@ -3723,11 +3723,15 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>histogram</structfield> <type>bigint[]</type>
       </para>
       <para>
-       Log2 histogram of wait durations with 16 buckets.
-       Bucket 0 covers [0, 1) &mu;s, bucket <replaceable>k</replaceable>
-       covers [2^(<replaceable>k</replaceable>-1),
-       2^<replaceable>k</replaceable>) &mu;s, and the last bucket covers
-       [16384, &infin;) &mu;s.
+       Log2 histogram of wait durations with 16 buckets.  Bin edges are
+       powers of two on the nanosecond axis: bucket 0 covers
+       [0, 1024) ns, bucket <replaceable>k</replaceable> covers
+       [2^(<replaceable>k</replaceable>+9),
+       2^(<replaceable>k</replaceable>+10)) ns, and the last bucket covers
+       [2^24, &infin;) ns.  The boundaries approximate the
+       decimal-microsecond grid (1024 ns &asymp; 1 &mu;s, 2048 ns &asymp;
+       2 &mu;s, ..., 2^24 ns &asymp; 16 ms); the exact edges are chosen
+       to let the hot path skip a division by 1000.
       </para></entry>
      </row>
 
