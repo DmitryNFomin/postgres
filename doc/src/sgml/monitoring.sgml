@@ -3824,6 +3824,20 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        zero in supported builds.
       </para></entry>
      </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>reset_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times this backend's wait event timing counters have
+       been reset, whether by an own-backend call or by a cross-backend
+       request observed by this backend.  Because
+       <function>pg_stat_reset_wait_event_timing</function> is
+       asynchronous for remote targets, callers can poll this column to
+       wait until the requested reset has actually taken effect.
+      </para></entry>
+     </row>
     </tbody>
    </tgroup>
   </table>

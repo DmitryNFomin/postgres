@@ -1530,7 +1530,8 @@ CREATE VIEW pg_stat_wait_event_timing_overflow AS
         t.backend_type,
         t.backend_id,
         t.lwlock_overflow_count,
-        t.flat_overflow_count
+        t.flat_overflow_count,
+        t.reset_count
     FROM pg_stat_get_wait_event_timing_overflow() t;
 REVOKE ALL ON pg_stat_wait_event_timing_overflow FROM PUBLIC;
 GRANT SELECT ON pg_stat_wait_event_timing_overflow TO pg_read_all_stats;

@@ -2378,8 +2378,9 @@ pg_stat_wait_event_timing_overflow| SELECT pid,
     backend_type,
     backend_id,
     lwlock_overflow_count,
-    flat_overflow_count
-   FROM pg_stat_get_wait_event_timing_overflow() t(pid, backend_type, backend_id, lwlock_overflow_count, flat_overflow_count);
+    flat_overflow_count,
+    reset_count
+   FROM pg_stat_get_wait_event_timing_overflow() t(pid, backend_type, backend_id, lwlock_overflow_count, flat_overflow_count, reset_count);
 pg_stat_wal| SELECT wal_records,
     wal_fpi,
     wal_bytes,

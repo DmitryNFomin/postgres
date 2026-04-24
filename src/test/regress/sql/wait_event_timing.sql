@@ -122,10 +122,12 @@ SET wait_event_capture = stats;
 
 -- Overflow counters view: should be readable and overflow counts should
 -- be zero for a freshly-reset session that hasn't exceeded limits.
+-- reset_count must have incremented at least once (we called reset above).
 SELECT
     pid = pg_backend_pid() AS pid_ok,
     lwlock_overflow_count >= 0 AS lw_nonneg,
-    flat_overflow_count >= 0 AS flat_nonneg
+    flat_overflow_count >= 0 AS flat_nonneg,
+    reset_count >= 1 AS reset_count_bumped
 FROM pg_stat_wait_event_timing_overflow
 WHERE pid = pg_backend_pid();
 

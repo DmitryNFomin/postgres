@@ -1563,6 +1563,10 @@ wait_event_timing_request_reset(int slot_idx)
  *   flat_overflow_count:   number of non-LWLock wait events that
  *       resolved to an unknown / out-of-range class index and therefore
  *       could not be mapped to a histogram slot.
+ *   reset_count:           number of times this backend's counters have
+ *       been reset (own reset or cross-backend request observed).
+ *       Callers of pg_stat_reset_wait_event_timing(target) can poll this
+ *       column to wait until an asynchronous reset has taken effect.
  *
  * One row per live backend; filtered by HAS_PGSTAT_PERMISSIONS like
  * pg_stat_get_wait_event_timing().
@@ -1582,8 +1586,8 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 	{
 		WaitEventTimingState *state = &WaitEventTimingArray[backend_idx];
 		PgBackendStatus *beentry;
-		Datum		values[5];
-		bool		nulls[5];
+		Datum		values[6];
+		bool		nulls[6];
 
 		beentry = pgstat_get_beentry_by_proc_number(backend_idx);
 		if (beentry == NULL)
@@ -1598,6 +1602,7 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 		values[2] = Int32GetDatum(backend_idx + 1);
 		values[3] = Int64GetDatum(state->lwlock_overflow_count);
 		values[4] = Int64GetDatum(state->flat_overflow_count);
+		values[5] = Int64GetDatum(state->reset_count);
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
 							 values, nulls);

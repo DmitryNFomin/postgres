@@ -12876,9 +12876,9 @@
   proname => 'pg_stat_get_wait_event_timing_overflow', prorows => '100',
   proretset => 't', provolatile => 's', proparallel => 'r',
   prorettype => 'record', proargtypes => '',
-  proallargtypes => '{int4,text,int4,int8,int8}',
-  proargmodes => '{o,o,o,o,o}',
-  proargnames => '{pid,backend_type,backend_id,lwlock_overflow_count,flat_overflow_count}',
+  proallargtypes => '{int4,text,int4,int8,int8,int8}',
+  proargmodes => '{o,o,o,o,o,o}',
+  proargnames => '{pid,backend_type,backend_id,lwlock_overflow_count,flat_overflow_count,reset_count}',
   prosrc => 'pg_stat_get_wait_event_timing_overflow' },
 
 { oid => '9960',
