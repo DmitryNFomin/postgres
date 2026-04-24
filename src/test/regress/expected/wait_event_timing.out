@@ -1,0 +1,308 @@
+--
+-- Test wait event timing infrastructure
+--
+-- These tests verify the wait event timing SQL interface.
+-- They require --enable-wait-event-timing (or -Dwait_event_timing=true for
+-- meson) at compile time.  Without it, the alternate expected output
+-- wait_event_timing_1.out is used.  The default CI (Cirrus) runs without
+-- timing enabled, so the non-timing path is tested automatically.
+--
+-- Check GUC default
+SHOW wait_event_capture;
+ wait_event_capture 
+--------------------
+ off
+(1 row)
+
+-- Enable stats-level capture for this test (PGC_SUSET, requires superuser)
+SET wait_event_capture = stats;
+-- Verify views exist (zero rows is fine, just checking structure)
+SELECT * FROM pg_stat_wait_event_timing LIMIT 0;
+ pid | backend_type | backend_id | wait_event_type | wait_event | calls | total_time_ms | avg_time_us | max_time_us | histogram 
+-----+--------------+------------+-----------------+------------+-------+---------------+-------------+-------------+-----------
+(0 rows)
+
+SELECT * FROM pg_backend_wait_event_trace LIMIT 0;
+ seq | timestamp_ns | wait_event_type | wait_event | duration_us | query_id 
+-----+--------------+-----------------+------------+-------------+----------
+(0 rows)
+
+-- The histogram-buckets taxonomy view is constant: 16 ordered rows,
+-- ascending bin edges, last bucket open-ended.  Available in both
+-- timing and non-timing builds (defined in system_views.sql, not gated
+-- on the compile flag).
+SELECT count(*) = 16 AS sixteen_rows,
+       min(bucket_idx) = 0 AS idx_starts_at_zero,
+       max(bucket_idx) = 15 AS idx_ends_at_fifteen,
+       bool_and(lower_ns IS NOT NULL) AS all_lowers_present,
+       count(*) FILTER (WHERE upper_ns IS NULL) = 1 AS one_open_bucket
+FROM pg_wait_event_timing_histogram_buckets;
+ sixteen_rows | idx_starts_at_zero | idx_ends_at_fifteen | all_lowers_present | one_open_bucket 
+--------------+--------------------+---------------------+--------------------+-----------------
+ t            | t                  | t                   | t                  | t
+(1 row)
+
+-- Verify column types of timing view
+SELECT
+    a.attname,
+    pg_catalog.format_type(a.atttypid, a.atttypmod) as type
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+WHERE n.nspname = 'pg_catalog'
+  AND c.relname = 'pg_stat_wait_event_timing'
+  AND a.attnum > 0
+  AND NOT a.attisdropped
+ORDER BY a.attnum;
+     attname     |       type       
+-----------------+------------------
+ pid             | integer
+ backend_type    | text
+ backend_id      | integer
+ wait_event_type | text
+ wait_event      | text
+ calls           | bigint
+ total_time_ms   | double precision
+ avg_time_us     | double precision
+ max_time_us     | double precision
+ histogram       | bigint[]
+(10 rows)
+
+-- Generate a wait event
+SELECT pg_sleep(0.1);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Verify PgSleep event appears with correct structure
+SELECT
+    pid = pg_backend_pid() AS pid_ok,
+    backend_type,
+    wait_event_type,
+    wait_event,
+    calls >= 1 AS has_calls,
+    total_time_ms > 0 AS has_time,
+    avg_time_us > 0 AS has_avg,
+    max_time_us > 0 AS has_max,
+    pg_typeof(histogram) AS hist_type,
+    array_length(histogram, 1) AS hist_len,
+    calls = (SELECT sum(x) FROM unnest(histogram) x) AS hist_invariant
+FROM pg_stat_wait_event_timing
+WHERE wait_event = 'PgSleep';
+ pid_ok |  backend_type  | wait_event_type | wait_event | has_calls | has_time | has_avg | has_max | hist_type | hist_len | hist_invariant 
+--------+----------------+-----------------+------------+-----------+----------+---------+---------+-----------+----------+----------------
+ t      | client backend | Timeout         | PgSleep    | t         | t        | t       | t       | bigint[]  |       16 | t
+(1 row)
+
+-- Test reset function (own backend)
+SELECT pg_stat_reset_wait_event_timing(NULL);
+ pg_stat_reset_wait_event_timing 
+---------------------------------
+ 
+(1 row)
+
+SELECT count(*) AS after_reset
+FROM pg_stat_wait_event_timing
+WHERE wait_event = 'PgSleep';
+ after_reset 
+-------------
+           0
+(1 row)
+
+-- Test trace ring buffer (need compute_query_id for query markers)
+SET compute_query_id = on;
+SET wait_event_capture = trace;
+SELECT pg_sleep(0.01);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT
+    wait_event_type,
+    wait_event,
+    duration_us >= 0 AS dur_ok,
+    seq >= 0 AS seq_ok
+FROM pg_backend_wait_event_trace
+WHERE wait_event = 'PgSleep';
+ wait_event_type | wait_event | dur_ok | seq_ok 
+-----------------+------------+--------+--------
+ Timeout         | PgSleep    | t      | t
+(1 row)
+
+-- Test query markers exist in trace
+SELECT count(*) > 0 AS has_query_markers
+FROM pg_backend_wait_event_trace
+WHERE wait_event_type = 'Query';
+ has_query_markers 
+-------------------
+ t
+(1 row)
+
+-- Reset does not crash: NULL and own PID are equivalent
+SELECT pg_stat_reset_wait_event_timing(NULL);
+ pg_stat_reset_wait_event_timing 
+---------------------------------
+ 
+(1 row)
+
+SELECT pg_stat_reset_wait_event_timing(pg_backend_pid());
+ pg_stat_reset_wait_event_timing 
+---------------------------------
+ 
+(1 row)
+
+-- Unknown PID is a silent no-op (matches pg_stat_reset_backend_stats)
+SELECT pg_stat_reset_wait_event_timing(2147483647);
+ pg_stat_reset_wait_event_timing 
+---------------------------------
+ 
+(1 row)
+
+-- Cluster-wide reset (superuser-only)
+SELECT pg_stat_reset_wait_event_timing_all();
+ pg_stat_reset_wait_event_timing_all 
+-------------------------------------
+ 
+(1 row)
+
+-- Trace read (no arguments; always returns own session)
+SELECT count(*) >= 0 AS trace_readable
+FROM pg_get_backend_wait_event_trace();
+ trace_readable 
+----------------
+ t
+(1 row)
+
+-- Test trace lifecycle: drop to stats, then back up to trace
+SET compute_query_id = on;
+SET wait_event_capture = stats;
+SET wait_event_capture = trace;
+SELECT 1 AS reattach_test;
+ reattach_test 
+---------------
+             1
+(1 row)
+
+SELECT count(*) >= 0 AS trace_reattach_ok
+FROM pg_backend_wait_event_trace;
+ trace_reattach_ok 
+-------------------
+ t
+(1 row)
+
+SET wait_event_capture = stats;
+-- Pin issue #15 fix: TRACE -> OFF (or STATS) must release the DSA ring,
+-- and a subsequent re-enable must allocate a fresh, empty ring.  Old
+-- trace records do NOT survive the disable, but aggregated stats in
+-- pg_stat_wait_event_timing DO (they live in a separate DSA allocation).
+--
+-- The assertions below are strict-equal on count-agnostic invariants.
+-- We deliberately avoid "count(*) = N" style assertions here: pg_sleep()
+-- loops around WaitLatch and can emit more than one PgSleep wait event
+-- per call under CPU contention (spurious latch wakes), so a fixed count
+-- would be flaky on busy CI runners.  Instead:
+--
+--   * ring_reallocated is decided by comparing phase 2's max(seq) against
+--     phase 1's (seq is derived from write_pos, which resets to 0 on a
+--     freshly allocated ring -- phase 2's records must have strictly
+--     smaller seq than phase 1's last record iff the ring was freed).
+--
+--   * stats_preserved_exactly checks that aggregated "calls" equals the
+--     exact sum of events seen in the two phase rings.  Whatever each
+--     phase's ring count happens to be, the aggregated counter must land
+--     on that sum; any drop, asymmetric duplication, or reset-on-toggle
+--     bug breaks the equality.
+--
+-- The symmetric-duplication case (both ring and aggregated doubled
+-- identically) is covered separately in test_wait_event_stress using
+-- deterministic exact-count input via stress_wait_events().
+SELECT pg_stat_reset_wait_event_timing(NULL);
+ pg_stat_reset_wait_event_timing 
+---------------------------------
+ 
+(1 row)
+
+SET wait_event_capture = trace;
+SELECT pg_sleep(0.001);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT pg_sleep(0.001);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Stash phase 1's ring count + highest seq (all phase-1 records).
+CREATE TEMP TABLE wet_phase1 AS
+SELECT count(*) AS n, max(seq) AS max_seq
+FROM pg_backend_wait_event_trace WHERE wait_event = 'PgSleep';
+-- At least two PgSleep events captured (one per pg_sleep call, ignoring
+-- spurious wakes).  Catches drop bugs.
+SELECT n >= 2 AS phase1_captured_both_sleeps
+FROM wet_phase1;
+ phase1_captured_both_sleeps 
+-----------------------------
+ t
+(1 row)
+
+SET wait_event_capture = off;
+SET wait_event_capture = trace;
+SELECT pg_sleep(0.001);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Phase 2: stash fresh-ring count + max(seq).
+CREATE TEMP TABLE wet_phase2 AS
+SELECT count(*) AS n, max(seq) AS max_seq
+FROM pg_backend_wait_event_trace WHERE wait_event = 'PgSleep';
+-- The ring was freed iff phase 2's records all have seq strictly smaller
+-- than phase 1's last seq (write_pos started over at 0).  If the ring
+-- had persisted, phase 2 would contain phase 1's records plus new ones,
+-- so max(seq) would be >= phase1.max_seq.  Strict-equal on semantic.
+SELECT n >= 1 AND max_seq < (SELECT max_seq FROM wet_phase1)
+       AS ring_freed_and_reallocated
+FROM wet_phase2;
+ ring_freed_and_reallocated 
+----------------------------
+ t
+(1 row)
+
+-- Aggregated stats must equal the exact sum of the two phase ring counts.
+-- Catches drops (aggregated < sum), asymmetric duplication, and any
+-- reset-on-toggle bug that would wipe aggregated counters.
+SELECT calls = (SELECT n FROM wet_phase1) + (SELECT n FROM wet_phase2)
+       AS stats_preserved_exactly
+FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
+ stats_preserved_exactly 
+-------------------------
+ t
+(1 row)
+
+DROP TABLE wet_phase1, wet_phase2;
+SET wait_event_capture = stats;
+-- Overflow counters view: should be readable and overflow counts should
+-- be zero for a freshly-reset session that hasn't exceeded limits.
+-- reset_count must have incremented at least once (we called reset above).
+SELECT
+    pid = pg_backend_pid() AS pid_ok,
+    lwlock_overflow_count >= 0 AS lw_nonneg,
+    flat_overflow_count >= 0 AS flat_nonneg,
+    reset_count >= 1 AS reset_count_bumped
+FROM pg_stat_wait_event_timing_overflow
+WHERE pid = pg_backend_pid();
+ pid_ok | lw_nonneg | flat_nonneg | reset_count_bumped 
+--------+-----------+-------------+--------------------
+ t      | t         | t           | t
+(1 row)
+
+-- Clean up
+RESET wait_event_capture;
+RESET compute_query_id;
