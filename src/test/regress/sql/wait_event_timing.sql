@@ -112,23 +112,68 @@ SET wait_event_capture = stats;
 -- and a subsequent re-enable must allocate a fresh, empty ring.  Old
 -- trace records do NOT survive the disable, but aggregated stats in
 -- pg_stat_wait_event_timing DO (they live in a separate DSA allocation).
+--
+-- The assertions below are strict-equal on count-agnostic invariants.
+-- We deliberately avoid "count(*) = N" style assertions here: pg_sleep()
+-- loops around WaitLatch and can emit more than one PgSleep wait event
+-- per call under CPU contention (spurious latch wakes), so a fixed count
+-- would be flaky on busy CI runners.  Instead:
+--
+--   * ring_reallocated is decided by comparing phase 2's max(seq) against
+--     phase 1's (seq is derived from write_pos, which resets to 0 on a
+--     freshly allocated ring -- phase 2's records must have strictly
+--     smaller seq than phase 1's last record iff the ring was freed).
+--
+--   * stats_preserved_exactly checks that aggregated "calls" equals the
+--     exact sum of events seen in the two phase rings.  Whatever each
+--     phase's ring count happens to be, the aggregated counter must land
+--     on that sum; any drop, asymmetric duplication, or reset-on-toggle
+--     bug breaks the equality.
+--
+-- The symmetric-duplication case (both ring and aggregated doubled
+-- identically) is covered separately in test_wait_event_stress using
+-- deterministic exact-count input via stress_wait_events().
 SELECT pg_stat_reset_wait_event_timing(NULL);
 SET wait_event_capture = trace;
 SELECT pg_sleep(0.001);
 SELECT pg_sleep(0.001);
-SELECT count(*) = 2 AS ring_has_both_events
-FROM pg_backend_wait_event_trace
-WHERE wait_event = 'PgSleep';
+
+-- Stash phase 1's ring count + highest seq (all phase-1 records).
+CREATE TEMP TABLE wet_phase1 AS
+SELECT count(*) AS n, max(seq) AS max_seq
+FROM pg_backend_wait_event_trace WHERE wait_event = 'PgSleep';
+
+-- At least two PgSleep events captured (one per pg_sleep call, ignoring
+-- spurious wakes).  Catches drop bugs.
+SELECT n >= 2 AS phase1_captured_both_sleeps
+FROM wet_phase1;
+
 SET wait_event_capture = off;
 SET wait_event_capture = trace;
 SELECT pg_sleep(0.001);
-SELECT count(*) = 1 AS ring_freed_and_reallocated
-FROM pg_backend_wait_event_trace
-WHERE wait_event = 'PgSleep';
--- Aggregated stats survive the disable/re-enable cycle: 2 + 1 = 3
-SELECT calls = 3 AS stats_preserved_across_toggle
+
+-- Phase 2: stash fresh-ring count + max(seq).
+CREATE TEMP TABLE wet_phase2 AS
+SELECT count(*) AS n, max(seq) AS max_seq
+FROM pg_backend_wait_event_trace WHERE wait_event = 'PgSleep';
+
+-- The ring was freed iff phase 2's records all have seq strictly smaller
+-- than phase 1's last seq (write_pos started over at 0).  If the ring
+-- had persisted, phase 2 would contain phase 1's records plus new ones,
+-- so max(seq) would be >= phase1.max_seq.  Strict-equal on semantic.
+SELECT n >= 1 AND max_seq < (SELECT max_seq FROM wet_phase1)
+       AS ring_freed_and_reallocated
+FROM wet_phase2;
+
+-- Aggregated stats must equal the exact sum of the two phase ring counts.
+-- Catches drops (aggregated < sum), asymmetric duplication, and any
+-- reset-on-toggle bug that would wipe aggregated counters.
+SELECT calls = (SELECT n FROM wet_phase1) + (SELECT n FROM wet_phase2)
+       AS stats_preserved_exactly
 FROM pg_stat_wait_event_timing
 WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
+
+DROP TABLE wet_phase1, wet_phase2;
 SET wait_event_capture = stats;
 
 -- Overflow counters view: should be readable and overflow counts should
