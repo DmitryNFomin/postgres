@@ -700,6 +700,7 @@
 #track_cost_delay_timing = off
 #track_io_timing = off
 #track_wal_io_timing = off
+#wait_event_capture = off              # off, stats, trace
 #track_functions = none                 # none, pl, all
 #stats_fetch_consistency = cache        # cache, none, snapshot
 
