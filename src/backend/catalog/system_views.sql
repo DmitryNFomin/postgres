@@ -1556,3 +1556,75 @@ CREATE VIEW pg_aios AS
     SELECT * FROM pg_get_aios();
 REVOKE ALL ON pg_aios FROM PUBLIC;
 GRANT SELECT ON pg_aios TO pg_read_all_stats;
+
+-- Taxonomy for the histogram column on pg_stat_wait_event_timing.  The
+-- histogram array has one entry per bucket, in ascending order.  This
+-- view names them so callers do not have to memorise the layout; join
+-- against it via unnest(histogram) WITH ORDINALITY.
+--
+-- WARNING: keep this list in lock-step with WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS
+-- and wait_event_timing_bucket() in src/backend/utils/activity/wait_event_timing.c.
+-- Bin edges are powers of two in nanoseconds; labels are the approximate
+-- decimal-microsecond grid documented in src/include/utils/wait_event_timing.h.
+CREATE VIEW pg_wait_event_timing_histogram_buckets AS
+    SELECT bucket_idx, lower_ns, upper_ns, label
+    FROM (VALUES
+        ( 0,        0::bigint,     1024::bigint,  '<1us'::text),
+        ( 1,     1024::bigint,     2048::bigint,  '1-2us'),
+        ( 2,     2048::bigint,     4096::bigint,  '2-4us'),
+        ( 3,     4096::bigint,     8192::bigint,  '4-8us'),
+        ( 4,     8192::bigint,    16384::bigint,  '8-16us'),
+        ( 5,    16384::bigint,    32768::bigint,  '16-32us'),
+        ( 6,    32768::bigint,    65536::bigint,  '32-64us'),
+        ( 7,    65536::bigint,   131072::bigint,  '64-128us'),
+        ( 8,   131072::bigint,   262144::bigint,  '128-256us'),
+        ( 9,   262144::bigint,   524288::bigint,  '256-512us'),
+        (10,   524288::bigint,  1048576::bigint,  '512us-1ms'),
+        (11,  1048576::bigint,  2097152::bigint,  '1-2ms'),
+        (12,  2097152::bigint,  4194304::bigint,  '2-4ms'),
+        (13,  4194304::bigint,  8388608::bigint,  '4-8ms'),
+        (14,  8388608::bigint, 16777216::bigint,  '8-16ms'),
+        (15, 16777216::bigint, NULL::bigint,      '>=16ms')
+    ) AS t(bucket_idx, lower_ns, upper_ns, label);
+
+CREATE VIEW pg_stat_wait_event_timing AS
+    SELECT
+        t.pid,
+        t.backend_type,
+        t.backend_id,
+        t.wait_event_type,
+        t.wait_event,
+        t.calls,
+        t.total_time_ms,
+        t.avg_time_us,
+        t.max_time_us,
+        t.histogram
+    FROM pg_stat_get_wait_event_timing() t;
+REVOKE ALL ON pg_stat_wait_event_timing FROM PUBLIC;
+GRANT SELECT ON pg_stat_wait_event_timing TO pg_read_all_stats;
+
+CREATE VIEW pg_stat_wait_event_timing_overflow AS
+    SELECT
+        t.pid,
+        t.backend_type,
+        t.backend_id,
+        t.lwlock_overflow_count,
+        t.flat_overflow_count,
+        t.reset_count
+    FROM pg_stat_get_wait_event_timing_overflow() t;
+REVOKE ALL ON pg_stat_wait_event_timing_overflow FROM PUBLIC;
+GRANT SELECT ON pg_stat_wait_event_timing_overflow TO pg_read_all_stats;
+
+
+-- Session-local view: mirrors pg_backend_memory_contexts naming.
+-- Only the calling backend's trace ring is ever returned, regardless of
+-- the querying role, so no REVOKE is needed; the view is PUBLIC.
+CREATE VIEW pg_backend_wait_event_trace AS
+    SELECT
+        t.seq,
+        t.timestamp_ns,
+        t.wait_event_type,
+        t.wait_event,
+        t.duration_us,
+        t.query_id
+    FROM pg_get_backend_wait_event_trace() t;
