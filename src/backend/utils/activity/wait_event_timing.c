@@ -408,7 +408,7 @@ wait_event_trace_write_marker(uint8 record_type, int64 query_id)
 	seq = (uint32)(pos * 2 + 1);
 
 	rec->seq = seq;
-	pg_write_barrier();
+	pg_write_barrier();		/* release: payload stores must not rise above seq=odd */
 
 	INSTR_TIME_SET_CURRENT(now);
 	rec->record_type = record_type;
@@ -416,7 +416,7 @@ wait_event_trace_write_marker(uint8 record_type, int64 query_id)
 	rec->data.query.query_id = query_id;
 	rec->data.query.pad2 = 0;
 
-	pg_write_barrier();
+	pg_write_barrier();		/* release: payload stores must land before seq=even */
 	rec->seq = seq + 1;
 }
 
@@ -1197,7 +1197,7 @@ pgstat_report_wait_end_timing(void)
 				uint32	seq = (uint32)(pos * 2 + 1);
 
 				rec->seq = seq;
-				pg_write_barrier();
+				pg_write_barrier();		/* release: payload stores must not rise above seq=odd */
 
 				rec->record_type = TRACE_WAIT_EVENT;
 				rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
@@ -1205,7 +1205,7 @@ pgstat_report_wait_end_timing(void)
 				rec->data.wait.pad2 = 0;
 				rec->data.wait.duration_ns = duration_ns;
 
-				pg_write_barrier();
+				pg_write_barrier();		/* release: payload stores must land before seq=even */
 				rec->seq = seq + 1;
 			}
 		}
@@ -1441,7 +1441,7 @@ pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
 
 		/* Seqlock read */
 		seq_before = rec->seq;
-		pg_read_barrier();
+		pg_read_barrier();		/* acquire: payload loads below must not rise above this */
 
 		if (seq_before & 1)
 			continue;
@@ -1464,11 +1464,11 @@ pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
 		}
 		else
 		{
-			pg_read_barrier();
+			pg_read_barrier();	/* acquire: pair with seq_before read above before skipping */
 			continue;
 		}
 
-		pg_read_barrier();
+		pg_read_barrier();		/* acquire: payload loads must have landed before seq_after */
 		seq_after = rec->seq;
 
 		if (seq_before != seq_after)

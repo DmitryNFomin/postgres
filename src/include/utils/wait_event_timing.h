@@ -218,6 +218,25 @@ typedef struct WaitEventTraceRecord
 	}			data;
 } WaitEventTraceRecord;			/* 32 bytes */
 
+/*
+ * Compile-time invariants for the trace ring.  These used to live as
+ * prose in the header comment above; the asserts make accidental
+ * violations (e.g. someone adding a field to WaitEventTraceRecord) a
+ * build failure instead of a silently-broken ring.
+ */
+StaticAssertDecl(sizeof(WaitEventTraceRecord) == 32,
+				 "WaitEventTraceRecord must be exactly 32 bytes: the "
+				 "seqlock wrap-safety argument relies on single-record, "
+				 "single-cache-line writes, and ARR_DATA_PTR / mask-index "
+				 "math assumes a fixed record stride.");
+StaticAssertDecl((WAIT_EVENT_TRACE_RING_SIZE & (WAIT_EVENT_TRACE_RING_SIZE - 1)) == 0,
+				 "WAIT_EVENT_TRACE_RING_SIZE must be a power of two; "
+				 "the ring uses mask indexing (pos & (SIZE - 1)).");
+StaticAssertDecl(WAIT_EVENT_TRACE_RING_SIZE >= 2,
+				 "WAIT_EVENT_TRACE_RING_SIZE must be >= 2 so that the "
+				 "write_pos seqlock parity interleave yields distinct "
+				 "records across neighbouring slots.");
+
 typedef struct WaitEventTraceState
 {
 	pg_atomic_uint64 write_pos;	/* monotonically increasing, wraps via mask */
