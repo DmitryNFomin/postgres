@@ -1217,6 +1217,8 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	int			backend_idx;
+	ArrayType  *hist_array;
+	int64	   *hist_payload;
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -1228,6 +1230,24 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 	 */
 	if (!wait_event_timing_attach_array(false))
 		PG_RETURN_VOID();
+
+	/*
+	 * Allocate the histogram ArrayType once and reuse it across every row
+	 * emitted below.  Per-row we overwrite the 16 int8 payload slots via
+	 * ARR_DATA_PTR; tuplestore_putvalues flattens the varlena into its
+	 * stored tuple, so subsequent rewrites cannot corrupt previously
+	 * emitted rows.  Saves one palloc per row on SRFs that can easily
+	 * produce tens of thousands of rows on large clusters.
+	 */
+	{
+		Datum		zero_elems[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
+
+		memset(zero_elems, 0, sizeof(zero_elems));
+		hist_array = construct_array_builtin(zero_elems,
+											 WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS,
+											 INT8OID);
+		hist_payload = (int64 *) ARR_DATA_PTR(hist_array);
+	}
 
 	for (backend_idx = 0; backend_idx < NUM_WAIT_EVENT_TIMING_SLOTS; backend_idx++)
 	{
@@ -1286,17 +1306,9 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 										   : 0.0);
 				values[8] = Float8GetDatum((double) entry->max_ns / 1000.0);
 
-				{
-					Datum	elems[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
-
-					for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
-						elems[bucket] = Int64GetDatum(entry->histogram[bucket]);
-
-					values[9] = PointerGetDatum(
-						construct_array_builtin(elems,
-												WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS,
-												INT8OID));
-				}
+				for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
+					hist_payload[bucket] = entry->histogram[bucket];
+				values[9] = PointerGetDatum(hist_array);
 
 				tuplestore_putvalues(rsinfo->setResult,
 									rsinfo->setDesc,
@@ -1345,17 +1357,9 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 									   : 0.0);
 			values[8] = Float8GetDatum((double) entry->max_ns / 1000.0);
 
-			{
-				Datum	elems[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
-
-				for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
-					elems[bucket] = Int64GetDatum(entry->histogram[bucket]);
-
-				values[9] = PointerGetDatum(
-					construct_array_builtin(elems,
-											WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS,
-											INT8OID));
-			}
+			for (bucket = 0; bucket < WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS; bucket++)
+				hist_payload[bucket] = entry->histogram[bucket];
+			values[9] = PointerGetDatum(hist_array);
 
 			tuplestore_putvalues(rsinfo->setResult,
 								rsinfo->setDesc,
