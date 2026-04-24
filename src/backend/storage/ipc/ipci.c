@@ -53,6 +53,7 @@
 #include "utils/guc.h"
 #include "utils/injection_point.h"
 #include "utils/wait_event.h"
+#include "utils/wait_event_timing.h"
 
 /* GUCs */
 int			shared_memory_type = DEFAULT_SHARED_MEMORY_TYPE;
@@ -137,6 +138,8 @@ CalculateShmemSize(void)
 	size = add_size(size, AsyncShmemSize());
 	size = add_size(size, StatsShmemSize());
 	size = add_size(size, WaitEventCustomShmemSize());
+	size = add_size(size, WaitEventTimingShmemSize());
+	size = add_size(size, WaitEventTraceControlShmemSize());
 	size = add_size(size, InjectionPointShmemSize());
 	size = add_size(size, SlotSyncShmemSize());
 	size = add_size(size, AioShmemSize());
@@ -325,6 +328,8 @@ CreateOrAttachShmemStructs(void)
 	AsyncShmemInit();
 	StatsShmemInit();
 	WaitEventCustomShmemInit();
+	WaitEventTimingShmemInit();
+	WaitEventTraceControlShmemInit();
 	InjectionPointShmemInit();
 	AioShmemInit();
 	WaitLSNShmemInit();
