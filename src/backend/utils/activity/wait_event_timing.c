@@ -1072,11 +1072,14 @@ pgstat_report_wait_end_timing(void)
 	 * atomic load; almost always hits the fast path (branch well
 	 * predicted).  When we detect that our shared reset_generation has
 	 * advanced, clear our own counters on behalf of the requester, then
-	 * continue with normal accumulation.  The in-flight wait fields
-	 * (wait_start / current_event) are deliberately left untouched so we
-	 * don't lose the measurement that's already running; the completing
-	 * event will land in the freshly-zeroed counters, which is the
-	 * desired behaviour.
+	 * continue with normal accumulation.  wait_start is deliberately
+	 * left untouched so we don't lose the measurement that's already
+	 * running; the completing event will land in the freshly-zeroed
+	 * counters, which is the desired behaviour.  current_event is safe
+	 * to zero here because the local "event" above already captured its
+	 * value before the reset block; zeroing it kills a source of stale
+	 * state that external readers would otherwise observe on the slot
+	 * between waits.
 	 */
 	cur_reset_gen = pg_atomic_read_u32(&my_wait_event_timing->reset_generation);
 	if (unlikely(cur_reset_gen != my_last_reset_generation))
@@ -1088,6 +1091,7 @@ pgstat_report_wait_end_timing(void)
 		my_wait_event_timing->reset_count++;
 		my_wait_event_timing->lwlock_overflow_count = 0;
 		my_wait_event_timing->flat_overflow_count = 0;
+		my_wait_event_timing->current_event = 0;
 		my_last_reset_generation = cur_reset_gen;
 	}
 
@@ -1645,6 +1649,14 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 		 * Reset own backend.  Synchronous: no lock or atomic indirection
 		 * needed.  If capture has never been enabled in this backend yet,
 		 * my_wait_event_timing is still NULL; nothing to reset.
+		 *
+		 * wait_start is already zero here -- pgstat_report_wait_end_timing
+		 * zeros it at the end of every wait, and the backend cannot be mid-
+		 * wait while it is executing this SQL function -- so there is no
+		 * in-flight measurement to preserve.  We zero current_event for the
+		 * same hygiene reason as the cross-backend reset path above: keep
+		 * external readers of the slot from seeing stale state between
+		 * waits.
 		 */
 		if (my_wait_event_timing != NULL)
 		{
@@ -1655,6 +1667,7 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 			my_wait_event_timing->reset_count++;
 			my_wait_event_timing->lwlock_overflow_count = 0;
 			my_wait_event_timing->flat_overflow_count = 0;
+			my_wait_event_timing->current_event = 0;
 		}
 		PG_RETURN_VOID();
 	}
