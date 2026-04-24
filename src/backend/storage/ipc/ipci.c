@@ -24,6 +24,8 @@
 #include "storage/shmem_internal.h"
 #include "storage/subsystems.h"
 #include "utils/guc.h"
+#include "utils/wait_event.h"
+#include "utils/wait_event_timing.h"
 
 /* GUCs */
 int			shared_memory_type = DEFAULT_SHARED_MEMORY_TYPE;
