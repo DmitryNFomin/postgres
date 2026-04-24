@@ -8883,6 +8883,50 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-wait-event-capture" xreflabel="wait_event_capture">
+      <term><varname>wait_event_capture</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>wait_event_capture</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Controls collection of wait event instrumentation data.  Requires
+        the server to be compiled with
+        <option>--enable-wait-event-timing</option>.  Possible values are
+        <literal>off</literal>, <literal>stats</literal>, and
+        <literal>trace</literal>; each level is a strict superset of the
+        previous one.
+       </para>
+       <para>
+        At <literal>stats</literal>, the server records per-backend wait
+        event statistics (counts, total and average durations, log2
+        histograms) visible in the
+        <link linkend="monitoring-pg-stat-wait-event-timing-view">
+        <structname>pg_stat_wait_event_timing</structname></link> view.
+        Two <function>clock_gettime()</function> calls are added around
+        every wait event transition, costing approximately
+        40&ndash;100&nbsp;ns each on modern hardware.
+       </para>
+       <para>
+        At <literal>trace</literal>, the server additionally records every
+        individual wait event into a per-session ring buffer (~4&nbsp;MB of
+        DSA per backend, allocated lazily on first enable), exposed via the
+        <link linkend="monitoring-pg-backend-wait-event-trace-view">
+        <structname>pg_backend_wait_event_trace</structname></link> view.
+        Query attribution via <literal>QUERY_START</literal>/<literal>QUERY_END</literal>
+        markers requires <xref linkend="guc-track-activities"/> to be
+        enabled; when <varname>track_activities</varname> is off, query
+        markers are not emitted and per-query attribution is unavailable.
+       </para>
+       <para>
+        The default is <literal>off</literal>.  Only superusers and users
+        with the appropriate <literal>SET</literal> privilege can change
+        this setting.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-track-functions" xreflabel="track_functions">
       <term><varname>track_functions</varname> (<type>enum</type>)
       <indexterm>
