@@ -169,6 +169,7 @@ pgstat_reset_wait_event_timing_storage(void)
 #include "catalog/pg_authid.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "nodes/queryjumble.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
@@ -979,6 +980,15 @@ assign_wait_event_capture(int newval, void *extra)
 		ereport(WARNING,
 				(errmsg("wait_event_capture = trace query attribution "
 						"requires track_activities to be enabled")));
+
+	if (newval == WAIT_EVENT_CAPTURE_TRACE &&
+		compute_query_id == COMPUTE_QUERY_ID_OFF)
+		ereport(WARNING,
+				(errmsg("wait_event_capture = trace query attribution "
+						"requires compute_query_id to be enabled"),
+				 errhint("Set compute_query_id to \"on\" or \"auto\", or "
+						 "load an extension that enables it (e.g. "
+						 "pg_stat_statements).")));
 }
 
 /*
@@ -1607,34 +1617,31 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 }
 
 /*
- * SQL function: pg_stat_reset_wait_event_timing(backend_id int4)
+ * SQL function: pg_stat_reset_wait_event_timing(pid int4)
  *
- * Resets wait event timing counters.
- *   backend_id = NULL or 0: reset own backend (synchronous)
- *   backend_id > 0:         request reset of a specific backend (superuser)
- *   backend_id = -1:        request reset of ALL backends (superuser)
+ * Resets wait-event-timing counters for a single backend, identified by PID.
+ *
+ *   NULL (or MyProcPid): reset caller's own session synchronously --
+ *                        single writer, no lock needed.
+ *   another PID:         request a cross-backend reset (superuser only).
+ *   unknown / dead PID:  silent no-op, matching pg_stat_reset_backend_stats.
+ *
+ * To reset every backend, use pg_stat_reset_wait_event_timing_all().
  *
  * Cross-backend resets are asynchronous by design: the function atomically
- * bumps a per-slot reset_generation counter and wakes the target's latch;
- * the owning backend observes the change on its next wait_end and clears
- * its own counters.  This keeps the hot path lock-free and avoids the
- * cross-writer races that plagued an earlier LWLock-based implementation.
+ * bumps the target slot's reset_generation counter and wakes the target's
+ * latch; the owning backend observes the change on its next wait_end and
+ * clears its own counters.  This keeps the hot path lock-free and avoids
+ * the cross-writer races that plagued an earlier LWLock-based design.
  *
- * Visibility is near-immediate for active backends (the next event ends
+ * Visibility is near-immediate for active backends (their next event ends
  * within microseconds) and is bounded by the target's wait duration for
  * idle backends -- SetLatch shortens that by interrupting any current
  * WaitLatch.  The function returns before the reset has been observed;
  * callers that need strict read-after-reset semantics should either
  * target their own backend (where reset is synchronous) or poll the
- * target until its reset_count increments.
- */
-/*
- * Reset wait-event-timing counters for a single backend, identified by PID.
- *
- * NULL (or MyProcPid) resets the caller's own session synchronously -- single
- * writer, no lock needed.  A non-NULL PID belonging to another backend uses
- * the asynchronous request/response protocol and requires superuser.  An
- * unknown / invalid PID is a silent no-op, matching pg_stat_reset_backend_stats.
+ * target's reset_count column in pg_stat_wait_event_timing_overflow
+ * until it increments.
  */
 Datum
 pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)

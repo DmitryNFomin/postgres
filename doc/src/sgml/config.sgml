@@ -9141,10 +9141,42 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         DSA per backend, allocated lazily on first enable), exposed via the
         <link linkend="monitoring-pg-backend-wait-event-trace-view">
         <structname>pg_backend_wait_event_trace</structname></link> view.
-        Query attribution via <literal>QUERY_START</literal>/<literal>QUERY_END</literal>
-        markers requires <xref linkend="guc-track-activities"/> to be
-        enabled; when <varname>track_activities</varname> is off, query
-        markers are not emitted and per-query attribution is unavailable.
+        Each record carries either a wait event sample or a query-attribution
+        marker; consumers reconstruct which query owns which wait by
+        interleaving the two streams.
+       </para>
+       <para>
+        Two marker families are emitted into the ring:
+        <itemizedlist>
+         <listitem>
+          <para>
+           <literal>ExecStart</literal>/<literal>ExecEnd</literal> markers
+           bracket every executor invocation
+           (<function>ExecutorStart</function>/<function>ExecutorEnd</function>).
+           They are the primary attribution signal: every executable
+           statement, including those run inside parallel workers and
+           pipelined extended-protocol messages, is bracketed.  Emission
+           requires <xref linkend="guc-compute-query-id"/> to produce a
+           non-zero <structfield>query_id</structfield>; otherwise the
+           markers are silently skipped.  They are <emphasis>not</emphasis>
+           gated on <varname>track_activities</varname>.
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           <literal>QueryStart</literal>/<literal>QueryEnd</literal> markers
+           fire at top-level query identifier transitions and at the
+           transition to idle, providing inter-statement boundaries that
+           the executor markers cannot (e.g. the
+           <literal>ClientRead</literal> wait between statements).  They
+           require both <xref linkend="guc-track-activities"/> and
+           <xref linkend="guc-compute-query-id"/> to be enabled.
+          </para>
+         </listitem>
+        </itemizedlist>
+        A <literal>WARNING</literal> is logged at the time
+        <varname>wait_event_capture</varname> is set to <literal>trace</literal>
+        if either prerequisite is missing.
        </para>
        <para>
         The default is <literal>off</literal>.  Only superusers and users

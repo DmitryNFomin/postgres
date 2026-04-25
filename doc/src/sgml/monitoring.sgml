@@ -4063,9 +4063,14 @@ ORDER  BY b.bucket_idx;
   <para>
    The <structname>pg_backend_wait_event_trace</structname> view shows
    individual wait event records from the <emphasis>current backend's</emphasis>
-   trace ring buffer.  Each record captures a single wait event with
-   its timestamp and duration, or a
-   <literal>QUERY_START</literal>/<literal>QUERY_END</literal> marker.
+   trace ring buffer.  Each record captures either a single wait event
+   (with timestamp and duration) or a query-attribution marker.  Two
+   marker families exist: <literal>ExecStart</literal>/<literal>ExecEnd</literal>
+   bracket every executor invocation, and
+   <literal>QueryStart</literal>/<literal>QueryEnd</literal> mark
+   top-level query-id transitions and the transition to idle.  See
+   <xref linkend="guc-wait-event-capture"/> for the gating rules of
+   each marker family.
    Requires <xref linkend="guc-wait-event-capture"/> to be set to
    <literal>trace</literal>.  The ring buffer holds up to 131072 records;
    older records are overwritten in FIFO order.  The view is session-local
@@ -4081,8 +4086,9 @@ ORDER  BY b.bucket_idx;
    external consumption.  At high wait event rates (e.g., 220K events/sec),
    the ring wraps in roughly 0.5&ndash;1 seconds.  External consumers
    (background workers, extensions) can attribute events to queries by
-   scanning for <literal>QUERY_START</literal> markers; if such a marker
-   has been overwritten, events before the next visible marker are
+   scanning for <literal>ExecStart</literal> markers (or, when the
+   executor markers are unavailable, <literal>QueryStart</literal>); if
+   both have been overwritten, events before the next visible marker are
    unattributed.  Consumers should poll the ring buffer before it wraps
    and can use <structfield>st_query_id</structfield> from
    <structname>PgBackendStatus</structname> as a fallback for the current
@@ -4136,7 +4142,9 @@ ORDER  BY b.bucket_idx;
        <structfield>wait_event</structfield> <type>text</type>
       </para>
       <para>
-       Wait event name, or <literal>QueryStart</literal>/<literal>QueryEnd</literal>
+       Wait event name, or one of <literal>ExecStart</literal>,
+       <literal>ExecEnd</literal>, <literal>QueryStart</literal>,
+       <literal>QueryEnd</literal> for query-attribution markers.
       </para></entry>
      </row>
 
