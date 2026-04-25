@@ -99,14 +99,26 @@ typedef struct WaitEventTimingEntry
 #define LWLOCK_TIMING_HASH_SIZE		512		/* must be power of 2 */
 #define LWLOCK_TIMING_MAX_ENTRIES	192		/* ~37.5% load factor at cap */
 
+/*
+ * Sentinel marking an empty hash slot.  We deliberately reserve the
+ * upper end of the uint16 range (0xFFFF) instead of 0 so that any
+ * legal LWLock tranche ID -- including the currently-unused tranche 0
+ * (lwlocklist.h: "0 is available; was formerly BufFreelistLock") --
+ * can be stored and matched correctly.  Keeping the sentinel decoupled
+ * from the LWLock numbering makes this hash table robust to future
+ * changes in lwlocklist.h.
+ */
+#define LWLOCK_TIMING_EMPTY_SLOT	((uint16) 0xFFFF)
+
 typedef struct LWLockTimingHashEntry
 {
-	uint16		tranche_id;		/* 0 = empty slot; 16-bit matches
-							 * core wait_event_info encoding
-							 * (event & 0xFFFF).  Theoretical
-							 * limit of 65535 tranches is
-							 * academic -- real deployments
-							 * use <200. */
+	uint16		tranche_id;		/* LWLOCK_TIMING_EMPTY_SLOT (0xFFFF)
+								 * marks an unoccupied slot.  Real
+								 * tranche IDs are uint16 and use the
+								 * remaining range; the theoretical
+								 * limit of 65534 distinct tranches is
+								 * academic -- real deployments use
+								 * <200. */
 	uint16		dense_idx;		/* index into lwlock_events[] */
 } LWLockTimingHashEntry;
 

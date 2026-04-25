@@ -288,6 +288,27 @@ wait_event_timing_index(uint32 wait_event_info)
 }
 
 /*
+ * Reset an LWLockTimingHash to its empty initial state.
+ *
+ * The DSA region we live in is zero-initialised on allocation, but the
+ * empty-slot sentinel is LWLOCK_TIMING_EMPTY_SLOT (0xFFFF), not 0, so
+ * we cannot rely on a plain memset(0) for the entries array.  This
+ * helper centralises the correct clear sequence -- bulk-zero everything
+ * (which initialises num_used and lwlock_events[] correctly), then walk
+ * entries[] writing the sentinel.  Every caller that needs to reset or
+ * initialise the hash routes through here.
+ */
+static void
+lwlock_timing_hash_clear(LWLockTimingHash *ht)
+{
+	int		i;
+
+	memset(ht, 0, sizeof(LWLockTimingHash));
+	for (i = 0; i < LWLOCK_TIMING_HASH_SIZE; i++)
+		ht->entries[i].tranche_id = LWLOCK_TIMING_EMPTY_SLOT;
+}
+
+/*
  * Look up (or insert) timing entry for an LWLock tranche ID.
  */
 static WaitEventTimingEntry *
@@ -304,7 +325,7 @@ lwlock_timing_lookup(LWLockTimingHash *ht, uint16 tranche_id)
 		if (e->tranche_id == tranche_id)
 			return &ht->lwlock_events[e->dense_idx];
 
-		if (e->tranche_id == 0)
+		if (e->tranche_id == LWLOCK_TIMING_EMPTY_SLOT)
 		{
 			if (ht->num_used >= LWLOCK_TIMING_MAX_ENTRIES)
 				return NULL;
@@ -635,8 +656,7 @@ pgstat_wait_event_timing_lazy_attach(void)
 	 */
 	memset(my_wait_event_timing->events, 0,
 		   sizeof(my_wait_event_timing->events));
-	memset(&my_wait_event_timing->lwlock_hash, 0,
-		   sizeof(LWLockTimingHash));
+	lwlock_timing_hash_clear(&my_wait_event_timing->lwlock_hash);
 	my_wait_event_timing->reset_count = 0;
 	my_wait_event_timing->lwlock_overflow_count = 0;
 	my_wait_event_timing->flat_overflow_count = 0;
@@ -1087,8 +1107,7 @@ pgstat_report_wait_end_timing(void)
 	{
 		memset(my_wait_event_timing->events, 0,
 			   sizeof(my_wait_event_timing->events));
-		memset(&my_wait_event_timing->lwlock_hash, 0,
-			   sizeof(LWLockTimingHash));
+		lwlock_timing_hash_clear(&my_wait_event_timing->lwlock_hash);
 		my_wait_event_timing->reset_count++;
 		my_wait_event_timing->lwlock_overflow_count = 0;
 		my_wait_event_timing->flat_overflow_count = 0;
@@ -1329,7 +1348,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 			const char *event_name;
 			int			bucket;
 
-			if (he->tranche_id == 0)
+			if (he->tranche_id == LWLOCK_TIMING_EMPTY_SLOT)
 				continue;
 
 			entry = &state->lwlock_hash.lwlock_events[he->dense_idx];
@@ -1669,8 +1688,7 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 		{
 			memset(my_wait_event_timing->events, 0,
 				   sizeof(my_wait_event_timing->events));
-			memset(&my_wait_event_timing->lwlock_hash, 0,
-				   sizeof(LWLockTimingHash));
+			lwlock_timing_hash_clear(&my_wait_event_timing->lwlock_hash);
 			my_wait_event_timing->reset_count++;
 			my_wait_event_timing->lwlock_overflow_count = 0;
 			my_wait_event_timing->flat_overflow_count = 0;
