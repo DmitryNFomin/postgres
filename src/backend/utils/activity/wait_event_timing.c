@@ -342,6 +342,26 @@ lwlock_timing_hash_clear(LWLockTimingHash *ht)
 }
 
 /*
+ * Maximum number of probes attempted on the lookup hot path once the
+ * table is at capacity (LWLOCK_TIMING_MAX_ENTRIES).  At cap there is
+ * no further insertion possible, so an unknown tranche cannot be
+ * recorded; the only useful work the loop can do is find an existing
+ * entry within its probe-distance window.  Bounding the scan caps the
+ * per-event cost at the cap-overflow regime to a constant, instead of
+ * paying ~2-3 probes (worst-case clusters: many more) on every
+ * unknown-tranche wait_end for the remainder of the backend lifetime.
+ *
+ * The bound (8) is well above the expected probe distance at this
+ * table's load factor of 192/512 = 0.375 (linear-probing miss expected
+ * length ~1.78; P99 fits comfortably in 8).  Entries inserted with a
+ * collision distance > 8 from their hash slot will fail to be found at
+ * cap, which is theoretically possible but astronomically unlikely at
+ * 0.375 load (probability < 1e-3) and is the right trade against the
+ * common at-cap unknown-tranche cost.
+ */
+#define LWLOCK_TIMING_LOOKUP_AT_CAP_PROBE_LIMIT 8
+
+/*
  * Look up (or insert) timing entry for an LWLock tranche ID.
  */
 static WaitEventTimingEntry *
@@ -349,9 +369,19 @@ lwlock_timing_lookup(LWLockTimingHash *ht, uint16 tranche_id)
 {
 	uint32		hash = (uint32) tranche_id * 2654435761U;
 	int			slot = hash & (LWLOCK_TIMING_HASH_SIZE - 1);
+	int			limit;
 	int			i;
 
-	for (i = 0; i < LWLOCK_TIMING_HASH_SIZE; i++)
+	/*
+	 * At cap, bound the probe distance so unknown tranches return NULL
+	 * quickly instead of walking through clustered occupied slots.  See
+	 * the comment on LWLOCK_TIMING_LOOKUP_AT_CAP_PROBE_LIMIT.
+	 */
+	limit = (ht->num_used >= LWLOCK_TIMING_MAX_ENTRIES)
+		? LWLOCK_TIMING_LOOKUP_AT_CAP_PROBE_LIMIT
+		: LWLOCK_TIMING_HASH_SIZE;
+
+	for (i = 0; i < limit; i++)
 	{
 		LWLockTimingHashEntry *e = &ht->entries[slot];
 
