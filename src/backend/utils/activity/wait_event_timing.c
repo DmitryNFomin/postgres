@@ -247,9 +247,33 @@ static WaitEventTraceControl *WaitEventTraceCtl = NULL;
 static dsa_area *trace_dsa = NULL;
 int			my_trace_proc_number = -1;
 
+/*
+ * Same-backend coordination between pg_get_backend_wait_event_trace (the
+ * own-session SRF reader) and wait_event_trace_release_slot (the GUC
+ * step-down path that frees this backend's ring).  Both paths run in this
+ * same backend, single-threaded, so a plain bool is sufficient -- no
+ * atomics needed.
+ *
+ *   srf_in_progress   set true while the SRF is iterating the ring; the
+ *                     release path observes this and defers the dsa_free
+ *                     instead of yanking the chunk out from under us.
+ *
+ *   release_pending   set by the release path when it had to defer; the
+ *                     SRF's PG_FINALLY checks it and performs the deferred
+ *                     dsa_free after the iteration completes.
+ *
+ * Cross-backend readers (extensions, bgworkers reading another backend's
+ * ring) cannot use this mechanism -- they coordinate with the release
+ * path via WaitEventTraceCtl->lock instead.  See the header for the
+ * recommended snapshot-under-lock pattern for those consumers.
+ */
+static bool wait_event_trace_srf_in_progress = false;
+static bool wait_event_trace_release_pending = false;
+
 /* Forward declarations for lazy-attach helpers */
 static void wait_event_timing_ensure_dsa(void);
 static bool wait_event_timing_attach_array(bool allocate_if_missing);
+static void wait_event_trace_release_slot(int procNumber);
 
 /*
  * Mapping arrays for the flat events[] array, generated from
@@ -895,6 +919,16 @@ wait_event_trace_detach(int procNumber)
  * Safe to call from a GUC assign hook.  If the ring is later re-attached
  * (user re-enables TRACE), wait_event_trace_attach takes the "allocate"
  * branch again and a fresh ring is created on first wait event.
+ *
+ * If pg_get_backend_wait_event_trace is currently iterating our own ring
+ * (wait_event_trace_srf_in_progress), we must NOT free the chunk out
+ * from under it: that would be a use-after-free on the records[] the SRF
+ * is still reading.  Set wait_event_trace_release_pending instead and
+ * return; the SRF's PG_FINALLY block will perform the deferred free
+ * after iteration completes.  In practice this branch is unreachable in
+ * current PG (assign hooks fire only at command boundaries and the SRF
+ * is a single command), but it makes the invariant explicit and the
+ * future-proofing free.
  */
 static void
 wait_event_trace_release_slot(int procNumber)
@@ -911,6 +945,16 @@ wait_event_trace_release_slot(int procNumber)
 
 	if (WaitEventTraceCtl == NULL || trace_dsa == NULL)
 		return;
+
+	/*
+	 * Same-backend SRF is iterating our own ring.  Defer the free until
+	 * the SRF's PG_FINALLY runs.
+	 */
+	if (wait_event_trace_srf_in_progress)
+	{
+		wait_event_trace_release_pending = true;
+		return;
+	}
 
 	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
 		return;
@@ -1407,10 +1451,18 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
  * lives in per-backend DSA and reading another session's segment would
  * require attaching/detaching under the trace control lock, which is
  * the responsibility of external consumers (extensions, background
- * workers) that can manage their own synchronization via
- * WaitEventTraceCtl->lock.  The name mirrors
+ * workers).  The recommended cross-backend reader pattern is documented
+ * on WaitEventTraceControl in wait_event_timing.h.  The name mirrors
  * pg_get_backend_memory_contexts() to make the session-local scope
  * explicit at the API level.
+ *
+ * Same-backend coordination with wait_event_trace_release_slot uses the
+ * wait_event_trace_srf_in_progress / _release_pending flags rather than
+ * an LWLock: same-backend serialization is implicit, so a per-backend
+ * bool plus a deferred-free path is sufficient and avoids any of the
+ * cross-backend lock-hold latency that the cross-backend reader pattern
+ * has to manage.  PG_TRY/PG_FINALLY guarantees the flag is cleared and
+ * any deferred dsa_free is performed even on ereport(ERROR).
  *
  * Uses InitMaterializedSRF (materialize-all).  The ring holds up to
  * WAIT_EVENT_TRACE_RING_SIZE (131072) records; full materialization is
@@ -1441,6 +1493,15 @@ pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
 	read_start = (write_pos > WAIT_EVENT_TRACE_RING_SIZE)
 		? write_pos - WAIT_EVENT_TRACE_RING_SIZE : 0;
 
+	/*
+	 * Mark the iteration in progress so wait_event_trace_release_slot
+	 * defers any concurrent dsa_free of our own ring (see the comment on
+	 * that function for the deferral protocol).  PG_FINALLY clears the
+	 * flag and performs any deferred free, even on ereport(ERROR).
+	 */
+	wait_event_trace_srf_in_progress = true;
+	PG_TRY();
+	{
 	for (i = read_start; i < write_pos; i++)
 	{
 		WaitEventTraceRecord *rec =
@@ -1538,6 +1599,25 @@ pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
 							rsinfo->setDesc,
 							values, nulls);
 	}
+	}
+	PG_FINALLY();
+	{
+		wait_event_trace_srf_in_progress = false;
+
+		/*
+		 * If a GUC step-down fired during iteration, it deferred the
+		 * dsa_free.  Process it now that we're safely past the loop.
+		 * Re-check release_pending under the same flag to handle the
+		 * (impossible-today, possible-tomorrow) case of a nested SRF.
+		 */
+		if (wait_event_trace_release_pending)
+		{
+			wait_event_trace_release_pending = false;
+			if (my_trace_proc_number >= 0)
+				wait_event_trace_release_slot(my_trace_proc_number);
+		}
+	}
+	PG_END_TRY();
 
 	PG_RETURN_VOID();
 }

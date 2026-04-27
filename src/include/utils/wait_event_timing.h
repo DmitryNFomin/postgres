@@ -267,14 +267,41 @@ typedef struct WaitEventTraceState
  * Writers (owning backend) claim slots via pg_atomic_fetch_add_u64 on
  * write_pos and use a per-record seqlock for torn-read detection.
  *
- * External readers (extensions, background workers) should:
+ * External readers (extensions, background workers reading another
+ * backend's ring) should:
+ *
  * 1. Acquire WaitEventTraceCtl->lock in LW_SHARED before resolving
- *    trace_ptrs[procNumber] via dsa_get_address, and hold it for the
- *    duration of the scan.  This prevents the owning backend from
- *    freeing the DSA chunk during the read.
- * 2. Use the seqlock protocol: read rec->seq before and after copying
- *    fields; skip the record if either value is odd or they differ.
- * 3. Track write_pos between polls to process only new records.
+ *    trace_ptrs[procNumber] via dsa_get_address.  This prevents the
+ *    owning backend's wait_event_trace_release_slot from dsa_free()'ing
+ *    the chunk while you hold a pointer into it.
+ *
+ * 2. Hold the LWLock only long enough to read write_pos and copy the
+ *    relevant slice of records[] into local memory.  Release the lock
+ *    BEFORE doing per-record processing.  Holding the lock during the
+ *    full processing path turns every other backend's first-time
+ *    wait_event_trace_attach (e.g. new connections under cluster-wide
+ *    wait_event_capture = trace) into a wait that scales with your
+ *    processing speed -- not acceptable on OLTP workloads.  The
+ *    snapshot-then-process pattern caps the lock-hold time at memcpy
+ *    bandwidth (~1 ms for the full 4 MB ring; sub-ms for incremental
+ *    polls that copy only the delta since the last poll).
+ *
+ * 3. Use the seqlock protocol on each record copied: read rec->seq
+ *    before and after copying fields; skip the record if either value
+ *    is odd or they differ.  This catches concurrent writes by the
+ *    owning backend (which never takes the lock above -- the writer
+ *    is purely lock-free, see pgstat_report_wait_end_timing).
+ *
+ * 4. Track write_pos between polls and copy only new records, so the
+ *    snapshot under the lock stays small even when scanning many
+ *    backends.
+ *
+ * Same-backend readers (the in-tree pg_get_backend_wait_event_trace SRF)
+ * do NOT use the LWLock above -- same-backend serialization is implicit
+ * because a backend can only run one command at a time, and the SRF
+ * coordinates with wait_event_trace_release_slot via per-backend flags.
+ * That mechanism is private to wait_event_timing.c; external code should
+ * use the cross-backend protocol described above.
  */
 typedef struct WaitEventTraceControl
 {
