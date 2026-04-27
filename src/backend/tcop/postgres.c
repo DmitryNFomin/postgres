@@ -1425,6 +1425,19 @@ exec_parse_message(const char *query_string,	/* string to execute */
 	 */
 	debug_query_string = query_string;
 
+	/*
+	 * In pipelined extended protocol, a Parse can arrive while the previous
+	 * query's st_query_id is still set and st_state is still RUNNING (no
+	 * Sync->idle between queries, so send_ready_for_query has not yet
+	 * emitted the prior QUERY_END marker).  Flush the prior id with
+	 * force=true so the QUERY_END marker fires before pgstat_report_activity
+	 * below silently zeros st_query_id.  Skip when st_state != RUNNING:
+	 * coming from idle means send_ready_for_query has already emitted the
+	 * QUERY_END for whatever residual st_query_id remains, and re-emitting
+	 * here would double-count.
+	 */
+	if (MyBEEntry != NULL && MyBEEntry->st_state == STATE_RUNNING)
+		pgstat_report_query_id(0, true);
 	pgstat_report_activity(STATE_RUNNING, query_string);
 
 	set_ps_display("PARSE");
@@ -1694,6 +1707,12 @@ exec_bind_message(StringInfo input_message)
 	 */
 	debug_query_string = psrc->query_string;
 
+	/* See exec_parse_message for rationale.  In particular, the state
+	 * gate prevents a duplicate QUERY_END when this Bind is the first
+	 * message after a Sync->idle transition (where send_ready_for_query
+	 * has already emitted QUERY_END for any residual st_query_id). */
+	if (MyBEEntry != NULL && MyBEEntry->st_state == STATE_RUNNING)
+		pgstat_report_query_id(0, true);
 	pgstat_report_activity(STATE_RUNNING, psrc->query_string);
 
 	foreach(lc, psrc->query_list)
@@ -2185,6 +2204,14 @@ exec_execute_message(const char *portal_name, long max_rows)
 	 */
 	debug_query_string = sourceText;
 
+	/* See exec_parse_message.  Closes the per-phase
+	 * QUERY_START..QUERY_END pair from the preceding Bind (or from the
+	 * prior pipelined Execute) so trace consumers see balanced markers
+	 * across Parse/Bind/Execute.  State gate avoids a duplicate
+	 * QUERY_END when this Execute is the first message after a
+	 * Sync->idle transition. */
+	if (MyBEEntry != NULL && MyBEEntry->st_state == STATE_RUNNING)
+		pgstat_report_query_id(0, true);
 	pgstat_report_activity(STATE_RUNNING, sourceText);
 
 	foreach(lc, portal->stmts)

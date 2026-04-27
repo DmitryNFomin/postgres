@@ -4095,6 +4095,26 @@ ORDER  BY b.bucket_idx;
    query context.
   </para>
 
+  <para>
+   <literal>QueryStart</literal>/<literal>QueryEnd</literal> markers are
+   emitted as matched pairs around each protocol phase that touches a
+   <structfield>query_id</structfield>.  In simple protocol that is one
+   pair per statement.  In extended protocol there is one pair around
+   each of <literal>Parse</literal>, <literal>Bind</literal>, and
+   <literal>Execute</literal> for the same
+   <structfield>query_id</structfield> &mdash; so a single parameterized
+   statement produces three nested pairs, plus the surrounding
+   <literal>ExecStart</literal>/<literal>ExecEnd</literal> pair from the
+   executor.  This per-phase pairing lets consumers measure how much
+   time a query spent in each protocol phase (parse vs. bind vs.
+   execute) by computing the duration between each pair, and lets a
+   total-time-per-query rollup be expressed as the sum of pair
+   durations rather than a single subtraction.  Consumers that just want
+   "how long did this query take in the executor" should use the
+   <literal>ExecStart</literal>/<literal>ExecEnd</literal> pair, which
+   fires exactly once per statement regardless of protocol.
+  </para>
+
   <table id="pg-backend-wait-event-trace-view" xreflabel="pg_backend_wait_event_trace">
    <title><structname>pg_backend_wait_event_trace</structname> View</title>
    <tgroup cols="1">
