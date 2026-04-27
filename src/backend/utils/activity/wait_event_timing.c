@@ -263,21 +263,30 @@ static bool wait_event_timing_attach_array(bool allocate_if_missing);
  * Convert wait_event_info to a flat index for the events[] array.
  * For bounded classes, eventId equals the array index within the class
  * (the enum values start at PG_WAIT_<CLASS> and increment by one).
+ *
+ * Class extraction follows the same idiom as pgstat_get_wait_event_type:
+ * mask off the class bits and compare against the full PG_WAIT_*
+ * constants, rather than shifting both sides down to a byte.  The
+ * dense-table lookup still needs the byte-form class id, but that
+ * conversion is now an isolated array-index step rather than a
+ * load-bearing piece of encoding-layout knowledge in the comparison.
  */
 static int
 wait_event_timing_index(uint32 wait_event_info)
 {
-	int			classId = (wait_event_info >> 24) & 0xFF;
-	int			eventId = wait_event_info & 0xFFFF;	/* array index for bounded classes */
+	uint32		classId = wait_event_info & WAIT_EVENT_CLASS_MASK;
+	int			eventId = wait_event_info & WAIT_EVENT_ID_MASK;
+	int			class_byte;
 	int			dense;
 
-	if (classId == (PG_WAIT_LWLOCK >> 24))
+	if (classId == PG_WAIT_LWLOCK)
 		return WAIT_EVENT_TIMING_IDX_LWLOCK;
 
-	if (unlikely(classId >= WAIT_EVENT_TIMING_RAW_CLASSES))
+	class_byte = classId >> 24;
+	if (unlikely(class_byte >= WAIT_EVENT_TIMING_RAW_CLASSES))
 		return -1;
 
-	dense = wait_event_class_dense[classId];
+	dense = wait_event_class_dense[class_byte];
 	if (unlikely(dense < 0))
 		return -1;
 
