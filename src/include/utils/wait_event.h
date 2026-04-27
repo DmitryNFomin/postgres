@@ -27,7 +27,7 @@ extern void pgstat_reset_wait_event_storage(void);
 extern PGDLLIMPORT uint32 *my_wait_event_info;
 
 #ifdef USE_WAIT_EVENT_TIMING
-extern void pgstat_report_wait_end_timing(void);
+extern void pgstat_report_wait_end_timing(int capture_level);
 extern void pgstat_wait_event_timing_lazy_attach(void);
 #endif
 
@@ -129,13 +129,24 @@ pgstat_report_wait_end(void)
 {
 #ifdef USE_WAIT_EVENT_TIMING
 	/* see pgstat_report_wait_start() for the unlikely() rationale */
-	if (unlikely(wait_event_capture >= WAIT_EVENT_CAPTURE_STATS))
 	{
-		if (unlikely(my_wait_event_timing == NULL))
-			pgstat_wait_event_timing_lazy_attach();
+		/*
+		 * Single load of wait_event_capture across the gate and the body.
+		 * The out-of-line body needs to know whether trace mode is on
+		 * (to decide whether to write to the per-session ring); without
+		 * the parameter, the body would have to re-load this same global,
+		 * since the function-call boundary defeats CSE.
+		 */
+		int		capture_level = wait_event_capture;
 
-		if (likely(my_wait_event_timing != NULL))
-			pgstat_report_wait_end_timing();
+		if (unlikely(capture_level >= WAIT_EVENT_CAPTURE_STATS))
+		{
+			if (unlikely(my_wait_event_timing == NULL))
+				pgstat_wait_event_timing_lazy_attach();
+
+			if (likely(my_wait_event_timing != NULL))
+				pgstat_report_wait_end_timing(capture_level);
+		}
 	}
 #endif
 

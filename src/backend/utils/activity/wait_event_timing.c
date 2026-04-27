@@ -1146,9 +1146,18 @@ pgstat_reset_wait_event_timing_storage(void)
  * my_wait_event_timing is set.  Computes wait duration, accumulates
  * per-event stats, and (at TRACE level) writes the event into the
  * per-session trace ring buffer.
+ *
+ * The capture_level argument is the value of wait_event_capture as
+ * observed at the inline gate.  Passing it through (rather than
+ * re-loading the global here) avoids a redundant memory load on the
+ * trace hot path: the function-call boundary defeats CSE, so without
+ * the parameter the compiler must emit a second load to test for
+ * TRACE level below.  Using the gate's view also means a concurrent
+ * GUC change cannot half-update this call -- we either ran in the
+ * old level or we don't run at all.
  */
 void
-pgstat_report_wait_end_timing(void)
+pgstat_report_wait_end_timing(int capture_level)
 {
 	uint32		event = my_wait_event_timing->current_event;
 	uint32		cur_reset_gen;
@@ -1252,7 +1261,7 @@ pgstat_report_wait_end_timing(void)
 		}
 
 		/* 10046-style per-session trace ring buffer (DSA-backed) */
-		if (unlikely(wait_event_capture == WAIT_EVENT_CAPTURE_TRACE))
+		if (unlikely(capture_level == WAIT_EVENT_CAPTURE_TRACE))
 		{
 			/*
 			 * Lazy attach on first use -- allocation happens here rather
