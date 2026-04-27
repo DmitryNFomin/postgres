@@ -85,7 +85,14 @@ pgstat_report_wait_start(uint32 wait_event_info)
 	*(volatile uint32 *) my_wait_event_info = wait_event_info;
 
 #ifdef USE_WAIT_EVENT_TIMING
-	if (wait_event_capture >= WAIT_EVENT_CAPTURE_STATS)
+	/*
+	 * unlikely(): wait_event_capture defaults to OFF and is OFF on the
+	 * vast majority of installations.  The annotation steers the
+	 * compiler to lay out the no-op fall-through as the straight-line
+	 * hot path and lift the body off-page, keeping I-cache pressure
+	 * low at every wait-event call site.
+	 */
+	if (unlikely(wait_event_capture >= WAIT_EVENT_CAPTURE_STATS))
 	{
 		/*
 		 * Lazy attach: the per-backend timing slot lives in a DSA that is
@@ -121,7 +128,8 @@ static inline void
 pgstat_report_wait_end(void)
 {
 #ifdef USE_WAIT_EVENT_TIMING
-	if (wait_event_capture >= WAIT_EVENT_CAPTURE_STATS)
+	/* see pgstat_report_wait_start() for the unlikely() rationale */
+	if (unlikely(wait_event_capture >= WAIT_EVENT_CAPTURE_STATS))
 	{
 		if (unlikely(my_wait_event_timing == NULL))
 			pgstat_wait_event_timing_lazy_attach();
