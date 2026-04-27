@@ -443,7 +443,19 @@ wait_event_trace_write_marker(uint8 record_type, int64 query_id)
 			return;			/* attach path unable to allocate */
 	}
 
-	pos = pg_atomic_fetch_add_u64(&my_wait_event_trace->write_pos, 1);
+	/*
+	 * Claim the next slot.  Single-writer counter (only the owning backend
+	 * writes its own ring), so a plain read+write is sufficient and avoids
+	 * the LOCK XADD that pg_atomic_fetch_add_u64 would emit -- a wasted
+	 * cache-coherence trip on an unshared cache line at this rate (one per
+	 * wait event).  Cross-backend readers use pg_atomic_read_u64, which
+	 * compiles to a plain MOV on x86 and tolerates concurrent writes here
+	 * (their actual safety against the records[] window is the per-record
+	 * seqlock below).  Same idiom as injection_point.c's per-entry
+	 * generation counter (single writer + multiple lock-free readers).
+	 */
+	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
+	pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
 	rec = &my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
 	seq = (uint32)(pos * 2 + 1);
 
@@ -1253,10 +1265,18 @@ pgstat_report_wait_end_timing(void)
 
 			if (my_wait_event_trace != NULL)
 			{
-				uint64	pos = pg_atomic_fetch_add_u64(&my_wait_event_trace->write_pos, 1);
-				WaitEventTraceRecord *rec =
-					&my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
-				uint32	seq = (uint32)(pos * 2 + 1);
+				/*
+				 * Single-writer claim: read+write avoids the LOCK XADD that
+				 * pg_atomic_fetch_add_u64 would emit on every wait event.
+				 * See wait_event_trace_write_marker for the full rationale.
+				 */
+				uint64	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
+				WaitEventTraceRecord *rec;
+				uint32	seq;
+
+				pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
+				rec = &my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+				seq = (uint32)(pos * 2 + 1);
 
 				rec->seq = seq;
 				pg_write_barrier();		/* release: payload stores must not rise above seq=odd */
