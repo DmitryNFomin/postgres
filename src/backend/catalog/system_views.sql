@@ -1599,7 +1599,7 @@ CREATE VIEW pg_stat_wait_event_timing AS
         t.avg_time_us,
         t.max_time_us,
         t.histogram
-    FROM pg_stat_get_wait_event_timing() t;
+    FROM pg_stat_get_wait_event_timing(NULL) t;
 REVOKE ALL ON pg_stat_wait_event_timing FROM PUBLIC;
 GRANT SELECT ON pg_stat_wait_event_timing TO pg_read_all_stats;
 
@@ -1611,7 +1611,7 @@ CREATE VIEW pg_stat_wait_event_timing_overflow AS
         t.lwlock_overflow_count,
         t.flat_overflow_count,
         t.reset_count
-    FROM pg_stat_get_wait_event_timing_overflow() t;
+    FROM pg_stat_get_wait_event_timing_overflow(NULL) t;
 REVOKE ALL ON pg_stat_wait_event_timing_overflow FROM PUBLIC;
 GRANT SELECT ON pg_stat_wait_event_timing_overflow TO pg_read_all_stats;
 

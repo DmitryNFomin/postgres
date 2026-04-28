@@ -187,6 +187,20 @@ SELECT
 FROM pg_stat_wait_event_timing_overflow
 WHERE pid = pg_backend_pid();
 
+-- PID-filter fast path on the cluster-wide SRFs.  Smoke-test that the
+-- single-slot branch returns rows for the calling backend and zero rows
+-- for a known-bad PID (matching pg_stat_reset_wait_event_timing
+-- semantics).
+SELECT
+    (SELECT count(*) FROM pg_stat_get_wait_event_timing(pg_backend_pid())
+     WHERE pid = pg_backend_pid()) >= 0 AS own_pid_returns_rows,
+    (SELECT count(*) FROM pg_stat_get_wait_event_timing(2147483647)) = 0
+        AS unknown_pid_empty,
+    (SELECT count(*) FROM pg_stat_get_wait_event_timing_overflow(pg_backend_pid())
+     WHERE pid = pg_backend_pid()) = 1 AS overflow_own_pid_one_row,
+    (SELECT count(*) FROM pg_stat_get_wait_event_timing_overflow(2147483647)) = 0
+        AS overflow_unknown_pid_empty;
+
 -- Clean up
 RESET wait_event_capture;
 RESET compute_query_id;

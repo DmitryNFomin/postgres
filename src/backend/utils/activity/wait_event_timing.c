@@ -1336,9 +1336,59 @@ pgstat_report_wait_end_timing(int capture_level)
 }
 
 /*
- * SQL function: pg_stat_get_wait_event_timing(OUT ...)
+/*
+ * Resolve the optional pid SRF argument to a procNumber range
+ * [out_start, out_end).  Returns true on success, false if the SRF
+ * should emit zero rows (unknown pid -- silent no-op, matching the
+ * pg_stat_reset_wait_event_timing convention).
  *
- * Returns one row per (backend_id, wait_event) with non-zero counts.
+ *   PID NULL  -> sweep all NUM_WAIT_EVENT_TIMING_SLOTS slots.
+ *   PID known -> sweep the single slot belonging to that backend.
+ *   PID unknown / invalid -> emit no rows.
+ */
+static bool
+wait_event_timing_pid_range(FunctionCallInfo fcinfo,
+							int *out_start, int *out_end)
+{
+	if (PG_ARGISNULL(0))
+	{
+		*out_start = 0;
+		*out_end = NUM_WAIT_EVENT_TIMING_SLOTS;
+		return true;
+	}
+	else
+	{
+		int		target_pid = PG_GETARG_INT32(0);
+		PGPROC *proc;
+		int		procNumber;
+
+		proc = BackendPidGetProc(target_pid);
+		if (proc == NULL)
+			proc = AuxiliaryPidGetProc(target_pid);
+		if (proc == NULL)
+			return false;
+
+		procNumber = GetNumberFromPGProc(proc);
+		if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
+			return false;
+
+		*out_start = procNumber;
+		*out_end = procNumber + 1;
+		return true;
+	}
+}
+
+/*
+ * SQL function: pg_stat_get_wait_event_timing(pid int4, OUT ...)
+ *
+ * Returns one row per (backend, wait_event) with non-zero counts.
+ * pid is optional: NULL means all backends; a non-NULL value restricts
+ * the sweep to that single backend (silently empty if the PID is
+ * unknown, matching pg_stat_reset_wait_event_timing(pid) semantics).
+ *
+ * The PID-filtered fast path turns the cost of cluster-wide monitoring
+ * loops that poll a specific PID from O(MaxBackends * events) into
+ * O(events) per call -- the same precedent as pg_stat_get_activity(pid).
  *
  * Uses InitMaterializedSRF (materialize-all) for simplicity.  The result
  * set is bounded by (NUM_WAIT_EVENT_TIMING_SLOTS * WAIT_EVENT_TIMING_NUM_EVENTS)
@@ -1348,6 +1398,8 @@ Datum
 pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int			start_idx;
+	int			end_idx;
 	int			backend_idx;
 	ArrayType  *hist_array;
 	int64	   *hist_payload;
@@ -1361,6 +1413,9 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 	 * a read.
 	 */
 	if (!wait_event_timing_attach_array(false))
+		PG_RETURN_VOID();
+
+	if (!wait_event_timing_pid_range(fcinfo, &start_idx, &end_idx))
 		PG_RETURN_VOID();
 
 	/*
@@ -1381,7 +1436,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 		hist_payload = (int64 *) ARR_DATA_PTR(hist_array);
 	}
 
-	for (backend_idx = 0; backend_idx < NUM_WAIT_EVENT_TIMING_SLOTS; backend_idx++)
+	for (backend_idx = start_idx; backend_idx < end_idx; backend_idx++)
 	{
 		WaitEventTimingState *state = &WaitEventTimingArray[backend_idx];
 		PgBackendStatus *beentry;
@@ -1741,12 +1796,17 @@ wait_event_timing_request_reset(int slot_idx)
  *       column to wait until an asynchronous reset has taken effect.
  *
  * One row per live backend; filtered by HAS_PGSTAT_PERMISSIONS like
- * pg_stat_get_wait_event_timing().
+ * pg_stat_get_wait_event_timing().  The pid argument is optional with
+ * the same semantics as pg_stat_get_wait_event_timing(): NULL means
+ * all backends, a non-NULL value restricts the sweep to that single
+ * backend (silently empty for unknown PIDs).
  */
 Datum
 pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int			start_idx;
+	int			end_idx;
 	int			backend_idx;
 
 	InitMaterializedSRF(fcinfo, 0);
@@ -1754,7 +1814,10 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 	if (!wait_event_timing_attach_array(false))
 		PG_RETURN_VOID();
 
-	for (backend_idx = 0; backend_idx < NUM_WAIT_EVENT_TIMING_SLOTS; backend_idx++)
+	if (!wait_event_timing_pid_range(fcinfo, &start_idx, &end_idx))
+		PG_RETURN_VOID();
+
+	for (backend_idx = start_idx; backend_idx < end_idx; backend_idx++)
 	{
 		WaitEventTimingState *state = &WaitEventTimingArray[backend_idx];
 		PgBackendStatus *beentry;
