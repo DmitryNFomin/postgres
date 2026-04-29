@@ -4096,6 +4096,23 @@ ORDER  BY b.bucket_idx;
   </para>
 
   <para>
+   The <structfield>seq</structfield> column is the absolute write
+   position of each record; it is monotonically increasing and never
+   resets while the ring is alive.  A consumer polling the ring
+   repeatedly can detect wraparound losses by tracking
+   <function>max(seq)</function> between successive scrapes: given two
+   consecutive polls returning <replaceable>N2</replaceable> rows with
+   maximum <structfield>seq</structfield> values
+   <replaceable>S1</replaceable> (previous poll) and
+   <replaceable>S2</replaceable> (current poll), the number of records
+   overwritten before the second poll could read them is
+   <literal>max(0, (S2 - S1) - N2)</literal>.  No separate
+   <quote>trace overflow</quote> counter is exposed because this
+   information is exact and derivable from <structfield>seq</structfield>
+   alone.
+  </para>
+
+  <para>
    <literal>QueryStart</literal>/<literal>QueryEnd</literal> markers are
    emitted as matched pairs around each protocol phase that touches a
    <structfield>query_id</structfield>.  In simple protocol that is one
