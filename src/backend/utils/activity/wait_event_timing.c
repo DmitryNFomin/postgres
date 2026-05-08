@@ -453,8 +453,15 @@ wait_event_trace_write_marker(uint8 record_type, int64 query_id)
 	 * no configuration in which one half of the trace fires and the
 	 * other doesn't.  query_id == 0 means "no query ID available"
 	 * (utility command or compute_query_id = off), which we skip.
+	 *
+	 * No likely()/unlikely() annotation: this function is called at
+	 * query/exec boundaries (a handful per query, not per wait event),
+	 * so neither side of the branch dominates often enough for static
+	 * layout to matter, and the meaningful production configuration
+	 * (wait_event_capture = trace) is exactly when the body is hot --
+	 * an annotation on the early-return would point the wrong way.
 	 */
-	if (likely(wait_event_capture != WAIT_EVENT_CAPTURE_TRACE || query_id == 0))
+	if (wait_event_capture != WAIT_EVENT_CAPTURE_TRACE || query_id == 0)
 		return;
 
 	/*
