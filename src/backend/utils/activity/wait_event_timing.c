@@ -281,7 +281,7 @@ static void wait_event_trace_release_slot(int procNumber);
  * Defines: WAIT_EVENT_TIMING_RAW_CLASSES, WAIT_EVENT_TIMING_DENSE_CLASSES,
  *          WAIT_EVENT_TIMING_NUM_EVENTS, and the four mapping arrays.
  */
-#include "utils/wait_event_timing_data.c"
+#include "utils/wait_event_timing_data.h"
 
 /*
  * Convert wait_event_info to a flat index for the events[] array.

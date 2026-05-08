@@ -55,7 +55,7 @@
  * The mapping arrays (wait_event_class_dense, wait_event_class_nevents,
  * wait_event_class_offset, wait_event_dense_to_classid) and internal
  * helper functions are in wait_event_timing.c (included from the
- * generated wait_event_timing_data.c).
+ * generated wait_event_timing_data.h).
  */
 
 /* Sentinel returned by wait_event_timing_index() for LWLock events */

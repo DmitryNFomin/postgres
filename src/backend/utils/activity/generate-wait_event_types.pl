@@ -5,6 +5,7 @@
 # - wait_event_types.h (if --code is passed)
 # - pgstat_wait_event.c (if --code is passed)
 # - wait_event_funcs_data.c (if --code is passed)
+# - wait_event_timing_data.h (if --code is passed)
 # - wait_event_types.sgml (if --docs is passed)
 #
 # Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
@@ -378,10 +379,17 @@ if ($gen_code)
 	close $c;
 	close $wc;
 
-	# Generate wait_event_timing_data.c with the mapping arrays
-	my $ttmp = "$output_path/wait_event_timing_data.c.tmp$$";
+	# Generate wait_event_timing_data.h with the mapping arrays.
+	# A header (rather than a .c file) keeps the file-extension category
+	# straight: it is included into a single TU (wait_event_timing.c) and
+	# defines static const tables there.  The include guard makes the
+	# single-owner intent explicit and prevents accidental double inclusion.
+	my $ttmp = "$output_path/wait_event_timing_data.h.tmp$$";
 	open my $t, '>', $ttmp or die "Could not open $ttmp: $!";
-	printf $t $header_comment, 'wait_event_timing_data.c';
+	printf $t $header_comment, 'wait_event_timing_data.h';
+
+	printf $t "#ifndef WAIT_EVENT_TIMING_DATA_H\n";
+	printf $t "#define WAIT_EVENT_TIMING_DATA_H\n\n";
 
 	# Emit wait_event_class_dense[]
 	printf $t "static const int8 wait_event_class_dense[WAIT_EVENT_TIMING_RAW_CLASSES] = {\n";
@@ -437,7 +445,9 @@ if ($gen_code)
 		my $comma = ($d < $dense_classes - 1) ? ", " : "";
 		printf $t "0x%02x$comma", $cls->{raw_id};
 	}
-	printf $t "\n};\n";
+	printf $t "\n};\n\n";
+
+	printf $t "#endif                          /* WAIT_EVENT_TIMING_DATA_H */\n";
 
 	close $t;
 
@@ -447,8 +457,8 @@ if ($gen_code)
 	  || die "rename: $ctmp to $output_path/pgstat_wait_event.c: $!";
 	rename($wctmp, "$output_path/wait_event_funcs_data.c")
 	  || die "rename: $wctmp to $output_path/wait_event_funcs_data.c: $!";
-	rename($ttmp, "$output_path/wait_event_timing_data.c")
-	  || die "rename: $ttmp to $output_path/wait_event_timing_data.c: $!";
+	rename($ttmp, "$output_path/wait_event_timing_data.h")
+	  || die "rename: $ttmp to $output_path/wait_event_timing_data.h: $!";
 }
 # Generate the .sgml file.
 elsif ($gen_docs)
