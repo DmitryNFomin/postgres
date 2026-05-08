@@ -542,7 +542,7 @@ InitProcess(void)
 
 	/* now that we have a proc, report wait events to shared memory */
 	pgstat_set_wait_event_storage(&MyProc->wait_event_info);
-	pgstat_set_wait_event_timing_storage(GetNumberFromPGProc(MyProc));
+	pgstat_set_wait_event_timing_storage(MyProcNumber);
 
 	/*
 	 * We might be reusing a semaphore that belonged to a failed process. So
@@ -715,7 +715,7 @@ InitAuxiliaryProcess(void)
 
 	/* now that we have a proc, report wait events to shared memory */
 	pgstat_set_wait_event_storage(&MyProc->wait_event_info);
-	pgstat_set_wait_event_timing_storage(GetNumberFromPGProc(MyProc));
+	pgstat_set_wait_event_timing_storage(MyProcNumber);
 
 	/* Check that group locking fields are in a proper initial state. */
 	Assert(MyProc->lockGroupLeader == NULL);
