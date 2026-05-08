@@ -611,10 +611,37 @@ wait_event_timing_ensure_dsa(void)
  * so that the first wait event under wait_event_capture != off creates
  * the storage.
  *
- * Re-entrancy guard: dsa_create() / dsa_allocate_extended() below can
- * emit LWLock wait events internally, which reach the hot path and
- * re-enter this function.  Without the guard we would deadlock on
- * WaitEventTimingCtl->lock.
+ * Re-entrancy guard.  Internal operations below (dsa_create,
+ * dsa_allocate_extended, the LWLockAcquire inside ensure_dsa) can
+ * emit LWLock wait events of their own, which feed into the wait-end
+ * timing hot path; under wait_event_capture >= STATS that hot path
+ * lazy-attaches by calling back into this function.  Without the
+ * guard we would either deadlock on WaitEventTimingCtl->lock or
+ * recurse with a half-initialised slot pointer.
+ *
+ * The same hazard applies in wait_event_trace_attach (which also runs
+ * dsa_allocate / LWLock under its body) and in
+ * wait_event_trace_release_slot (whose dsa_free takes a DSA-internal
+ * LWLock that can in principle emit a wait event during shutdown
+ * sequences).  Each function carries its own static bool guard close
+ * to the code it protects, matching the established PG idiom for
+ * function-local re-entry guards (see, e.g., in_vacuum in
+ * src/backend/commands/vacuum.c, in_streamed_transaction in
+ * src/backend/replication/logical/worker.c).  We deliberately do NOT
+ * collapse these into a shared bitmask because:
+ *   1. PG style places re-entry flags adjacent to the function they
+ *      protect, not in a centralised module-level state structure.
+ *   2. The three guarded functions are independent: a re-entry into
+ *      one of them while another is in flight is a legitimate pattern
+ *      (e.g., release_slot can be triggered by an assign hook that
+ *      itself ran while attach was in progress earlier).  A shared
+ *      flag would conservatively block those legal cases.
+ *
+ * If you add a fourth re-entrant function in this file, follow the
+ * same shape: a `static bool in_<verb> = false;` at the top of the
+ * function, an early-return `if (in_<verb>) return ...;`, set true
+ * before the body, clear in PG_FINALLY so an ereport(ERROR) cannot
+ * leave the flag stuck set.
  */
 static bool
 wait_event_timing_attach_array(bool allocate_if_missing)
@@ -854,13 +881,12 @@ void
 wait_event_trace_attach(int procNumber)
 {
 	/*
-	 * Re-entrancy guard.  dsa_create() / dsa_allocate_extended() below
-	 * can emit wait events internally (LWLock sleeps during shmem
-	 * allocation, DSM OS calls, ...), and those wait events will reach
-	 * pgstat_report_wait_end_timing() and wait_event_trace_write_marker(),
-	 * both of which perform lazy attach when my_wait_event_trace is
-	 * still NULL.  Without this guard the recursive call tries to
-	 * re-acquire WaitEventTraceCtl->lock, producing a self-deadlock.
+	 * Re-entrancy guard.  dsa_create / dsa_allocate_extended below can
+	 * emit wait events internally; those reach the lazy-attach hot path
+	 * which calls back into this function while we still hold
+	 * WaitEventTraceCtl->lock or are mid-allocation.  See the
+	 * function-local-static-bool pattern explainer on
+	 * wait_event_timing_attach_array.
 	 */
 	static bool in_attach = false;
 	static bool shmem_exit_registered = false;
@@ -977,8 +1003,9 @@ wait_event_trace_release_slot(int procNumber)
 {
 	/*
 	 * Re-entrancy guard.  dsa_free takes a DSA-internal LWLock which can
-	 * in principle emit a wait event; if the writer hot path re-enters
-	 * via a nested assign hook we must not recurse into ourselves.
+	 * in principle emit a wait event; if a nested assign hook re-enters
+	 * we must not recurse.  See the function-local-static-bool pattern
+	 * explainer on wait_event_timing_attach_array.
 	 */
 	static bool in_release = false;
 
