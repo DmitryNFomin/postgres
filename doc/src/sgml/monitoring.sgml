@@ -4040,12 +4040,18 @@ ORDER  BY b.bucket_idx;
        <structfield>reset_count</structfield> <type>bigint</type>
       </para>
       <para>
-       Number of times this backend's wait event timing counters have
-       been reset, whether by an own-backend call or by a cross-backend
-       request observed by this backend.  Because
-       <function>pg_stat_reset_wait_event_timing</function> is
-       asynchronous for remote targets, callers can poll this column to
-       wait until the requested reset has actually taken effect.
+       Number of resets this backend has <emphasis>observed and acted
+       on</emphasis>; not a request counter.  Own-backend resets via
+       <function>pg_stat_reset_wait_event_timing(NULL)</function> (or
+       passing the caller's own PID) are synchronous and bump this
+       column once per call.  Cross-backend reset requests
+       <emphasis>coalesce</emphasis>: if several
+       <function>pg_stat_reset_wait_event_timing(<replaceable>pid</replaceable>)</function>
+       calls land between two of the target's wait events, the target
+       observes them as a single reset and increments
+       <structfield>reset_count</structfield> only once.  Callers
+       polling for asynchronous-reset acknowledgment should watch for
+       any <literal>N &rarr; N+1</literal> transition.
       </para></entry>
      </row>
     </tbody>

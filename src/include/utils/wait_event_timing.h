@@ -158,7 +158,16 @@ typedef struct WaitEventTimingState
 	/* Current wait_event_info (cached for use in wait_end) */
 	uint32		current_event;
 
-	/* Reset counter -- incremented by pg_stat_reset_wait_event_timing() */
+	/*
+	 * Counter of resets that have been *observed and acted on* by this
+	 * backend.  Own-backend resets (pg_stat_reset_wait_event_timing(NULL)
+	 * or own-pid) are synchronous and bump this once per call.
+	 * Cross-backend resets COALESCE: if multiple resets are requested
+	 * for this backend between two of its wait_ends, the owner observes
+	 * them as one and bumps reset_count once.  Callers polling for "did
+	 * my async reset land?" should rely on the N -> N+1 transition;
+	 * do not use this column as a request counter.
+	 */
 	int64		reset_count;
 
 	/* Per-event statistics: flat array for bounded classes */

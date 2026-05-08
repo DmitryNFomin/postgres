@@ -1824,10 +1824,14 @@ wait_event_timing_request_reset(int slot_idx)
  *   flat_overflow_count:   number of non-LWLock wait events that
  *       resolved to an unknown / out-of-range class index and therefore
  *       could not be mapped to a histogram slot.
- *   reset_count:           number of times this backend's counters have
- *       been reset (own reset or cross-backend request observed).
- *       Callers of pg_stat_reset_wait_event_timing(target) can poll this
- *       column to wait until an asynchronous reset has taken effect.
+ *   reset_count:           number of resets this backend has *observed
+ *       and acted on*, NOT a request counter.  Own-backend resets are
+ *       synchronous and bump this once per call.  Cross-backend resets
+ *       coalesce: if multiple pg_stat_reset_wait_event_timing(target)
+ *       calls land between two of the target's wait_ends, the target
+ *       observes them as a single reset and reset_count increments
+ *       only once.  Callers polling for asynchronous-reset
+ *       acknowledgment should watch for any increment (N -> N+1).
  *
  * One row per live backend; filtered by HAS_PGSTAT_PERMISSIONS like
  * pg_stat_get_wait_event_timing().  The pid argument is optional with
