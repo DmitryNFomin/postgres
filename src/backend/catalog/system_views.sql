@@ -1616,9 +1616,14 @@ REVOKE ALL ON pg_stat_wait_event_timing_overflow FROM PUBLIC;
 GRANT SELECT ON pg_stat_wait_event_timing_overflow TO pg_read_all_stats;
 
 
--- Session-local view: mirrors pg_backend_memory_contexts naming.
--- Only the calling backend's trace ring is ever returned, regardless of
--- the querying role, so no REVOKE is needed; the view is PUBLIC.
+-- Session-local view: mirrors pg_backend_memory_contexts in both naming
+-- and access control.  The SRF is hardcoded to the caller's own ring,
+-- so a non-superuser only ever sees their own session's data; but as
+-- with pg_backend_memory_contexts, the row contents (query_id values
+-- joinable against pg_stat_statements, per-event timings) are
+-- information that ordinary roles should not see across SECURITY
+-- DEFINER call chains.  Lock the view to pg_read_all_stats to match
+-- the precedent set in commit f8a2afa12 (PG 17) for the namesake view.
 CREATE VIEW pg_backend_wait_event_trace AS
     SELECT
         t.seq,
@@ -1628,3 +1633,5 @@ CREATE VIEW pg_backend_wait_event_trace AS
         t.duration_us,
         t.query_id
     FROM pg_get_backend_wait_event_trace() t;
+REVOKE ALL ON pg_backend_wait_event_trace FROM PUBLIC;
+GRANT SELECT ON pg_backend_wait_event_trace TO pg_read_all_stats;
