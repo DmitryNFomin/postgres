@@ -739,6 +739,7 @@ void
 pgstat_wait_event_timing_lazy_attach(void)
 {
 	int			procNumber;
+	WaitEventTimingState *slot;
 
 	if (my_wait_event_timing != NULL)
 		return;
@@ -753,7 +754,7 @@ pgstat_wait_event_timing_lazy_attach(void)
 	if (!wait_event_timing_attach_array(true))
 		return;
 
-	my_wait_event_timing = &WaitEventTimingArray[procNumber];
+	slot = &WaitEventTimingArray[procNumber];
 
 	/*
 	 * Clear this backend's slot the first time it is used after backend
@@ -762,18 +763,40 @@ pgstat_wait_event_timing_lazy_attach(void)
 	 * backend; explicit zero here keeps stats accurate across slot reuse.
 	 * Matches the old per-backend init performed by
 	 * pgstat_set_wait_event_timing_storage() in the eager-shmem design.
+	 *
+	 * Initialisation order: zero the slot through the local `slot` first,
+	 * THEN publish the result to my_wait_event_timing.  This keeps the
+	 * single-backend invariant clean: at no point in this backend can
+	 * `my_wait_event_timing != NULL` coincide with `*my_wait_event_timing`
+	 * being partially initialised.  The hot-path inline gate
+	 *
+	 *   if (unlikely(my_wait_event_timing == NULL))
+	 *       pgstat_wait_event_timing_lazy_attach();
+	 *   ... my_wait_event_timing->wait_start = ... ;
+	 *
+	 * relies on that ordering: a non-NULL pointer means the slot is
+	 * ready for the very next store.
+	 *
+	 * Note that cross-backend readers do NOT go through
+	 * my_wait_event_timing -- they index WaitEventTimingArray[procNumber]
+	 * directly via pgstat_get_wait_event_timing(), guarded by
+	 * pgstat_get_beentry_by_proc_number() which filters dead/recycled
+	 * slots.  So this reordering is a same-backend tidiness fix; it does
+	 * not address (and does not need to address) any cross-backend
+	 * publication ordering, of which there is none.
 	 */
-	memset(my_wait_event_timing->events, 0,
-		   sizeof(my_wait_event_timing->events));
-	lwlock_timing_hash_clear(&my_wait_event_timing->lwlock_hash);
-	my_wait_event_timing->reset_count = 0;
-	my_wait_event_timing->lwlock_overflow_count = 0;
-	my_wait_event_timing->flat_overflow_count = 0;
-	my_wait_event_timing->current_event = 0;
-	INSTR_TIME_SET_ZERO(my_wait_event_timing->wait_start);
+	memset(slot->events, 0, sizeof(slot->events));
+	lwlock_timing_hash_clear(&slot->lwlock_hash);
+	slot->reset_count = 0;
+	slot->lwlock_overflow_count = 0;
+	slot->flat_overflow_count = 0;
+	slot->current_event = 0;
+	INSTR_TIME_SET_ZERO(slot->wait_start);
 
-	my_last_reset_generation =
-		pg_atomic_read_u32(&my_wait_event_timing->reset_generation);
+	my_last_reset_generation = pg_atomic_read_u32(&slot->reset_generation);
+
+	/* Publish only after the slot is fully initialised. */
+	my_wait_event_timing = slot;
 }
 
 /*
