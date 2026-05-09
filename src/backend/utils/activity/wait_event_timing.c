@@ -1969,11 +1969,47 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 		PG_RETURN_VOID();
 	}
 
-	/* Resetting other backends requires superuser */
-	if (!superuser())
+	/*
+	 * Cross-backend reset requires pg_signal_backend membership, matching
+	 * the privilege model of pg_stat_reset_backend_stats(int4 pid) (the
+	 * closest existing per-backend reset in the wider stats family).
+	 *
+	 * Why pg_signal_backend rather than naked superuser():
+	 *
+	 * 1) Operational alignment.  The role pg_signal_backend exists
+	 *    specifically for "the operator who acts on other backends'
+	 *    state" -- it gates pg_terminate_backend, pg_cancel_backend,
+	 *    and pg_stat_reset_backend_stats already.  Resetting another
+	 *    backend's wait-event timing is structurally the same kind of
+	 *    operation (per-PID, addressable, bounded blast radius), so it
+	 *    belongs to the same role.  Demanding superuser would create a
+	 *    surplus-privilege gap: a DBA who can already TERMINATE the
+	 *    target backend (strictly more invasive than resetting its
+	 *    counters) would need to escalate to superuser just to wipe
+	 *    its stats, which is operationally backwards.
+	 *
+	 * 2) Cluster-wide reset is a different decision.  See
+	 *    pg_stat_reset_wait_event_timing_all() below, which keeps the
+	 *    stricter superuser() gate -- different blast radius, different
+	 *    role.  This split (per-backend = pg_signal_backend, cluster-wide
+	 *    = superuser) reflects the principle that the role required for
+	 *    an operation should match what the operation can affect.  The
+	 *    fact that pg_stat_reset() (cluster-wide) actually only requires
+	 *    pg_read_all_stats today is an inconsistency in PG's existing
+	 *    surface; we deliberately do not extend that inconsistency here.
+	 *
+	 * 3) Information-disclosure concern is bounded.  The only
+	 *    "destructive" property of a stats reset is that it erases
+	 *    forensic evidence of past wait events.  Anyone with
+	 *    pg_signal_backend can already terminate the target backend --
+	 *    which terminates that forensic record by destroying the
+	 *    backend itself.  A counter wipe is strictly less invasive.
+	 */
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_SIGNAL_BACKEND))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be a superuser to reset other backends' wait event timing")));
+				 errmsg("permission denied to reset another backend's wait event timing"),
+				 errdetail("Only roles with privileges of the \"pg_signal_backend\" role may reset another backend's wait event timing.")));
 
 	target_pid = PG_GETARG_INT32(0);
 
@@ -2003,6 +2039,35 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
  * see wait_event_timing_request_reset for the protocol.  Returns before the
  * resets have been observed -- callers that need strict read-after-reset
  * semantics should poll the targets' reset_count columns.
+ *
+ * Privilege model rationale (intentional asymmetry with the per-backend
+ * variant pg_stat_reset_wait_event_timing(pid)):
+ *
+ *   * Per-backend reset uses pg_signal_backend, matching
+ *     pg_stat_reset_backend_stats(pid).  The blast radius is one PID;
+ *     anyone who can pg_terminate_backend the target can already
+ *     destroy more forensic state than a counter wipe would.
+ *
+ *   * Cluster-wide reset is gated tighter because the blast radius is
+ *     every backend in the cluster.  An operator with pg_signal_backend
+ *     can disrupt one PID at a time (and must specify which); the
+ *     cluster-wide reset wipes ALL backends' historical counters in a
+ *     single call, which is meaningfully different in two ways:
+ *
+ *       (a) it can hide cross-tenant patterns that a forensic audit
+ *           would have wanted to compare across backends, and
+ *
+ *       (b) it removes the per-call addressability that makes the
+ *           per-backend variant auditable -- a log entry showing "user
+ *           X reset PID Y" is more actionable than "user X wiped
+ *           everything."
+ *
+ *     Requiring superuser for the cluster-wide variant matches the
+ *     general PG principle that scope of authority should match scope
+ *     of effect.  We deliberately do NOT mirror pg_stat_reset(), which
+ *     today is gated only on pg_read_all_stats despite being similarly
+ *     cluster-wide -- that's a pre-existing inconsistency in the wider
+ *     stats family and not one we want to extend.
  */
 Datum
 pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)

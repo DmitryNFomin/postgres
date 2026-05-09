@@ -6324,8 +6324,13 @@ ORDER  BY b.bucket_idx;
         Passing <literal>NULL</literal> (or the caller's own
         <function>pg_backend_pid()</function>) resets the current session;
         any user may do this.  Passing any other PID resets that backend
-        and requires superuser.  Unknown or already-exited PIDs are silent
-        no-ops, matching the behavior of
+        and requires membership in the
+        <link linkend="predefined-roles"><literal>pg_signal_backend</literal></link>
+        role &mdash; the same role required by
+        <function>pg_stat_reset_backend_stats</function>,
+        <function>pg_terminate_backend</function>, and
+        <function>pg_cancel_backend</function>.  Unknown or
+        already-exited PIDs are silent no-ops, matching the behavior of
         <function>pg_stat_reset_backend_stats</function>.
        </para></entry>
       </row>
@@ -6340,9 +6345,16 @@ ORDER  BY b.bucket_idx;
        </para>
        <para>
         Resets wait event timing counters for every backend in the
-        cluster.  Requires superuser.  Returns before the resets have
-        been observed by their target backends; callers that need strict
-        read-after-reset semantics should poll each target's
+        cluster.  Requires superuser.  This is intentionally stricter
+        than the per-backend variant
+        <function>pg_stat_reset_wait_event_timing</function>(<parameter>pid</parameter>),
+        which only requires <literal>pg_signal_backend</literal>: the
+        cluster-wide form has unbounded blast radius (it affects every
+        backend in a single call) and would erase forensic patterns
+        that span multiple backends, so it is gated to the cluster
+        owner.  Returns before the resets have been observed by their
+        target backends; callers that need strict read-after-reset
+        semantics should poll each target's
         <structfield>reset_count</structfield> column.
        </para></entry>
       </row>
