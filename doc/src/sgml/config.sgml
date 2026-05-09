@@ -9183,6 +9183,39 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         with the appropriate <literal>SET</literal> privilege can change
         this setting.
        </para>
+       <para>
+        The setting is gated to superuser by default because
+        <literal>trace</literal> mode allocates approximately 4&nbsp;MB
+        of dynamic shared memory per backend that enables it; an
+        unprivileged role enabling trace on every connection in a
+        large pool could consume substantial cluster-wide memory.
+        Read access to the resulting statistics is controlled
+        separately by membership in the
+        <link linkend="predefined-roles"><literal>pg_read_all_stats</literal></link>
+        role (which the <literal>pg_monitor</literal> role inherits),
+        so a monitoring operator can typically read
+        <structname>pg_stat_wait_event_timing</structname> but cannot
+        toggle <varname>wait_event_capture</varname> itself.
+       </para>
+       <para>
+        To delegate the ability to change this setting to a
+        non-superuser role &mdash; for example, the
+        <literal>pg_monitor</literal> role in environments where the
+        cluster owner is not the operator on call &mdash; use the
+        standard PostgreSQL <command>GRANT SET ON PARAMETER</command>
+        mechanism:
+<programlisting>
+GRANT SET ON PARAMETER wait_event_capture TO pg_monitor;
+</programlisting>
+        After this, any role that has the <literal>pg_monitor</literal>
+        role membership can run
+        <command>SET wait_event_capture = stats</command> (or
+        <literal>= trace</literal>) for its own session.  The grant is
+        per-installation policy rather than baked into the GUC, so
+        managed-PostgreSQL environments and self-hosted clusters can
+        choose independently whether monitoring roles should be able to
+        flip this on.
+       </para>
       </listitem>
      </varlistentry>
 
