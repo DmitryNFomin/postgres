@@ -4093,6 +4093,41 @@ ORDER  BY b.bucket_idx;
   </para>
 
   <para>
+   The <structname>pg_backend_wait_event_trace</structname> view is
+   intended for <emphasis>session-local interactive diagnostics</emphasis>:
+   running ad-hoc <literal>SELECT</literal> queries against your own
+   session's trace from <application>psql</application> while
+   investigating wait-event behaviour.  The view materialises up to
+   <literal>131072</literal> records (about 4&nbsp;MB) into a
+   tuplestore on each call, which is bounded and acceptable for that
+   use; for narrow result sets, append
+   <literal>ORDER BY seq DESC LIMIT <replaceable>N</replaceable></literal>
+   to get the most recent records.
+  </para>
+
+  <para>
+   Cross-backend monitoring tools &mdash; future Active Session
+   History, Automatic Workload Repository, or 10046-style
+   trace-replay background workers that sample wait events from
+   every backend &mdash; should <emphasis>not</emphasis> consume
+   through this view.  The underlying SQL function returns only the
+   calling backend's own ring; a background worker invoking
+   <command>SELECT * FROM pg_backend_wait_event_trace</command> via
+   SPI would receive only its own (typically empty) ring, not the
+   target backend's data.  Such tools must instead use the
+   shared-memory snapshot pattern documented on
+   <structname>WaitEventTraceControl</structname> in
+   <filename>src/include/utils/wait_event_timing.h</filename>:
+   acquire <structname>WaitEventTraceCtl->lock</structname> in
+   <literal>LW_SHARED</literal>, resolve the target backend's
+   <structfield>trace_ptrs</structfield> entry via
+   <function>dsa_get_address</function>, snapshot the relevant slice
+   of the ring into local memory, release the lock, and process the
+   snapshot off the lock.  That bypasses this view entirely and is
+   the supported cross-backend interface for monitoring extensions.
+  </para>
+
+  <para>
    The ring buffer is designed as a lock-free transport mechanism for
    external consumption.  At high wait event rates (e.g., 220K events/sec),
    the ring wraps in roughly 0.5&ndash;1 seconds.  External consumers

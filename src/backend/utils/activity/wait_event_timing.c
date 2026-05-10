@@ -1808,8 +1808,40 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
  * any deferred dsa_free is performed even on ereport(ERROR).
  *
  * Uses InitMaterializedSRF (materialize-all).  The ring holds up to
- * WAIT_EVENT_TRACE_RING_SIZE (131072) records; full materialization is
- * acceptable for own-session diagnostics.
+ * WAIT_EVENT_TRACE_RING_SIZE (131072) records; full materialization
+ * caps the per-call cost at ~4 MB of tuplestore memory, which is
+ * acceptable for the use case this SRF is designed for: interactive
+ * own-session diagnostics from psql.
+ *
+ * This SRF is NOT the path for cross-backend monitoring tools --
+ * future ASH/AWR/10046-style background workers that sample wait
+ * events from every backend should NOT call this function via SPI.
+ * It is hard-coded to return only the calling backend's own ring,
+ * so a bgworker calling SELECT * FROM pg_backend_wait_event_trace
+ * would get only the bgworker's own (typically empty) ring, not the
+ * target backend's data.
+ *
+ * Cross-backend consumers must instead use the lock + DSA-snapshot
+ * pattern documented on WaitEventTraceControl in wait_event_timing.h:
+ * acquire WaitEventTraceCtl->lock in LW_SHARED, resolve trace_ptrs[
+ * procNumber] via dsa_get_address, snapshot the records of interest
+ * into local memory, release the lock, then process the snapshot.
+ * That path bypasses this SRF entirely and is the supported
+ * cross-backend interface for monitoring extensions and bgworkers.
+ *
+ * value-per-call (deferred) SRF mode would let an interactive
+ * "SELECT ... FROM pg_backend_wait_event_trace LIMIT N" short-circuit
+ * the materialisation, but converting this function would require
+ * spanning the wait_event_trace_srf_in_progress flag (and its
+ * deferred-free coordination with assign_wait_event_capture; see
+ * issue #8) across multiple SRF callbacks plus a transaction-cleanup
+ * registration to handle LIMIT abandonment.  The complexity is not
+ * justified for the diagnostic use case, especially since cross-
+ * backend monitoring (the consumer that would actually benefit from
+ * streaming) goes through the snapshot pattern above instead.
+ * Interactive callers who want only recent records should use
+ * "ORDER BY seq DESC LIMIT N" -- the LIMIT is applied after
+ * materialisation but the cost stays bounded by the ring size.
  */
 Datum
 pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
