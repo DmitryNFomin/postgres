@@ -355,39 +355,191 @@ typedef struct WaitEventTraceState
  * records via the seqlock (odd seq = in-flight write). */
 
 /*
+ * Per-procNumber trace-ring slot state.
+ *
+ * Slot lifecycle is decoupled from backend lifecycle on purpose: when a
+ * backend exits we deliberately do NOT free its ring.  Instead we
+ * transition the slot to ORPHANED and leave the ring allocated in DSA.
+ * That preserves trace data past backend exit so it remains readable by
+ * cross-backend consumers (ASH/AWR/10046-style monitoring background
+ * workers) -- the original per-backend-ring design lost data the
+ * instant a parallel worker (or any short-lived backend) terminated,
+ * because the worker's before_shmem_exit callback ran dsa_free before
+ * any consumer could observe the final waits.  See "Slot lifecycle and
+ * orphan-memory accounting" on WaitEventTraceControl below for the
+ * rationale and the bounded-memory cost of this choice.
+ *
+ *   FREE      no ring is allocated; ring_ptr is InvalidDsaPointer.
+ *             This is the initial state of every slot at postmaster
+ *             startup, and the state a slot returns to after
+ *             pg_stat_clear_orphaned_wait_event_rings() or after a new
+ *             backend at this procNumber clears the prior orphan.
+ *
+ *   OWNED     ring is allocated and a live backend at this procNumber
+ *             is writing to it.  Single-writer invariant holds: only
+ *             the owner backend writes to records[].  Cross-backend
+ *             consumers may read concurrently using the per-record
+ *             seqlock protocol.
+ *
+ *   ORPHANED  ring is allocated but the previous owner has exited.
+ *             Data is post-mortem and immutable -- no writer will
+ *             touch it again.  The ring stays in DSA until either
+ *             (a) a new backend takes this procNumber and clears it,
+ *             or (b) the DBA calls
+ *                  pg_stat_clear_orphaned_wait_event_rings()
+ *             to release the memory.  Worst-case orphan footprint is
+ *             bounded at NUM_WAIT_EVENT_TIMING_SLOTS * 4 MB (one
+ *             orphaned ring per procNumber); see WaitEventTraceControl.
+ */
+typedef enum WaitEventTraceSlotState
+{
+	WET_TRACE_SLOT_FREE = 0,
+	WET_TRACE_SLOT_OWNED,
+	WET_TRACE_SLOT_ORPHANED,
+}			WaitEventTraceSlotState;
+
+/*
+ * Per-procNumber slot in the trace control struct.
+ *
+ * Synchronization model
+ * ---------------------
+ *
+ * generation is bumped on every owner transition (FREE->OWNED at attach,
+ * OWNED->ORPHANED at backend exit, anything->FREE at orphan cleanup or
+ * release-on-disable).  Cross-backend readers snapshot generation
+ * before and after their critical section; if it changed they discard
+ * the read and retry, matching the BackendStatusArray st_changecount
+ * idiom.  Writers never read generation on the hot path -- it is
+ * touched only on slot transitions, which are rare (once per backend
+ * lifecycle plus admin cleanups).
+ *
+ * state is pg_atomic_uint32 only for cheap unlocked "is this slot
+ * worth visiting" probes (e.g. an ASH sampler iterating MaxBackends
+ * slots and skipping FREE ones without taking the lock).  Authoritative
+ * reads of state-and-ring_ptr together MUST be done under
+ * WaitEventTraceCtl->lock in LW_SHARED, paired with the
+ * generation-snapshot retry loop above.  Writers always hold the lock
+ * in LW_EXCLUSIVE for the full transition, so a reader holding
+ * LW_SHARED observes an internally consistent slot.
+ *
+ * ring_ptr is touched only under WaitEventTraceCtl->lock; both writers
+ * (transitions) and readers (resolving the DSA pointer to read records)
+ * take the lock around it.  The lock-hold for readers is bounded to
+ * the dsa_get_address + memcpy of the records of interest -- per-record
+ * processing must happen after the lock is released, both for
+ * latency and to avoid lock-ordering issues with other PG subsystems.
+ *
+ * Size: 8 + 4 + 4(pad) + 8 = 24 bytes per slot.  At MaxBackends + AUX
+ * = ~1100 on a default cluster, ~26 KB of fixed shared memory total
+ * for the slot array -- negligible compared to the ring memory itself.
+ */
+typedef struct WaitEventTraceSlot
+{
+	pg_atomic_uint64 generation;	/* bumped on every owner transition;
+									 * cross-backend readers snapshot
+									 * before+after their read and retry
+									 * if it changed (BackendStatusArray
+									 * st_changecount idiom) */
+	pg_atomic_uint32 state;			/* WaitEventTraceSlotState */
+	uint32		pad;				/* explicit pad to keep ring_ptr 8-aligned */
+	dsa_pointer ring_ptr;			/* InvalidDsaPointer when state == FREE;
+									 * valid DSA pointer to the
+									 * WaitEventTraceState chunk otherwise */
+} WaitEventTraceSlot;
+
+/*
  * Control struct for lazy DSA-based trace ring allocation.
  * Lives in fixed shared memory, one per cluster.
  *
  * The per-backend trace ring is a lock-free transport for external consumers.
- * Writers (owning backend) claim slots via pg_atomic_fetch_add_u64 on
- * write_pos and use a per-record seqlock for torn-read detection.
+ * Writers (owning backend) update write_pos and use a per-record seqlock
+ * for torn-read detection.
+ *
+ * Slot lifecycle and orphan-memory accounting
+ * -------------------------------------------
+ *
+ * The trace_slots[] array is indexed by procNumber.  Each slot's
+ * lifecycle is independent of the backend lifecycle that briefly
+ * occupies it: when a backend exits we transition its slot to
+ * ORPHANED and leave the DSA-allocated ring in place, instead of the
+ * older design that called dsa_free in the backend's
+ * before_shmem_exit callback.  That older design lost trace data the
+ * instant a backend exited, because the data was gone before any
+ * cross-backend consumer (e.g. an ASH/AWR-style sampler) could read
+ * it.  This was particularly acute for parallel workers, which exit
+ * in milliseconds at end-of-parallel-query; a sampler running at
+ * 1 Hz would never see their waits.
+ *
+ * Persisting the ring past backend exit pays a bounded memory cost:
+ * up to NUM_WAIT_EVENT_TIMING_SLOTS orphaned rings can simultaneously
+ * exist, each ~4 MB.  At MaxBackends=100 + auxiliaries that ceiling
+ * is ~400 MB; at MaxBackends=1000 it is ~4 GB.  The ceiling is only
+ * reached if every procNumber has been used by a tracing backend and
+ * none of those procNumbers has been reused since.  In typical
+ * deployments this does not happen:
+ *
+ *   * Always-on tracing: connection churn keeps slots cycling, so
+ *     orphans drain naturally as new backends claim procNumbers.
+ *   * Brief diagnostic tracing: capture is enabled, a few backends
+ *     trace, then capture is disabled.  Slots gradually clear as
+ *     the procNumbers are reused; or the DBA calls
+ *     pg_stat_clear_orphaned_wait_event_rings() to release them
+ *     immediately.
+ *   * Long-lived pooled connections that never recycle: the worst
+ *     pathological case.  Operators who hit this should call the
+ *     orphan-clear function after diagnostic sessions.
+ *
+ * Compared to the alternatives, accepting the bounded orphan-memory
+ * cost wins on every other axis we care about: hot-path overhead is
+ * unchanged (single writer, lock-free), correctness is universal
+ * (parallel workers, autovacuum, walsender, all transient backends
+ * preserve their data), DSA's lazy-allocation property is preserved
+ * (capture=off pays zero memory), and the cross-backend reader
+ * pattern below works for the future ASH/AWR/10046 background worker
+ * with no further plumbing.  See review_5.md issue #26 for the
+ * design discussion.
+ *
+ * External reader pattern (cross-backend consumers)
+ * -------------------------------------------------
  *
  * External readers (extensions, background workers reading another
  * backend's ring) should:
  *
- * 1. Acquire WaitEventTraceCtl->lock in LW_SHARED before resolving
- *    trace_ptrs[procNumber] via dsa_get_address.  This prevents the
- *    owning backend's wait_event_trace_release_slot from dsa_free()'ing
- *    the chunk while you hold a pointer into it.
+ * 1. Snapshot trace_slots[procNumber].generation BEFORE reading
+ *    anything else in the slot.  After reading the ring, snapshot
+ *    generation again; if it changed, the slot was reassigned (e.g.
+ *    a new backend claimed this procNumber and cleared the orphan)
+ *    and the read should be discarded or retried.
  *
- * 2. Hold the LWLock only long enough to read write_pos and copy the
- *    relevant slice of records[] into local memory.  Release the lock
- *    BEFORE doing per-record processing.  Holding the lock during the
- *    full processing path turns every other backend's first-time
- *    wait_event_trace_attach (e.g. new connections under cluster-wide
- *    wait_event_capture = trace) into a wait that scales with your
+ * 2. Read trace_slots[procNumber].state.  If FREE, there is no ring
+ *    to read.  If OWNED, the ring is being actively written by the
+ *    owner -- proceed with the seqlock protocol on each record.  If
+ *    ORPHANED, the data is post-mortem (immutable, no concurrent
+ *    writer) but the seqlock check is still cheap and correct, so
+ *    use the same per-record protocol unconditionally.
+ *
+ * 3. Acquire WaitEventTraceCtl->lock in LW_SHARED before resolving
+ *    trace_slots[procNumber].ring_ptr via dsa_get_address.  This
+ *    prevents a concurrent transition (e.g. wait_event_trace_release_slot
+ *    or pg_stat_clear_orphaned_wait_event_rings()) from dsa_free()'ing
+ *    the chunk while you hold a pointer into it.  Hold the lock only
+ *    long enough to read write_pos and copy the relevant slice of
+ *    records[] into local memory; release the lock BEFORE doing
+ *    per-record processing.  Holding the lock during the full
+ *    processing path turns every other backend's first-time
+ *    wait_event_trace_attach into a wait that scales with your
  *    processing speed -- not acceptable on OLTP workloads.  The
  *    snapshot-then-process pattern caps the lock-hold time at memcpy
  *    bandwidth (~1 ms for the full 4 MB ring; sub-ms for incremental
  *    polls that copy only the delta since the last poll).
  *
- * 3. Use the seqlock protocol on each record copied: read rec->seq
+ * 4. Use the seqlock protocol on each record copied: read rec->seq
  *    before and after copying fields; skip the record if either value
  *    is odd or they differ.  This catches concurrent writes by the
  *    owning backend (which never takes the lock above -- the writer
  *    is purely lock-free, see pgstat_report_wait_end_timing).
  *
- * 4. Track write_pos between polls and copy only new records, so the
+ * 5. Track write_pos between polls and copy only new records, so the
  *    snapshot under the lock stays small even when scanning many
  *    backends.
  *
@@ -401,8 +553,11 @@ typedef struct WaitEventTraceState
 typedef struct WaitEventTraceControl
 {
 	dsa_handle	trace_dsa_handle;	/* DSA_HANDLE_INVALID until first use */
-	LWLock		lock;				/* protects DSA creation */
-	dsa_pointer trace_ptrs[FLEXIBLE_ARRAY_MEMBER]; /* per procNumber */
+	LWLock		lock;				/* protects DSA creation and slot
+									 * transitions (FREE<->OWNED<->
+									 * ORPHANED including ring_ptr
+									 * dsa_allocate / dsa_free) */
+	WaitEventTraceSlot trace_slots[FLEXIBLE_ARRAY_MEMBER]; /* per procNumber */
 } WaitEventTraceControl;
 
 
@@ -454,6 +609,14 @@ extern void pgstat_reset_wait_event_timing_storage(void);
 extern void wait_event_trace_ensure_dsa(void);
 extern void wait_event_trace_attach(int procNumber);
 extern void wait_event_trace_detach(int procNumber);
+
+/*
+ * Called from pgstat_set_wait_event_timing_storage() at backend init to
+ * release any orphaned trace ring left over from a previous backend that
+ * occupied this procNumber.  See the slot-lifecycle comment on
+ * WaitEventTraceControl above for why we do not free on backend exit.
+ */
+extern void wait_event_trace_clear_orphan_at_init(int procNumber);
 
 /* GUC hooks declared in guc_hooks.h */
 

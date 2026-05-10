@@ -12813,4 +12813,10 @@
   provolatile => 'v', prorettype => 'void', proargtypes => '',
   prosrc => 'pg_stat_reset_wait_event_timing_all' },
 
+{ oid => '9961',
+  descr => 'statistics: free wait-event-trace rings whose owner backend has exited (superuser only); returns count freed',
+  proname => 'pg_stat_clear_orphaned_wait_event_rings',
+  provolatile => 'v', prorettype => 'int8', proargtypes => '',
+  prosrc => 'pg_stat_clear_orphaned_wait_event_rings' },
+
 ]

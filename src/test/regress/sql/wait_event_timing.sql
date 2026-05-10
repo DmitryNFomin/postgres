@@ -187,6 +187,13 @@ SELECT
 FROM pg_stat_wait_event_timing_overflow
 WHERE pid = pg_backend_pid();
 
+-- Orphan-clear admin function: smoke-test that it returns a non-negative
+-- count and is callable without error.  Actual orphan-creation requires
+-- a backend exit, which the regression harness can't easily orchestrate
+-- in a portable way; we verify here only that the API works.  Returns
+-- bigint (count of rings freed); typically 0 in a fresh test run.
+SELECT pg_stat_clear_orphaned_wait_event_rings() >= 0 AS clear_orphans_ok;
+
 -- PID-filter fast path on the cluster-wide SRFs.  Smoke-test that the
 -- single-slot branch returns rows for the calling backend and zero rows
 -- for a known-bad PID (matching pg_stat_reset_wait_event_timing

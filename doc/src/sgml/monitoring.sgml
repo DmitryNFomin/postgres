@@ -4138,13 +4138,36 @@ ORDER  BY b.bucket_idx;
    shared-memory snapshot pattern documented on
    <structname>WaitEventTraceControl</structname> in
    <filename>src/include/utils/wait_event_timing.h</filename>:
+   snapshot <structfield>trace_slots[procNumber].generation</structfield>,
    acquire <structname>WaitEventTraceCtl->lock</structname> in
-   <literal>LW_SHARED</literal>, resolve the target backend's
-   <structfield>trace_ptrs</structfield> entry via
+   <literal>LW_SHARED</literal>, resolve the target slot's
+   <structfield>ring_ptr</structfield> via
    <function>dsa_get_address</function>, snapshot the relevant slice
-   of the ring into local memory, release the lock, and process the
-   snapshot off the lock.  That bypasses this view entirely and is
-   the supported cross-backend interface for monitoring extensions.
+   of the ring into local memory, release the lock, re-snapshot
+   <structfield>generation</structfield> and discard the read if it
+   changed, then process the snapshot off the lock.  That bypasses
+   this view entirely and is the supported cross-backend interface
+   for monitoring extensions.
+  </para>
+
+  <para>
+   <emphasis>Slot lifecycle.</emphasis>  Per-backend trace rings are
+   not freed when their owner backend exits.  The ring stays
+   allocated in shared memory in an <quote>orphaned</quote> state
+   so the dying backend's final waits remain readable by
+   cross-backend consumers; this is what makes the view above usable
+   for parallel-worker observability (parallel workers exit in
+   milliseconds at end-of-parallel-query, well below typical
+   sampling cadences).  Orphaned rings are reclaimed automatically
+   when a new backend takes over the same
+   <literal>procNumber</literal> slot, and the DBA can force a
+   sweep at any time via
+   <function>pg_stat_clear_orphaned_wait_event_rings</function>.
+   The worst-case orphan-memory footprint is bounded by the slot
+   count times ~4&nbsp;MB; see
+   <function>pg_stat_clear_orphaned_wait_event_rings</function>
+   under <xref linkend="monitoring-stats-funcs"/> for details and
+   the deployment patterns where the function is most useful.
   </para>
 
   <para>
@@ -6416,6 +6439,44 @@ ORDER  BY b.bucket_idx;
         target backends; callers that need strict read-after-reset
         semantics should poll each target's
         <structfield>reset_count</structfield> column.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_stat_clear_orphaned_wait_event_rings</primary>
+        </indexterm>
+        <function>pg_stat_clear_orphaned_wait_event_rings</function> ()
+        <returnvalue>bigint</returnvalue>
+       </para>
+       <para>
+        Frees every wait-event-trace ring whose owner backend has
+        exited.  Returns the number of rings released.  Requires
+        superuser.
+       </para>
+       <para>
+        When a backend that had <varname>wait_event_capture</varname> =
+        <literal>trace</literal> exits, its ~4 MB trace ring is
+        intentionally <emphasis>not</emphasis> freed at exit so that
+        cross-backend monitoring tools (ASH/AWR/10046-style background
+        workers) can still read the dying backend's final waits.  The
+        memory is reclaimed lazily: in the common case, the ring is
+        freed automatically when a new backend takes over the same
+        <literal>procNumber</literal> slot.  This function is the
+        explicit DBA-driven sweep for the pathological case where
+        capture was briefly enabled, then disabled, on a cluster with
+        long-lived pooled connections that never recycle the
+        <literal>procNumber</literal>.  The maximum amount of memory
+        this can release is bounded by the slot count times the
+        per-ring size (~400 MB at <varname>max_connections</varname>
+        = 100, ~4 GB at 1000); on most deployments the function will
+        report 0 because connection churn already drained orphans
+        naturally.
+       </para>
+       <para>
+        Safe to call when capture is currently <literal>off</literal>
+        and even when no orphans exist (returns 0 in both cases).
        </para></entry>
       </row>
 

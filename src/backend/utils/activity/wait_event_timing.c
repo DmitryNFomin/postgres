@@ -75,6 +75,7 @@ Datum		pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS);
 Datum		pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS);
 Datum		pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS);
 Datum		pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS);
+Datum		pg_stat_clear_orphaned_wait_event_rings(PG_FUNCTION_ARGS);
 
 Datum
 pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
@@ -115,6 +116,18 @@ pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)
 			 errmsg("wait event capture is not supported by this build"),
 			 errhint("Compile PostgreSQL with --enable-wait-event-timing.")));
 	PG_RETURN_VOID();
+}
+
+Datum
+pg_stat_clear_orphaned_wait_event_rings(PG_FUNCTION_ARGS)
+{
+	/*
+	 * In stub builds the trace ring infrastructure does not exist, so
+	 * there can never be any orphaned rings to clear.  Return 0 rather
+	 * than erroring; this lets monitoring scripts call the function
+	 * unconditionally without branching on the build flag.
+	 */
+	PG_RETURN_INT64(0);
 }
 
 /*
@@ -171,6 +184,12 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 void
 pgstat_reset_wait_event_timing_storage(void)
 {
+}
+
+void
+wait_event_trace_clear_orphan_at_init(int procNumber)
+{
+	/* No trace ring infrastructure in stub builds. */
 }
 
 #else							/* USE_WAIT_EVENT_TIMING */
@@ -975,13 +994,16 @@ pgstat_wait_event_timing_lazy_attach(void)
 /*
  * Report the shared memory space needed for trace ring buffer control.
  * Only a small control struct is in fixed shmem; the actual ring buffers
- * are allocated lazily via DSA.
+ * are allocated lazily via DSA.  At ~24 bytes/slot, the slot array adds
+ * ~26 KB at a default MaxBackends, negligible compared to the ring
+ * memory itself.
  */
 static Size
 WaitEventTraceControlShmemSize(void)
 {
-	return add_size(offsetof(WaitEventTraceControl, trace_ptrs),
-					mul_size(NUM_WAIT_EVENT_TIMING_SLOTS, sizeof(dsa_pointer)));
+	return add_size(offsetof(WaitEventTraceControl, trace_slots),
+					mul_size(NUM_WAIT_EVENT_TIMING_SLOTS,
+							 sizeof(WaitEventTraceSlot)));
 }
 
 static void
@@ -1004,7 +1026,14 @@ WaitEventTraceControlShmemInit(void *arg)
 	LWLockInitialize(&WaitEventTraceCtl->lock,
 					 LWTRANCHE_WAIT_EVENT_TRACE_DSA);
 	for (i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
-		WaitEventTraceCtl->trace_ptrs[i] = InvalidDsaPointer;
+	{
+		WaitEventTraceSlot *s = &WaitEventTraceCtl->trace_slots[i];
+
+		pg_atomic_init_u64(&s->generation, 0);
+		pg_atomic_init_u32(&s->state, WET_TRACE_SLOT_FREE);
+		s->pad = 0;
+		s->ring_ptr = InvalidDsaPointer;
+	}
 }
 
 const ShmemCallbacks WaitEventTraceControlShmemCallbacks = {
@@ -1048,15 +1077,39 @@ wait_event_trace_ensure_dsa(void)
 }
 
 /*
- * Free trace ring buffer for this backend.
+ * Transition our trace ring slot to ORPHANED on backend exit.
  *
- * Must be called BEFORE dsm_backend_shutdown() detaches the DSA.
- * Registered as a before_shmem_exit callback.
+ * Registered as a before_shmem_exit callback.  Runs BEFORE
+ * dsm_backend_shutdown() detaches the DSA.
+ *
+ * Crucially, we do NOT free the ring here.  The ring stays allocated in
+ * DSA so that cross-backend consumers (ASH/AWR/10046-style monitoring
+ * background workers, future or external) can read the dying backend's
+ * final waits -- the original "free at exit" design lost data the
+ * instant a worker terminated, which was particularly bad for parallel
+ * workers exiting in milliseconds at end-of-parallel-query.  See the
+ * lifecycle comment on WaitEventTraceControl for the full design
+ * rationale and the bounded-memory cost we accept in exchange.
+ *
+ * The ORPHANED slot is reclaimed in one of two ways:
+ *   (a) a new backend at this procNumber calls
+ *       wait_event_trace_clear_orphan_at_init() at backend init, or
+ *   (b) the DBA calls pg_stat_clear_orphaned_wait_event_rings().
+ *
+ * State transition order matters: bump generation BEFORE storing the
+ * new state, so cross-backend readers that snapshot
+ * (generation_before, state, ring_ptr, generation_after) under the
+ * lock see a consistent (state, ring_ptr) pair iff generation didn't
+ * change.  We hold the lock for the whole transition, but readers do
+ * not have to (they just take it briefly to snapshot the ring
+ * contents); the generation check is what makes the unlocked-read
+ * path safe.
  */
 static void
 wait_event_trace_before_shmem_exit(int code, Datum arg)
 {
 	int		procNumber = DatumGetInt32(arg);
+	WaitEventTraceSlot *slot;
 
 	if (WaitEventTraceCtl == NULL)
 		return;
@@ -1064,21 +1117,70 @@ wait_event_trace_before_shmem_exit(int code, Datum arg)
 	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
 		return;
 
-	if (DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[procNumber]) &&
-		trace_dsa != NULL)
+	slot = &WaitEventTraceCtl->trace_slots[procNumber];
+
+	/*
+	 * If this backend never ended up with an OWNED slot (e.g. capture
+	 * was off the whole session, or the trace was released back to FREE
+	 * via assign_wait_event_capture going trace -> off), there is
+	 * nothing to transition.  Read state without the lock first as a
+	 * fast-path check; the authoritative re-check happens under the
+	 * lock below.
+	 */
+	if (pg_atomic_read_u32(&slot->state) != WET_TRACE_SLOT_OWNED)
 	{
-		LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
-		dsa_free(trace_dsa, WaitEventTraceCtl->trace_ptrs[procNumber]);
-		WaitEventTraceCtl->trace_ptrs[procNumber] = InvalidDsaPointer;
-		LWLockRelease(&WaitEventTraceCtl->lock);
+		my_wait_event_trace = NULL;
+		return;
 	}
+
+	LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
+
+	if (pg_atomic_read_u32(&slot->state) == WET_TRACE_SLOT_OWNED &&
+		DsaPointerIsValid(slot->ring_ptr))
+	{
+		/*
+		 * Bump generation first so any reader that snapped the old
+		 * generation will detect the change on its post-read recheck
+		 * and discard its read.  Then publish the ORPHANED state.
+		 * Keep ring_ptr valid -- the data is what we want to preserve.
+		 */
+		pg_atomic_fetch_add_u64(&slot->generation, 1);
+		pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_ORPHANED);
+	}
+
+	LWLockRelease(&WaitEventTraceCtl->lock);
 
 	my_wait_event_trace = NULL;
 }
 
 /*
- * Allocate a trace ring buffer for this backend via DSA.
+ * Allocate (or re-acquire) a trace ring buffer for this backend via DSA.
  * Called when wait_event_capture is set to 'trace'.
+ *
+ * Slot state at entry will be one of:
+ *
+ *   FREE     fresh slot (or one cleared on this backend's init by
+ *            wait_event_trace_clear_orphan_at_init): allocate a new
+ *            ring, transition slot to OWNED, bump generation.
+ *
+ *   OWNED    we already attached earlier in this same backend's life
+ *            (e.g. user toggled capture trace->stats->trace; the
+ *            stats step calls wait_event_trace_release_slot which
+ *            transitions back to FREE, but our cached
+ *            my_wait_event_trace was cleared on the way down -- so
+ *            seeing OWNED here at attach time means a different
+ *            backend somehow ended up with this procNumber, which
+ *            cannot happen because procNumber is per-backend and a
+ *            single backend can only run one attach at a time.  We
+ *            still tolerate this state defensively by re-mapping the
+ *            existing ring rather than leaking a second allocation.
+ *
+ *   ORPHANED can never be observed here: a new backend's
+ *            pgstat_set_wait_event_timing_storage() called
+ *            wait_event_trace_clear_orphan_at_init() before any
+ *            wait-event capture path can run, so any prior orphan has
+ *            already been demoted to FREE.  Treated as a safety check
+ *            (Assert in debug builds).
  */
 void
 wait_event_trace_attach(int procNumber)
@@ -1093,8 +1195,10 @@ wait_event_trace_attach(int procNumber)
 	 */
 	static bool in_attach = false;
 	static bool shmem_exit_registered = false;
+	WaitEventTraceSlot *slot;
 	dsa_pointer p;
 	WaitEventTraceState *ts;
+	uint32		state_now;
 
 	if (in_attach)
 		return;
@@ -1105,15 +1209,21 @@ wait_event_trace_attach(int procNumber)
 	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
 		return;
 
+	slot = &WaitEventTraceCtl->trace_slots[procNumber];
+
 	in_attach = true;
 	PG_TRY();
 	{
-		/* Already have a ring buffer? */
-		if (DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[procNumber]))
+		state_now = pg_atomic_read_u32(&slot->state);
+
+		Assert(state_now != WET_TRACE_SLOT_ORPHANED);
+
+		/* Already have a ring buffer? Re-map to it. */
+		if (state_now == WET_TRACE_SLOT_OWNED &&
+			DsaPointerIsValid(slot->ring_ptr))
 		{
 			wait_event_trace_ensure_dsa();
-			my_wait_event_trace = dsa_get_address(trace_dsa,
-												  WaitEventTraceCtl->trace_ptrs[procNumber]);
+			my_wait_event_trace = dsa_get_address(trace_dsa, slot->ring_ptr);
 			my_trace_proc_number = procNumber;
 		}
 		else
@@ -1126,7 +1236,16 @@ wait_event_trace_attach(int procNumber)
 			pg_atomic_init_u64(&ts->write_pos, 0);
 
 			LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
-			WaitEventTraceCtl->trace_ptrs[procNumber] = p;
+			/*
+			 * Publish ring_ptr BEFORE transitioning state to OWNED.
+			 * Cross-backend readers that observe state==OWNED outside
+			 * the lock then see a valid ring_ptr.  Bump generation
+			 * last so any reader that snapped the prior generation
+			 * will detect the change.
+			 */
+			slot->ring_ptr = p;
+			pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_OWNED);
+			pg_atomic_fetch_add_u64(&slot->generation, 1);
 			LWLockRelease(&WaitEventTraceCtl->lock);
 
 			my_wait_event_trace = ts;
@@ -1135,17 +1254,18 @@ wait_event_trace_attach(int procNumber)
 			/*
 			 * Register cleanup to run BEFORE dsm_backend_shutdown()
 			 * detaches the DSA.  The before_shmem_exit callbacks run in
-			 * LIFO order before DSM detach, so dsa_free() is safe at
-			 * that point.
+			 * LIFO order before DSM detach, so the ORPHANED transition
+			 * (which does not actually free the ring) is safe at that
+			 * point.
 			 *
 			 * Guarded by shmem_exit_registered because under the
 			 * release-on-disable policy (see wait_event_trace_release_slot
 			 * and assign_wait_event_capture) the allocate branch can run
 			 * multiple times per backend lifetime -- once per
 			 * off/stats -> trace re-enable cycle.  The cleanup itself is
-			 * idempotent (it short-circuits when trace_ptrs[procNumber]
-			 * is InvalidDsaPointer), but we avoid growing the
-			 * before_shmem_exit callback list.
+			 * idempotent (it short-circuits when state is not OWNED), so
+			 * it is safe to invoke after a release-then-reattach cycle,
+			 * but we still avoid growing the before_shmem_exit list.
 			 */
 			if (!shmem_exit_registered)
 			{
@@ -1185,11 +1305,17 @@ wait_event_trace_detach(int procNumber)
  * brief investigation would remain pinned for the rest of the session's
  * lifetime, which can leak gigabytes across large connection pools.
  *
+ * Important contrast with wait_event_trace_before_shmem_exit: backend
+ * exit transitions the slot to ORPHANED (preserving data for
+ * cross-backend readers); release_slot fully frees and returns to FREE
+ * because the operator has explicitly disabled trace -- they have
+ * affirmatively decided not to keep the data, so we honour that and
+ * reclaim the memory immediately.  Subsequent re-enable allocates a
+ * fresh ring via wait_event_trace_attach's allocate branch.
+ *
  * The operation is LWLock-safe and does not raise -- dsa_free is pure
  * bookkeeping on the DSA freelist, no allocation and no ereport paths.
- * Safe to call from a GUC assign hook.  If the ring is later re-attached
- * (user re-enables TRACE), wait_event_trace_attach takes the "allocate"
- * branch again and a fresh ring is created on first wait event.
+ * Safe to call from a GUC assign hook.
  *
  * If pg_get_backend_wait_event_trace is currently iterating our own ring
  * (wait_event_trace_srf_in_progress), we must NOT free the chunk out
@@ -1211,6 +1337,7 @@ wait_event_trace_release_slot(int procNumber)
 	 * explainer on wait_event_timing_attach_array.
 	 */
 	static bool in_release = false;
+	WaitEventTraceSlot *slot;
 
 	if (in_release)
 		return;
@@ -1231,14 +1358,24 @@ wait_event_trace_release_slot(int procNumber)
 	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
 		return;
 
+	slot = &WaitEventTraceCtl->trace_slots[procNumber];
+
 	in_release = true;
 	PG_TRY();
 	{
 		LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
-		if (DsaPointerIsValid(WaitEventTraceCtl->trace_ptrs[procNumber]))
+		if (DsaPointerIsValid(slot->ring_ptr))
 		{
-			dsa_free(trace_dsa, WaitEventTraceCtl->trace_ptrs[procNumber]);
-			WaitEventTraceCtl->trace_ptrs[procNumber] = InvalidDsaPointer;
+			/*
+			 * Bump generation first to invalidate any concurrent
+			 * cross-backend snapshot, then free, then publish the FREE
+			 * state with a NULL ring_ptr.  Order matters for unlocked
+			 * readers that have already passed the state check.
+			 */
+			pg_atomic_fetch_add_u64(&slot->generation, 1);
+			dsa_free(trace_dsa, slot->ring_ptr);
+			slot->ring_ptr = InvalidDsaPointer;
+			pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_FREE);
 		}
 		LWLockRelease(&WaitEventTraceCtl->lock);
 
@@ -1249,6 +1386,69 @@ wait_event_trace_release_slot(int procNumber)
 		in_release = false;
 	}
 	PG_END_TRY();
+}
+
+/*
+ * Clear an orphaned trace ring at backend init time.
+ *
+ * Called from pgstat_set_wait_event_timing_storage() once the new
+ * backend has its procNumber.  If the slot we're inheriting was left
+ * ORPHANED by a previous backend (because we deliberately do not free
+ * trace rings on backend exit -- see the lifecycle discussion on
+ * WaitEventTraceControl), free the ring now so the new backend starts
+ * with a clean FREE slot.  Subsequent wait_event_trace_attach() calls
+ * (when this backend itself enables trace) will then take the
+ * allocate branch.
+ *
+ * No-op when the slot is already FREE or OWNED: FREE means there's
+ * nothing to clear; OWNED is impossible at backend init (only a
+ * not-yet-exited backend can leave a slot OWNED, and procNumbers are
+ * assigned exclusively).  We assert OWNED is not observed in debug
+ * builds and conservatively skip the free in production.
+ */
+void
+wait_event_trace_clear_orphan_at_init(int procNumber)
+{
+	WaitEventTraceSlot *slot;
+	uint32		state_now;
+
+	if (WaitEventTraceCtl == NULL)
+		return;
+
+	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
+		return;
+
+	slot = &WaitEventTraceCtl->trace_slots[procNumber];
+
+	state_now = pg_atomic_read_u32(&slot->state);
+	if (state_now != WET_TRACE_SLOT_ORPHANED)
+	{
+		Assert(state_now != WET_TRACE_SLOT_OWNED);
+		return;
+	}
+
+	/*
+	 * The trace DSA is shared across the cluster.  We must attach to it
+	 * before calling dsa_free (which needs the dsa_area pointer).  The
+	 * DSA was created by some earlier backend that wrote a trace
+	 * record (otherwise the slot couldn't have ended up ORPHANED), so
+	 * the handle in WaitEventTraceCtl is valid; ensure_dsa() will
+	 * attach.  Switch to TopMemoryContext for the dsa_area handle.
+	 */
+	wait_event_trace_ensure_dsa();
+	if (trace_dsa == NULL)
+		return;					/* allocator unavailable; leave orphan in place */
+
+	LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
+	if (pg_atomic_read_u32(&slot->state) == WET_TRACE_SLOT_ORPHANED &&
+		DsaPointerIsValid(slot->ring_ptr))
+	{
+		pg_atomic_fetch_add_u64(&slot->generation, 1);
+		dsa_free(trace_dsa, slot->ring_ptr);
+		slot->ring_ptr = InvalidDsaPointer;
+		pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_FREE);
+	}
+	LWLockRelease(&WaitEventTraceCtl->lock);
 }
 
 /*
@@ -1372,6 +1572,19 @@ pgstat_set_wait_event_timing_storage(int procNumber)
 	my_wait_event_timing = NULL;
 	my_trace_proc_number = procNumber;
 	my_wait_event_trace = NULL;
+
+	/*
+	 * If the previous occupant of this procNumber slot was a tracing
+	 * backend that exited, its trace ring is still allocated in DSA in
+	 * ORPHANED state (see wait_event_trace_before_shmem_exit and the
+	 * lifecycle discussion on WaitEventTraceControl).  Free it now so
+	 * this backend starts with a clean FREE slot; otherwise the next
+	 * wait_event_trace_attach call would observe OWNED-but-not-our-data
+	 * (impossible by invariant) or, with the eventual addition of
+	 * post-mortem cross-backend reads, a freshly attached writer would
+	 * end up appending to a previous backend's records.
+	 */
+	wait_event_trace_clear_orphan_at_init(procNumber);
 }
 
 /*
@@ -2290,6 +2503,108 @@ pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)
 		wait_event_timing_request_reset(i);
 
 	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function: pg_stat_clear_orphaned_wait_event_rings()
+ *
+ * Free every trace ring whose owner has exited (slot state ORPHANED).
+ * Returns the number of rings released.
+ *
+ * Why this exists.  When a backend that had wait_event_capture = trace
+ * exits, we deliberately do NOT free its ~4 MB trace ring (see the
+ * lifecycle discussion on WaitEventTraceControl): the data must remain
+ * readable by cross-backend consumers (ASH/AWR/10046-style monitoring
+ * background workers), and an exit-time dsa_free would defeat that.
+ * The reclaim instead happens lazily in two places:
+ *
+ *   (a) wait_event_trace_clear_orphan_at_init(): when a new backend
+ *       inherits the same procNumber slot at init, it frees the prior
+ *       orphan as part of starting clean.  This handles the common
+ *       case (busy clusters with connection churn) automatically.
+ *
+ *   (b) THIS FUNCTION: an explicit DBA-driven sweep that releases
+ *       every currently orphaned ring at once.
+ *
+ * The pathological case (a) does not handle is "capture briefly
+ * enabled, then disabled, on a cluster with long-lived pooled
+ * connections that never exit".  In that scenario procNumbers do not
+ * recycle, so prior orphans persist until cluster restart unless the
+ * DBA calls this function.  Worst-case bound is
+ * NUM_WAIT_EVENT_TIMING_SLOTS * sizeof(WaitEventTraceState) which is
+ * ~400 MB at MaxBackends=100, ~4 GB at MaxBackends=1000 -- bounded
+ * but worth a kill switch.
+ *
+ * Permissions: superuser-only, matching the cluster-wide reset
+ * (pg_stat_reset_wait_event_timing_all).  This is a
+ * cluster-scope memory-reclamation operation: it can disrupt any
+ * concurrent cross-backend reader on any orphaned slot.  The
+ * disruption is bounded (readers retry via the generation counter
+ * and at worst skip one read) but the operation is still
+ * cluster-wide, so the privilege model matches the reset variant
+ * with the same blast radius.
+ *
+ * The function is safe to call even when no orphans exist (returns
+ * 0) and even when capture is currently OFF (the slot array exists
+ * unconditionally; only the rings are lazy).
+ */
+Datum
+pg_stat_clear_orphaned_wait_event_rings(PG_FUNCTION_ARGS)
+{
+	int64		freed = 0;
+	int			i;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be a superuser to clear orphaned wait event "
+						"trace rings")));
+
+	if (WaitEventTraceCtl == NULL)
+		PG_RETURN_INT64(0);
+
+	/*
+	 * If no backend has ever enabled trace, the trace DSA was never
+	 * created and there cannot be any ORPHANED slots: every slot is
+	 * still in its initial FREE state.  Nothing to do.
+	 */
+	if (WaitEventTraceCtl->trace_dsa_handle == DSA_HANDLE_INVALID)
+		PG_RETURN_INT64(0);
+
+	/* Attach to the trace DSA so dsa_free() can be called. */
+	wait_event_trace_ensure_dsa();
+	if (trace_dsa == NULL)
+		PG_RETURN_INT64(0);
+
+	/*
+	 * Walk every slot under the lock.  Total work is bounded:
+	 * NUM_WAIT_EVENT_TIMING_SLOTS atomic loads and at most that many
+	 * dsa_free calls.  We hold the lock for the full sweep so a
+	 * concurrent backend startup cannot transition a slot in or out
+	 * of ORPHANED while we iterate.  For typical MaxBackends this is
+	 * bounded by a few thousand cheap operations, well below any
+	 * reasonable lock-hold concern; in pathological cases an admin
+	 * who is already invoking this manually would tolerate the
+	 * latency.
+	 */
+	LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
+	for (i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
+	{
+		WaitEventTraceSlot *slot = &WaitEventTraceCtl->trace_slots[i];
+
+		if (pg_atomic_read_u32(&slot->state) == WET_TRACE_SLOT_ORPHANED &&
+			DsaPointerIsValid(slot->ring_ptr))
+		{
+			pg_atomic_fetch_add_u64(&slot->generation, 1);
+			dsa_free(trace_dsa, slot->ring_ptr);
+			slot->ring_ptr = InvalidDsaPointer;
+			pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_FREE);
+			freed++;
+		}
+	}
+	LWLockRelease(&WaitEventTraceCtl->lock);
+
+	PG_RETURN_INT64(freed);
 }
 
 #endif							/* USE_WAIT_EVENT_TIMING */
