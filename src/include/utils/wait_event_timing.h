@@ -85,19 +85,30 @@ typedef struct WaitEventTimingEntry
 /*
  * Hash slot count vs. entry cap.
  *
- * The entry cap (192) matches the real-world ceiling called out in the
- * LWLockTimingHashEntry comment below: "real deployments use <200"
- * distinct tranches per backend.  We keep that cap and instead oversize
- * the slot array to 512 so the load factor stays around 37.5% at full
- * occupancy.  Linear probing gets expensive fast above 50% load (avg
- * ~8.5 probes on unsuccessful lookup at 75%, ~1.6 at 37.5%), and this
- * table sits inside the single-writer hot path in
- * pgstat_report_wait_end_timing, so probe length matters.  The extra
- * memory cost is 1 KB per backend -- negligible compared to the ~30 KB
- * WaitEventTimingEntry array that already lives alongside it.
+ * The cap on distinct LWLock tranches per backend (and the slot count
+ * of the open-addressing hash that resolves them) is configured at
+ * server start by the GUC wait_event_timing_max_tranches.  Default 192
+ * matches real-world ceilings on deployments without many custom
+ * extensions; raise it for installations that load many extensions
+ * which register their own LWLock tranches.  See guc_parameters.dat.
+ *
+ * The slot count is derived as the next power of two of (2 ×
+ * max_tranches), giving a load factor of at most 50% (typically ~37%
+ * because the next-pow2 jump usually overshoots).  Linear probing gets
+ * expensive fast above 50% load (avg ~8.5 probes on miss at 75%, ~1.6
+ * at 37.5%), and this table sits inside the single-writer hot path in
+ * pgstat_report_wait_end_timing, so probe length matters.  The slot-
+ * table memory cost is small relative to the entry array (4 bytes per
+ * slot vs. ~152 bytes per entry).
+ *
+ * Both the slot table (entries[]) and the dense events array
+ * (lwlock_events[]) are sized at allocation time and stored in the
+ * per-backend DSA region following the WaitEventTimingState header
+ * for that backend; see the layout description there.  The
+ * LWLockTimingHash struct below holds only the immutable size metadata
+ * and the runtime num_used counter -- the arrays themselves are not
+ * struct members because their length is runtime-determined.
  */
-#define LWLOCK_TIMING_HASH_SIZE		512		/* must be power of 2 */
-#define LWLOCK_TIMING_MAX_ENTRIES	192		/* ~37.5% load factor at cap */
 
 /*
  * Sentinel marking an empty hash slot.  We deliberately reserve the
@@ -115,23 +126,33 @@ typedef struct LWLockTimingHashEntry
 	uint16		tranche_id;		/* LWLOCK_TIMING_EMPTY_SLOT (0xFFFF)
 								 * marks an unoccupied slot.  Real
 								 * tranche IDs are uint16 and use the
-								 * remaining range; the theoretical
-								 * limit of 65534 distinct tranches is
-								 * academic -- real deployments use
-								 * <200. */
+								 * remaining range. */
 	uint16		dense_idx;		/* index into lwlock_events[] */
 } LWLockTimingHashEntry;
 
+/*
+ * Header-only struct.  The actual hash slot array and dense events
+ * array live in the per-backend DSA region immediately after the
+ * WaitEventTimingState (in that order); their addresses are recovered
+ * via wait_event_timing_lwlock_entries() / _lwlock_events() helpers
+ * defined in wait_event_timing.c.
+ */
 typedef struct LWLockTimingHash
 {
-	int			num_used;
-	LWLockTimingHashEntry entries[LWLOCK_TIMING_HASH_SIZE];
-	WaitEventTimingEntry lwlock_events[LWLOCK_TIMING_MAX_ENTRIES];
+	int			num_used;		/* count of occupied entries */
+	int			hash_size;		/* size of slot table (power of 2);
+								 * immutable after allocation */
+	int			max_entries;	/* cap on distinct tranches; immutable
+								 * after allocation, == GUC value at
+								 * postmaster start */
 } LWLockTimingHash;
+
+/* Declaration of the GUC (see guc_parameters.dat). */
+extern PGDLLIMPORT int wait_event_timing_max_tranches;
 
 /*
  * Per-backend wait event timing state.  Allocated in shared memory,
- * one per MaxBackends slot.
+ * one per MaxBackends + NUM_AUXILIARY_PROCS slot.
  *
  * Synchronization: each slot is written exclusively by its owning backend.
  * Cross-backend readers (pg_stat_get_wait_event_timing) are lock-free and
@@ -140,6 +161,20 @@ typedef struct LWLockTimingHash
  * bumps reset_generation, and the owning backend observes the change on
  * its next wait_end and performs the reset itself.  This keeps the hot
  * path lock-free while guaranteeing atomic, race-free resets.
+ *
+ * DSA layout: each backend's slot is laid out as
+ *
+ *     [ WaitEventTimingState header ]
+ *     [ LWLockTimingHashEntry[hash_size] ]
+ *     [ WaitEventTimingEntry[max_entries]      <- lwlock_events[] ]
+ *
+ * where hash_size and max_entries are runtime-derived from the GUC
+ * wait_event_timing_max_tranches and recorded in the
+ * WaitEventTimingState->lwlock_hash header.  Slots are laid out
+ * contiguously in the shared array using a runtime stride
+ * (wait_event_timing_per_backend_stride in wait_event_timing.c) rather
+ * than the C array-indexing operator [], because per-backend size is
+ * determined at server start.
  */
 typedef struct WaitEventTimingState
 {
@@ -176,7 +211,8 @@ typedef struct WaitEventTimingState
 	/* Per-event statistics: hash table for LWLock class (unbounded IDs) */
 	LWLockTimingHash lwlock_hash;
 
-	/* Count of LWLock events dropped due to hash table overflow (192 limit) */
+	/* Count of LWLock events dropped because the LWLock-timing hash
+	 * table reached its cap (the GUC wait_event_timing_max_tranches). */
 	int64		lwlock_overflow_count;
 
 	/* Count of flat array events dropped due to eventId exceeding slot count */

@@ -4015,10 +4015,15 @@ ORDER  BY b.bucket_idx;
       </para>
       <para>
        Number of LWLock wait events dropped because the per-backend
-       LWLock timing hash was already full (more than 192 distinct
-       tranches observed in this session).  Zero means no LWLock
-       truncation.  A one-time <literal>WARNING</literal> is also
-       emitted to the server log on first overflow.
+       LWLock timing hash was already full (more distinct tranches
+       observed in this session than
+       <xref linkend="guc-wait-event-timing-max-tranches"/> allows).
+       Zero means no LWLock truncation.  A one-time
+       <literal>WARNING</literal> is also emitted to the server log on
+       first overflow.  If you see this counter rising, raise
+       <varname>wait_event_timing_max_tranches</varname> at server
+       start (the per-backend memory cost is proportional and
+       described under that GUC).
       </para></entry>
      </row>
 

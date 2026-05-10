@@ -37,6 +37,15 @@
 int			wait_event_capture = WAIT_EVENT_CAPTURE_OFF;
 
 /*
+ * GUC: cap on distinct LWLock tranches the per-backend hash table
+ * tracks individually.  Sized at server start (PGC_POSTMASTER).  See
+ * the description in guc_parameters.dat.  Always defined so the GUC
+ * machinery has a backing variable even on builds compiled without
+ * --enable-wait-event-timing; the value is unused outside that gate.
+ */
+int			wait_event_timing_max_tranches = 192;
+
+/*
  * Enum value table consumed by guc.c.  Order matches the
  * WaitEventCaptureLevel enum and the documented "off < stats < trace"
  * ordering.
@@ -235,12 +244,104 @@ static WaitEventTimingControl *WaitEventTimingCtl = NULL;
 static dsa_area *timing_dsa = NULL;
 
 /*
- * Backend-local cached pointer to the shared array, set on first
- * lazy-attach.  Readers of other backends' slots (pg_stat_*) attach
- * on demand and use this cache for the rest of the SRF call.  Writers
- * access their own slot exclusively via my_wait_event_timing.
+ * Backend-local cached pointer to the start of the shared array, set
+ * on first lazy-attach.  Readers of other backends' slots (pg_stat_*)
+ * attach on demand and use this cache for the rest of the SRF call.
+ * Writers access their own slot exclusively via my_wait_event_timing.
+ *
+ * Slots in this region are NOT laid out as a simple C array -- per
+ * the layout description on WaitEventTimingState (in
+ * src/include/utils/wait_event_timing.h), each slot has a
+ * runtime-determined stride (header + variable-size hash arrays).
+ * Use wet_slot(idx) below to index into it.
  */
-static WaitEventTimingState *WaitEventTimingArray = NULL;
+static char *WaitEventTimingArray = NULL;
+
+/*
+ * Per-backend slot stride within WaitEventTimingArray.  Set at first
+ * attach from the GUC value at the time of allocation; constant for
+ * the cluster's lifetime once the DSA is allocated.
+ */
+static Size wait_event_timing_per_backend_stride = 0;
+
+/*
+ * Effective hash sizing.  Both values are derived from the GUC
+ * wait_event_timing_max_tranches at allocation time and stored in
+ * each slot's LWLockTimingHash header; cached here as backend-local
+ * for use by code that needs the values before resolving a slot
+ * (e.g., the allocation code itself).
+ */
+static int	wait_event_timing_hash_size = 0;
+static int	wait_event_timing_max_entries = 0;
+
+/*
+ * Round up to the next power of two, with a minimum of 32.  The hash
+ * slot count must be a power of two for the mask-based modulo in the
+ * lookup hot path; we target >= 2x the entry cap so the load factor
+ * stays at or below 50%.
+ */
+static int
+wait_event_timing_hash_size_for(int max_entries)
+{
+	int		size = 32;
+
+	while (size < max_entries * 2)
+		size <<= 1;
+	return size;
+}
+
+/*
+ * Compute the per-backend slot size for the given max_entries.  Each
+ * slot is laid out as
+ *
+ *     [ WaitEventTimingState header ]
+ *     [ LWLockTimingHashEntry[hash_size] ]
+ *     [ WaitEventTimingEntry[max_entries]    <- lwlock_events[] ]
+ *
+ * with no padding between sections (the structs already pack
+ * 8-byte-aligned).
+ */
+static Size
+wait_event_timing_slot_size(int max_entries)
+{
+	int		hash_size = wait_event_timing_hash_size_for(max_entries);
+
+	return add_size(sizeof(WaitEventTimingState),
+					add_size(mul_size(hash_size, sizeof(LWLockTimingHashEntry)),
+							 mul_size(max_entries, sizeof(WaitEventTimingEntry))));
+}
+
+/* Resolve the address of slot `idx` within WaitEventTimingArray. */
+static inline WaitEventTimingState *
+wet_slot(int idx)
+{
+	return (WaitEventTimingState *)
+		(WaitEventTimingArray + (Size) idx * wait_event_timing_per_backend_stride);
+}
+
+/*
+ * Address of the LWLock hash slot table for the given slot's lwlock_hash
+ * header.  The slot table immediately follows the WaitEventTimingState
+ * header in memory; hash_size in the LWLockTimingHash header tells us
+ * how many entries follow.
+ */
+static inline LWLockTimingHashEntry *
+wet_lwlock_hash_entries(WaitEventTimingState *state)
+{
+	return (LWLockTimingHashEntry *)((char *) state + sizeof(WaitEventTimingState));
+}
+
+/*
+ * Address of the dense LWLock events array for the given slot.  It
+ * immediately follows the slot table.
+ */
+static inline WaitEventTimingEntry *
+wet_lwlock_hash_events(WaitEventTimingState *state)
+{
+	return (WaitEventTimingEntry *)
+		((char *) state + sizeof(WaitEventTimingState)
+		 + (Size) state->lwlock_hash.hash_size * sizeof(LWLockTimingHashEntry));
+}
 
 /* DSA-based trace ring buffer control */
 static WaitEventTraceControl *WaitEventTraceCtl = NULL;
@@ -321,54 +422,68 @@ wait_event_timing_index(uint32 wait_event_info)
 }
 
 /*
- * Reset an LWLockTimingHash to its empty initial state.
+ * Reset a slot's LWLockTimingHash to its empty initial state.
  *
- * The DSA region we live in is zero-initialised on allocation, but the
- * empty-slot sentinel is LWLOCK_TIMING_EMPTY_SLOT (0xFFFF), not 0, so
- * we cannot rely on a plain memset(0) for the entries array.  This
- * helper centralises the correct clear sequence -- bulk-zero everything
- * (which initialises num_used and lwlock_events[] correctly), then walk
- * entries[] writing the sentinel.  Every caller that needs to reset or
- * initialise the hash routes through here.
+ * Takes a WaitEventTimingState rather than a bare LWLockTimingHash
+ * because the slot table (entries[]) and dense events array
+ * (lwlock_events[]) live as variable-size regions following the
+ * WaitEventTimingState header in memory; their sizes are runtime-
+ * determined by wait_event_timing_max_tranches.  The hash header's
+ * hash_size and max_entries fields are immutable after allocation
+ * and are NOT reset here.
  */
 static void
-lwlock_timing_hash_clear(LWLockTimingHash *ht)
+lwlock_timing_hash_clear(WaitEventTimingState *state)
 {
-	int		i;
+	LWLockTimingHash *ht = &state->lwlock_hash;
+	LWLockTimingHashEntry *entries = wet_lwlock_hash_entries(state);
+	WaitEventTimingEntry *events = wet_lwlock_hash_events(state);
+	int			i;
 
-	memset(ht, 0, sizeof(LWLockTimingHash));
-	for (i = 0; i < LWLOCK_TIMING_HASH_SIZE; i++)
-		ht->entries[i].tranche_id = LWLOCK_TIMING_EMPTY_SLOT;
+	ht->num_used = 0;
+	memset(events, 0, (Size) ht->max_entries * sizeof(WaitEventTimingEntry));
+	for (i = 0; i < ht->hash_size; i++)
+	{
+		entries[i].tranche_id = LWLOCK_TIMING_EMPTY_SLOT;
+		entries[i].dense_idx = 0;
+	}
 }
 
 /*
  * Maximum number of probes attempted on the lookup hot path once the
- * table is at capacity (LWLOCK_TIMING_MAX_ENTRIES).  At cap there is
- * no further insertion possible, so an unknown tranche cannot be
- * recorded; the only useful work the loop can do is find an existing
- * entry within its probe-distance window.  Bounding the scan caps the
- * per-event cost at the cap-overflow regime to a constant, instead of
- * paying ~2-3 probes (worst-case clusters: many more) on every
- * unknown-tranche wait_end for the remainder of the backend lifetime.
+ * table is at capacity.  At cap there is no further insertion
+ * possible, so an unknown tranche cannot be recorded; the only useful
+ * work the loop can do is find an existing entry within its
+ * probe-distance window.  Bounding the scan caps the per-event cost at
+ * the cap-overflow regime to a constant, instead of paying ~2-3 probes
+ * (worst-case clusters: many more) on every unknown-tranche wait_end
+ * for the remainder of the backend lifetime.
  *
  * The bound (8) is well above the expected probe distance at this
- * table's load factor of 192/512 = 0.375 (linear-probing miss expected
- * length ~1.78; P99 fits comfortably in 8).  Entries inserted with a
+ * table's load factor (linear-probing miss expected length ~1.78 at
+ * 37.5% load; P99 fits comfortably in 8).  Entries inserted with a
  * collision distance > 8 from their hash slot will fail to be found at
  * cap, which is theoretically possible but astronomically unlikely at
- * 0.375 load (probability < 1e-3) and is the right trade against the
- * common at-cap unknown-tranche cost.
+ * the load factors we target (probability < 1e-3) and is the right
+ * trade against the common at-cap unknown-tranche cost.
  */
 #define LWLOCK_TIMING_LOOKUP_AT_CAP_PROBE_LIMIT 8
 
 /*
  * Look up (or insert) timing entry for an LWLock tranche ID.
+ *
+ * Takes WaitEventTimingState (rather than just the hash header) so the
+ * variable-size entries[] and lwlock_events[] arrays following the
+ * header can be addressed via the wet_lwlock_hash_*() helpers.
  */
 static WaitEventTimingEntry *
-lwlock_timing_lookup(LWLockTimingHash *ht, uint16 tranche_id)
+lwlock_timing_lookup(WaitEventTimingState *state, uint16 tranche_id)
 {
+	LWLockTimingHash *ht = &state->lwlock_hash;
+	LWLockTimingHashEntry *entries = wet_lwlock_hash_entries(state);
+	WaitEventTimingEntry *events = wet_lwlock_hash_events(state);
 	uint32		hash = (uint32) tranche_id * 2654435761U;
-	int			slot = hash & (LWLOCK_TIMING_HASH_SIZE - 1);
+	int			slot = hash & (ht->hash_size - 1);
 	int			limit;
 	int			i;
 
@@ -377,28 +492,28 @@ lwlock_timing_lookup(LWLockTimingHash *ht, uint16 tranche_id)
 	 * quickly instead of walking through clustered occupied slots.  See
 	 * the comment on LWLOCK_TIMING_LOOKUP_AT_CAP_PROBE_LIMIT.
 	 */
-	limit = (ht->num_used >= LWLOCK_TIMING_MAX_ENTRIES)
+	limit = (ht->num_used >= ht->max_entries)
 		? LWLOCK_TIMING_LOOKUP_AT_CAP_PROBE_LIMIT
-		: LWLOCK_TIMING_HASH_SIZE;
+		: ht->hash_size;
 
 	for (i = 0; i < limit; i++)
 	{
-		LWLockTimingHashEntry *e = &ht->entries[slot];
+		LWLockTimingHashEntry *e = &entries[slot];
 
 		if (e->tranche_id == tranche_id)
-			return &ht->lwlock_events[e->dense_idx];
+			return &events[e->dense_idx];
 
 		if (e->tranche_id == LWLOCK_TIMING_EMPTY_SLOT)
 		{
-			if (ht->num_used >= LWLOCK_TIMING_MAX_ENTRIES)
+			if (ht->num_used >= ht->max_entries)
 				return NULL;
 
 			e->tranche_id = tranche_id;
 			e->dense_idx = ht->num_used++;
-			return &ht->lwlock_events[e->dense_idx];
+			return &events[e->dense_idx];
 		}
 
-		slot = (slot + 1) & (LWLOCK_TIMING_HASH_SIZE - 1);
+		slot = (slot + 1) & (ht->hash_size - 1);
 	}
 
 	return NULL;
@@ -678,25 +793,62 @@ wait_event_timing_attach_array(bool allocate_if_missing)
 			}
 			else
 			{
-				Size		size;
+				int		max_entries;
+				int		hash_size;
+				Size	stride;
+				Size	total;
 
-				size = mul_size(NUM_WAIT_EVENT_TIMING_SLOTS,
-								sizeof(WaitEventTimingState));
+				/*
+				 * Snapshot the GUC at allocation time and use the same
+				 * value for every slot in the cluster.  This is the
+				 * cluster-wide first-enable allocation; subsequent
+				 * backends that attach reuse these dimensions, even if
+				 * the GUC has somehow been changed in between (it
+				 * shouldn't, since it is PGC_POSTMASTER, but reading
+				 * once and storing the result keeps the contract
+				 * explicit).
+				 */
+				max_entries = wait_event_timing_max_tranches;
+				hash_size = wait_event_timing_hash_size_for(max_entries);
+				stride = wait_event_timing_slot_size(max_entries);
+				total = mul_size(NUM_WAIT_EVENT_TIMING_SLOTS, stride);
 
 				LWLockAcquire(&WaitEventTimingCtl->lock, LW_EXCLUSIVE);
 
 				if (WaitEventTimingCtl->timing_array == InvalidDsaPointer)
 				{
 					dsa_pointer p;
-					WaitEventTimingState *array;
+					char	   *region;
+					int			i;
 
-					p = dsa_allocate_extended(timing_dsa, size,
+					p = dsa_allocate_extended(timing_dsa, total,
 											  DSA_ALLOC_ZERO);
-					array = (WaitEventTimingState *)
-						dsa_get_address(timing_dsa, p);
+					region = (char *) dsa_get_address(timing_dsa, p);
 
-					for (int i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
-						pg_atomic_init_u32(&array[i].reset_generation, 0);
+					for (i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
+					{
+						WaitEventTimingState *slot;
+						LWLockTimingHashEntry *slot_entries;
+						int			j;
+
+						slot = (WaitEventTimingState *) (region + (Size) i * stride);
+
+						pg_atomic_init_u32(&slot->reset_generation, 0);
+						slot->lwlock_hash.num_used = 0;
+						slot->lwlock_hash.hash_size = hash_size;
+						slot->lwlock_hash.max_entries = max_entries;
+
+						/*
+						 * Initialise the hash slot table to the empty
+						 * sentinel.  The DSA region was zeroed above
+						 * (DSA_ALLOC_ZERO), but the empty sentinel is
+						 * 0xFFFF, not 0.
+						 */
+						slot_entries = (LWLockTimingHashEntry *)
+							((char *) slot + sizeof(WaitEventTimingState));
+						for (j = 0; j < hash_size; j++)
+							slot_entries[j].tranche_id = LWLOCK_TIMING_EMPTY_SLOT;
+					}
 
 					WaitEventTimingCtl->timing_array = p;
 				}
@@ -712,9 +864,25 @@ wait_event_timing_attach_array(bool allocate_if_missing)
 		}
 
 		if (attached)
-			WaitEventTimingArray = (WaitEventTimingState *)
+		{
+			WaitEventTimingState *first;
+
+			WaitEventTimingArray = (char *)
 				dsa_get_address(timing_dsa,
 								WaitEventTimingCtl->timing_array);
+
+			/*
+			 * Recover the dimensions from the first slot's lwlock_hash
+			 * header.  All slots share the same dimensions, set at
+			 * allocation time.  Cache the stride backend-locally so
+			 * wet_slot() is a single multiply-and-add.
+			 */
+			first = (WaitEventTimingState *) WaitEventTimingArray;
+			wait_event_timing_max_entries = first->lwlock_hash.max_entries;
+			wait_event_timing_hash_size = first->lwlock_hash.hash_size;
+			wait_event_timing_per_backend_stride =
+				wait_event_timing_slot_size(wait_event_timing_max_entries);
+		}
 	}
 	PG_FINALLY();
 	{
@@ -754,7 +922,7 @@ pgstat_wait_event_timing_lazy_attach(void)
 	if (!wait_event_timing_attach_array(true))
 		return;
 
-	slot = &WaitEventTimingArray[procNumber];
+	slot = wet_slot(procNumber);
 
 	/*
 	 * Clear this backend's slot the first time it is used after backend
@@ -786,7 +954,7 @@ pgstat_wait_event_timing_lazy_attach(void)
 	 * publication ordering, of which there is none.
 	 */
 	memset(slot->events, 0, sizeof(slot->events));
-	lwlock_timing_hash_clear(&slot->lwlock_hash);
+	lwlock_timing_hash_clear(slot);
 	slot->reset_count = 0;
 	slot->lwlock_overflow_count = 0;
 	slot->flat_overflow_count = 0;
@@ -1268,7 +1436,7 @@ pgstat_report_wait_end_timing(int capture_level)
 	{
 		memset(my_wait_event_timing->events, 0,
 			   sizeof(my_wait_event_timing->events));
-		lwlock_timing_hash_clear(&my_wait_event_timing->lwlock_hash);
+		lwlock_timing_hash_clear(my_wait_event_timing);
 		my_wait_event_timing->reset_count++;
 		my_wait_event_timing->lwlock_overflow_count = 0;
 		my_wait_event_timing->flat_overflow_count = 0;
@@ -1309,9 +1477,8 @@ pgstat_report_wait_end_timing(int capture_level)
 			bool		warn_flat_overflow = false;
 
 			if (idx == WAIT_EVENT_TIMING_IDX_LWLOCK)
-				entry = lwlock_timing_lookup(
-					&my_wait_event_timing->lwlock_hash,
-					event & 0xFFFF);
+				entry = lwlock_timing_lookup(my_wait_event_timing,
+											 event & 0xFFFF);
 			else if (likely(idx >= 0))
 				entry = &my_wait_event_timing->events[idx];
 
@@ -1339,8 +1506,8 @@ pgstat_report_wait_end_timing(int capture_level)
 				ereport(WARNING,
 						(errmsg("wait_event_timing: LWLock hash table full, "
 								"timing data for some LWLock tranches will be lost"),
-						 errhint("This backend uses more than %d distinct LWLock tranches.",
-								 LWLOCK_TIMING_MAX_ENTRIES)));
+						 errhint("This backend uses more than %d distinct LWLock tranches; raise wait_event_timing_max_tranches.",
+								 wait_event_timing_max_entries)));
 			else if (unlikely(warn_flat_overflow))
 				ereport(WARNING,
 						(errmsg("wait_event_timing: event class overflow, "
@@ -1392,7 +1559,6 @@ pgstat_report_wait_end_timing(int capture_level)
 	}
 }
 
-/*
 /*
  * Resolve the optional pid SRF argument to a procNumber range
  * [out_start, out_end).  Returns true on success, false if the SRF
@@ -1495,7 +1661,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 	for (backend_idx = start_idx; backend_idx < end_idx; backend_idx++)
 	{
-		WaitEventTimingState *state = &WaitEventTimingArray[backend_idx];
+		WaitEventTimingState *state = wet_slot(backend_idx);
 		PgBackendStatus *beentry;
 		int			i;
 
@@ -1561,9 +1727,14 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 		}
 
 		/* Emit rows from the LWLock hash table */
-		for (i = 0; i < LWLOCK_TIMING_HASH_SIZE; i++)
 		{
-			LWLockTimingHashEntry *he = &state->lwlock_hash.entries[i];
+			LWLockTimingHashEntry *entries = wet_lwlock_hash_entries(state);
+			WaitEventTimingEntry *events = wet_lwlock_hash_events(state);
+			int			hash_size = state->lwlock_hash.hash_size;
+
+		for (i = 0; i < hash_size; i++)
+		{
+			LWLockTimingHashEntry *he = &entries[i];
 			WaitEventTimingEntry *entry;
 			Datum		values[10];
 			bool		nulls[10];
@@ -1575,7 +1746,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 			if (he->tranche_id == LWLOCK_TIMING_EMPTY_SLOT)
 				continue;
 
-			entry = &state->lwlock_hash.lwlock_events[he->dense_idx];
+			entry = &events[he->dense_idx];
 			if (entry->count == 0)
 				continue;
 
@@ -1608,6 +1779,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 			tuplestore_putvalues(rsinfo->setResult,
 								rsinfo->setDesc,
 								values, nulls);
+		}
 		}
 	}
 
@@ -1817,7 +1989,7 @@ wait_event_timing_request_reset(int slot_idx)
 	if (!wait_event_timing_attach_array(false))
 		return;
 
-	pg_atomic_fetch_add_u32(&WaitEventTimingArray[slot_idx].reset_generation, 1);
+	pg_atomic_fetch_add_u32(&wet_slot(slot_idx)->reset_generation, 1);
 
 	/*
 	 * Wake the target if it is sleeping in WaitLatch/WaitEventSetWait so
@@ -1843,7 +2015,7 @@ wait_event_timing_request_reset(int slot_idx)
  *
  *   lwlock_overflow_count: number of LWLock wait events that could not
  *       be recorded because the per-backend LWLock timing hash
- *       (LWLOCK_TIMING_MAX_ENTRIES tranches) was full.
+ *       (capped by wait_event_timing_max_tranches) was full.
  *   flat_overflow_count:   number of non-LWLock wait events that
  *       resolved to an unknown / out-of-range class index and therefore
  *       could not be mapped to a histogram slot.
@@ -1880,7 +2052,7 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 
 	for (backend_idx = start_idx; backend_idx < end_idx; backend_idx++)
 	{
-		WaitEventTimingState *state = &WaitEventTimingArray[backend_idx];
+		WaitEventTimingState *state = wet_slot(backend_idx);
 		PgBackendStatus *beentry;
 		Datum		values[6];
 		bool		nulls[6];
@@ -1960,7 +2132,7 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 		{
 			memset(my_wait_event_timing->events, 0,
 				   sizeof(my_wait_event_timing->events));
-			lwlock_timing_hash_clear(&my_wait_event_timing->lwlock_hash);
+			lwlock_timing_hash_clear(my_wait_event_timing);
 			my_wait_event_timing->reset_count++;
 			my_wait_event_timing->lwlock_overflow_count = 0;
 			my_wait_event_timing->flat_overflow_count = 0;

@@ -9219,6 +9219,54 @@ GRANT SET ON PARAMETER wait_event_capture TO pg_monitor;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-wait-event-timing-max-tranches" xreflabel="wait_event_timing_max_tranches">
+      <term><varname>wait_event_timing_max_tranches</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>wait_event_timing_max_tranches</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets the maximum number of distinct LWLock tranches whose timing
+        is recorded individually per backend.  PostgreSQL maintains a
+        per-backend hash table that maps each tranche the backend
+        encounters to its histogram bucket; once the table fills, further
+        tranches encountered by that backend are counted against
+        <structfield>lwlock_overflow_count</structfield> in
+        <link linkend="monitoring-pg-stat-wait-event-timing-overflow-view">
+        <structname>pg_stat_wait_event_timing_overflow</structname></link>
+        and not individually timed.  Sized at server start; this
+        parameter has no effect on builds compiled without
+        <option>--enable-wait-event-timing</option>.  The default is
+        <literal>192</literal>; raise it if your installation loads many
+        extensions that register their own LWLock tranches and you
+        observe non-zero
+        <structfield>lwlock_overflow_count</structfield>.
+       </para>
+       <para>
+        The shared-memory cost is per-backend and proportional to this
+        setting.  Each entry is approximately 152&nbsp;bytes (an
+        LWLock-timing histogram), and the slot table that resolves
+        tranche IDs adds another 4&nbsp;bytes per slot, with the slot
+        count rounded up to the next power of two of twice this value.
+        At default 192 entries (512 slots) the per-backend overhead is
+        roughly 31&nbsp;KB; at 512 entries (1024 slots) roughly
+        80&nbsp;KB.  The total cluster-wide cost is paid only when the
+        first backend in the cluster sets
+        <xref linkend="guc-wait-event-capture"/> to a non-<literal>off</literal>
+        value, and remains allocated for the postmaster's lifetime
+        regardless of subsequent GUC changes.  Builds compiled without
+        <option>--enable-wait-event-timing</option> pay zero memory for
+        this setting.
+       </para>
+       <para>
+        Setting can only be changed at server start.  Only superusers
+        and users with the appropriate <literal>SET</literal> privilege
+        can change this setting.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-track-functions" xreflabel="track_functions">
       <term><varname>track_functions</varname> (<type>enum</type>)
       <indexterm>
