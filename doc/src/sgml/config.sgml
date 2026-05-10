@@ -9141,7 +9141,7 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         DSA per backend, allocated lazily on first enable), exposed via the
         <link linkend="monitoring-pg-backend-wait-event-trace-view">
         <structname>pg_backend_wait_event_trace</structname></link> view.
-        Each record carries either a wait event sample or a query-attribution
+        Each record carries either a wait event or a query-attribution
         marker; consumers reconstruct which query owns which wait by
         interleaving the two streams.
        </para>

@@ -1487,7 +1487,7 @@ check_wait_event_capture(int *newval, void **extra, GucSource source)
  * 2) Release the trace ring buffer when stepping down from TRACE.
  *    The per-backend trace ring is ~4 MB of DSA memory, and leaving it
  *    pinned for the rest of the session's lifetime leaks shmem across
- *    large connection pools that briefly sample trace.  Freeing here
+ *    large connection pools that briefly enable trace.  Freeing here
  *    makes "wait_event_capture = off" semantically release resources.
  *    The next re-enable re-allocates a fresh ring on first wait event
  *    via wait_event_trace_attach.
@@ -2032,8 +2032,9 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
  * own-session diagnostics from psql.
  *
  * This SRF is NOT the path for cross-backend monitoring tools --
- * future ASH/AWR/10046-style background workers that sample wait
- * events from every backend should NOT call this function via SPI.
+ * cross-backend readers (ASH/AWR/10046-style background workers that
+ * consume the per-backend trace rings) should NOT call this function
+ * via SPI.
  * It is hard-coded to return only the calling backend's own ring,
  * so a bgworker calling SELECT * FROM pg_backend_wait_event_trace
  * would get only the bgworker's own (typically empty) ring, not the

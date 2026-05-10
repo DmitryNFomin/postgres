@@ -4128,9 +4128,9 @@ ORDER  BY b.bucket_idx;
   <para>
    Cross-backend monitoring tools &mdash; future Active Session
    History, Automatic Workload Repository, or 10046-style
-   trace-replay background workers that sample wait events from
-   every backend &mdash; should <emphasis>not</emphasis> consume
-   through this view.  The underlying SQL function returns only the
+   trace-replay background workers that read wait events losslessly
+   from every backend's ring &mdash; should <emphasis>not</emphasis>
+   consume through this view.  The underlying SQL function returns only the
    calling backend's own ring; a background worker invoking
    <command>SELECT * FROM pg_backend_wait_event_trace</command> via
    SPI would receive only its own (typically empty) ring, not the

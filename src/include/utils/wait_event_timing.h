@@ -414,7 +414,7 @@ typedef enum WaitEventTraceSlotState
  * lifecycle plus admin cleanups).
  *
  * state is pg_atomic_uint32 only for cheap unlocked "is this slot
- * worth visiting" probes (e.g. an ASH sampler iterating MaxBackends
+ * worth visiting" probes (e.g. an ASH reader iterating MaxBackends
  * slots and skipping FREE ones without taking the lock).  Authoritative
  * reads of state-and-ring_ptr together MUST be done under
  * WaitEventTraceCtl->lock in LW_SHARED, paired with the
@@ -465,7 +465,7 @@ typedef struct WaitEventTraceSlot
  * older design that called dsa_free in the backend's
  * before_shmem_exit callback.  That older design lost trace data the
  * instant a backend exited, because the data was gone before any
- * cross-backend consumer (e.g. an ASH/AWR-style sampler) could read
+ * cross-backend reader (e.g. an ASH/AWR-style ring reader) could observe
  * it.  This was particularly acute for parallel workers, which exit
  * in milliseconds at end-of-parallel-query; a sampler running at
  * 1 Hz would never see their waits.
