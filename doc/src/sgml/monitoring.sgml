@@ -3875,13 +3875,33 @@ ORDER  BY b.bucket_idx;
 
   <para>
    The <structname>pg_wait_event_timing_histogram_buckets</structname>
-   view describes the 16 bins used by the
+   view describes the 32 bins used by the
    <structfield>histogram</structfield> column of
    <link linkend="monitoring-pg-stat-wait-event-timing-view">
    <structname>pg_stat_wait_event_timing</structname></link>.  It always
-   contains 16 rows in ascending order of <structfield>bucket_idx</structfield>,
-   and is independent of runtime state; a join against it attaches
-   numeric bin edges and human labels to any histogram array.
+   contains 32 rows in ascending order of
+   <structfield>bucket_idx</structfield>, and is independent of runtime
+   state; a join against it attaches numeric bin edges and human
+   labels to any histogram array.  Bins are powers of two on the
+   nanosecond axis: bin 0 covers <literal>[0,&nbsp;1us)</literal>, each
+   subsequent bin doubles its lower edge, and the final bin
+   (<structfield>bucket_idx</structfield> = 31) is open-ended at
+   approximately 1024&nbsp;seconds.
+  </para>
+
+  <para>
+   The 32-bin layout (rather than the more common 16-bin choice for
+   log-scale histograms) is deliberate: real-world wait-event
+   distributions have long tails routinely extending past 16&nbsp;ms
+   into multi-second territory (slow-disk
+   <literal>DataFileRead</literal>, lock contention waits, replication
+   apply waits, vacuum waits).  A 16-bin histogram would collapse all
+   of those into a single overflow bin, hiding the very signal that
+   wait-event timing exists to surface.  The 32-bin layout keeps the
+   long tail individually addressable up to about 17&nbsp;minutes
+   before the open-ended bin; single waits beyond that belong in
+   <link linkend="auto-explain"><structname>auto_explain</structname></link>
+   or <structname>pg_stat_activity</structname>, not a histogram.
   </para>
 
   <table id="pg-wait-event-timing-histogram-buckets-view" xreflabel="pg_wait_event_timing_histogram_buckets">
@@ -3904,7 +3924,7 @@ ORDER  BY b.bucket_idx;
        <structfield>bucket_idx</structfield> <type>integer</type>
       </para>
       <para>
-       Zero-based bin index (0&ndash;15).  Matches the offset into the
+       Zero-based bin index (0&ndash;31).  Matches the offset into the
        <structfield>histogram</structfield> array of
        <structname>pg_stat_wait_event_timing</structname>.
       </para></entry>

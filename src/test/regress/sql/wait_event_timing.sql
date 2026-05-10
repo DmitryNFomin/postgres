@@ -22,9 +22,9 @@ SELECT * FROM pg_backend_wait_event_trace LIMIT 0;
 -- ascending bin edges, last bucket open-ended.  Available in both
 -- timing and non-timing builds (defined in system_views.sql, not gated
 -- on the compile flag).
-SELECT count(*) = 16 AS sixteen_rows,
+SELECT count(*) = 32 AS thirty_two_rows,
        min(bucket_idx) = 0 AS idx_starts_at_zero,
-       max(bucket_idx) = 15 AS idx_ends_at_fifteen,
+       max(bucket_idx) = 31 AS idx_ends_at_thirty_one,
        bool_and(lower_ns IS NOT NULL) AS all_lowers_present,
        count(*) FILTER (WHERE upper_ns IS NULL) = 1 AS one_open_bucket
 FROM pg_wait_event_timing_histogram_buckets;

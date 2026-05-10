@@ -526,8 +526,13 @@ lwlock_timing_lookup(WaitEventTimingState *state, uint16 tranche_id)
  * [2^(i+9), 2^(i+10)) ns for 0 < i < NBUCKETS-1, bucket 0 covers
  * [0, 1024) ns, and the last bucket covers [2^(NBUCKETS+8), inf) ns.
  * The boundaries approximate the decimal-microsecond grid (1024 ≈ 1 us,
- * 2048 ≈ 2 us, ... 2^24 ≈ 16 ms) close enough for a diagnostic histogram
- * while letting us skip the strength-reduced /1000 on the hot path.
+ * 2048 ≈ 2 us, ... 2^33 ≈ 8.6 s) close enough for a diagnostic
+ * histogram while letting us skip the strength-reduced /1000 on the
+ * hot path.
+ *
+ * See the rationale comment on WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS in
+ * wait_event_timing.h for why the bucket count is 32 (covering up to
+ * 8.6s) rather than 16 (which would have capped at 16ms).
  */
 static int
 wait_event_timing_bucket(int64 duration_ns)

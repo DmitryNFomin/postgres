@@ -37,13 +37,63 @@
  * nanosecond axis: bucket i covers [2^(i+9), 2^(i+10)) ns, except bucket
  * 0 which covers [0, 1024) ns and the last bucket which covers
  * [2^(NBUCKETS+8), infinity) ns.  These boundaries approximate the
- * decimal-microsecond grid (1024 ≈ 1 us, 2048 ≈ 2 us, ... 2^24 ≈ 16 ms),
- * which lets wait_event_timing_bucket() avoid a /1000 on the hot path.
+ * decimal-microsecond grid (1024 ≈ 1 us, 2048 ≈ 2 us, ...), which lets
+ * wait_event_timing_bucket() avoid a /1000 on the hot path.
  *
- * 16 buckets cover, approximately: <1us, 1-2us, 2-4us, ... 8-16ms, >=16ms
- * (exact boundaries: 1024, 2048, 4096, ... 2^24 ns).
+ * 32 buckets cover from <1us through ~512s-1024s, with the last
+ * bucket open-ended at 2^40 ns ≈ 1099 s ≈ ~18 minutes.  Sample edges:
+ *
+ *   bucket  0:  [0, 1024) ns                 <1us
+ *   bucket  1:  [1024, 2048) ns              1-2us
+ *   bucket 14:  [2^23, 2^24) ns              8-16ms
+ *   bucket 23:  [2^32, 2^33) ns              4-8s
+ *   bucket 30:  [2^39, 2^40) ns              512s-1024s
+ *   bucket 31:  [2^40, inf) ns               >=1024s (overflow)
+ *
+ * Why 32 (and not 16, the original):
+ *
+ *   The original 16 buckets capped at 16ms in the last open-ended
+ *   bucket.  In real production workloads the long tail routinely
+ *   extends well past 16ms -- HDD seek-and-queue, cloud-EBS noisy-
+ *   neighbour spikes, lock-contention waits during table-level
+ *   conflict, vacuum waits, replication apply waits, all commonly
+ *   land in the 50ms-to-multi-second range.  Collapsing all of those
+ *   into a single overflow bucket made the histogram much less useful
+ *   for the diagnostic case it primarily exists to serve: P99 / tail
+ *   analysis is precisely where wait-event timing pays for itself,
+ *   and that signal lives in the long tail.
+ *
+ *   Doubling to 32 buckets pushes the open-ended overflow out to
+ *   ~17 minutes (2^40 ns).  Anything beyond that genuinely belongs in
+ *   EXPLAIN / auto_explain or pg_stat_activity rather than a wait-
+ *   event distribution: a single wait of more than ~17 minutes is a
+ *   query-shape or stuck-process problem, not a histogram-bucket
+ *   problem.  The 32-bucket layout therefore covers the entire
+ *   useful diagnostic range without leaving the long tail in an
+ *   overflow bucket the operator cannot reason about.
+ *
+ *   Cost: 16 extra int8 slots per WaitEventTimingEntry, increasing
+ *   the per-entry size from 152 to 280 bytes (each int8 = 8 bytes).
+ *   At default 192-tranche cap that adds ~24 KB to the per-backend
+ *   lwlock_events array, plus ~32 KB to the per-backend events array
+ *   (~250 distinct events), so ~56 KB more per backend -- about
+ *   double the previous baseline, still bounded.  The hot-path cost
+ *   is unchanged: histogram[bucket]++ is the same single store
+ *   regardless of array length, and the bucket index computation
+ *   (pg_leftmost_one_pos64 - 9) doesn't depend on the array size.
+ *
+ *   ABI note: pg_proc.dat declares pg_stat_get_wait_event_timing's
+ *   histogram return type as _int8 (variable-length int8 array).  The
+ *   array is constructed at SRF emit time via construct_array_builtin
+ *   sized by this constant, so changing the constant changes the
+ *   row-payload length but not the catalog row type.  External
+ *   consumers that addressed buckets by absolute index (e.g.
+ *   "histogram[15] is the overflow bucket") need to be updated;
+ *   consumers that join against pg_wait_event_timing_histogram_buckets
+ *   (the canonical name-and-edge table) continue to work transparently
+ *   because that view is also extended to 32 rows in lockstep.
  */
-#define WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS	16
+#define WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS	32
 
 /*
  * Compact per-class mapping for the flat events[] array.
