@@ -1216,12 +1216,35 @@ wait_event_trace_attach(int procNumber)
 	{
 		state_now = pg_atomic_read_u32(&slot->state);
 
-		Assert(state_now != WET_TRACE_SLOT_ORPHANED);
-
-		/* Already have a ring buffer? Re-map to it. */
-		if (state_now == WET_TRACE_SLOT_OWNED &&
-			DsaPointerIsValid(slot->ring_ptr))
+		/*
+		 * ORPHANED is normally impossible at attach time --
+		 * pgstat_set_wait_event_timing_storage() at backend init calls
+		 * wait_event_trace_clear_orphan_at_init() which demotes any
+		 * inherited orphan to FREE.  But there is one case where this
+		 * backend can legitimately observe its own slot in the
+		 * ORPHANED state: after we have already run
+		 * wait_event_trace_before_shmem_exit() (transitioning the slot
+		 * to ORPHANED on exit), a later before_shmem_exit callback
+		 * (e.g. pgstat_io_flush_cb during proc_exit shutdown) can
+		 * contend on an LWLock that emits a wait event, which calls
+		 * pgstat_report_wait_end_timing() -> wait_event_trace_attach()
+		 * after my_wait_event_trace has been cleared.  We must not
+		 * re-attach in that case: we are dying, the ring is now
+		 * post-mortem data for cross-backend readers, and the writer
+		 * invariant must hold.  Skip the trace for any wait events
+		 * emitted after our own exit transition.
+		 *
+		 * Previously this was an Assert; converting it to defensive
+		 * runtime handling is what review_6.md issue #5 asked for.
+		 */
+		if (state_now == WET_TRACE_SLOT_ORPHANED)
 		{
+			/* PG_FINALLY below clears in_attach. */
+		}
+		else if (state_now == WET_TRACE_SLOT_OWNED &&
+				 DsaPointerIsValid(slot->ring_ptr))
+		{
+			/* Already have a ring buffer; re-map to it. */
 			wait_event_trace_ensure_dsa();
 			my_wait_event_trace = dsa_get_address(trace_dsa, slot->ring_ptr);
 			my_trace_proc_number = procNumber;
