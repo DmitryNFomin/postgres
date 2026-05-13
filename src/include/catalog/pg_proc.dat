@@ -12776,7 +12776,7 @@
   prorettype => 'record', proargtypes => 'int4',
   proallargtypes => '{int4,int4,text,int4,text,text,int8,float8,float8,float8,_int8}',
   proargmodes => '{i,o,o,o,o,o,o,o,o,o,o}',
-  proargnames => '{pid,pid,backend_type,backend_id,wait_event_type,wait_event,calls,total_time_ms,avg_time_us,max_time_us,histogram}',
+  proargnames => '{pid,pid,backend_type,procnumber,wait_event_type,wait_event,calls,total_time_ms,avg_time_us,max_time_us,histogram}',
   prosrc => 'pg_stat_get_wait_event_timing' },
 
 
@@ -12804,7 +12804,7 @@
   prorettype => 'record', proargtypes => 'int4',
   proallargtypes => '{int4,int4,text,int4,int8,int8,int8}',
   proargmodes => '{i,o,o,o,o,o,o}',
-  proargnames => '{pid,pid,backend_type,backend_id,lwlock_overflow_count,flat_overflow_count,reset_count}',
+  proargnames => '{pid,pid,backend_type,procnumber,lwlock_overflow_count,flat_overflow_count,reset_count}',
   prosrc => 'pg_stat_get_wait_event_timing_overflow' },
 
 { oid => '9960',
@@ -12818,5 +12818,15 @@
   proname => 'pg_stat_clear_orphaned_wait_event_rings',
   provolatile => 'v', prorettype => 'int8', proargtypes => '',
   prosrc => 'pg_stat_clear_orphaned_wait_event_rings' },
+
+{ oid => '9962',
+  descr => 'wait event trace ring for the given procnumber slot (OWNED or ORPHANED)',
+  proname => 'pg_get_wait_event_trace', prorows => '1000',
+  proretset => 't', provolatile => 'v', proparallel => 'r',
+  prorettype => 'record', proargtypes => 'int4',
+  proallargtypes => '{int4,int8,int8,text,text,float8,int8}',
+  proargmodes => '{i,o,o,o,o,o,o}',
+  proargnames => '{procnumber,seq,timestamp_ns,wait_event_type,wait_event,duration_us,query_id}',
+  prosrc => 'pg_get_wait_event_trace' },
 
 ]

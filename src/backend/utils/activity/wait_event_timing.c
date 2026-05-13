@@ -72,6 +72,7 @@ StaticAssertDecl(lengthof(wait_event_capture_options) == (WAIT_EVENT_CAPTURE_TRA
 
 Datum		pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS);
 Datum		pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS);
+Datum		pg_get_wait_event_trace(PG_FUNCTION_ARGS);
 Datum		pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS);
 Datum		pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS);
 Datum		pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS);
@@ -86,6 +87,13 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 Datum
 pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
+{
+	InitMaterializedSRF(fcinfo, 0);
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_get_wait_event_trace(PG_FUNCTION_ARGS)
 {
 	InitMaterializedSRF(fcinfo, 0);
 	PG_RETURN_VOID();
@@ -210,6 +218,7 @@ wait_event_trace_clear_orphan_at_init(int procNumber)
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/guc_hooks.h"
+#include "utils/injection_point.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
 
@@ -1278,9 +1287,6 @@ wait_event_trace_attach(int procNumber)
 		 * post-mortem data for cross-backend readers, and the writer
 		 * invariant must hold.  Skip the trace for any wait events
 		 * emitted after our own exit transition.
-		 *
-		 * Previously this was an Assert; converting it to defensive
-		 * runtime handling is what review_6.md issue #5 asked for.
 		 */
 		if (state_now == WET_TRACE_SLOT_ORPHANED)
 		{
@@ -1824,6 +1830,24 @@ pgstat_report_wait_end_timing(int capture_level)
 				uint32	seq;
 
 				pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
+
+				/*
+				 * Injection point used by the regression test for the
+				 * position-encoded identity seqlock in
+				 * emit_wait_event_trace_for_procnumber().  Stalling here
+				 * widens the window between the write_pos store and the
+				 * rec->seq store, simulating the weak-memory visibility
+				 * order that would otherwise be unreachable on x86.  A
+				 * cross-backend reader observing the new write_pos
+				 * while the rec->seq update has not yet happened MUST
+				 * skip this slot via the identity check; without the
+				 * identity check the reader would emit a stale record
+				 * from the previous ring cycle with the wrong ring
+				 * index.  Compiled out unless --enable-injection-points
+				 * is set.
+				 */
+				INJECTION_POINT("wait-event-trace-after-write-pos", NULL);
+
 				rec = &my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
 				seq = (uint32)(pos * 2 + 1);
 
@@ -1992,7 +2016,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 				values[0] = Int32GetDatum(beentry->st_procpid);
 				values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
-				values[2] = Int32GetDatum(backend_idx + 1);
+				values[2] = Int32GetDatum(backend_idx);
 				values[3] = CStringGetTextDatum(event_type);
 				values[4] = CStringGetTextDatum(event_name);
 				values[5] = Int64GetDatum(entry->count);
@@ -2048,7 +2072,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 			values[0] = Int32GetDatum(beentry->st_procpid);
 			values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
-			values[2] = Int32GetDatum(backend_idx + 1);
+			values[2] = Int32GetDatum(backend_idx);
 			values[3] = CStringGetTextDatum(event_type);
 			values[4] = CStringGetTextDatum(event_name);
 			values[5] = Int64GetDatum(entry->count);
@@ -2285,6 +2309,383 @@ pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
 }
 
 /*
+ * One element of the local result buffer.  Pairs a per-record copy
+ * with the original ring index (used as the seq output column).
+ */
+typedef struct WetValidRecord
+{
+	uint64		ring_index;		/* original index in the writer's ring */
+	WaitEventTraceRecord rec;
+} WetValidRecord;
+
+/*
+ * Snapshot the trace ring for a given procNumber and emit records into
+ * the SRF's tuplestore.  Returns silently for FREE slots, out-of-range
+ * procnumbers, slots whose ring was never allocated, and slots whose
+ * write_pos is zero.
+ *
+ * Cross-backend reader protocol implemented here:
+ *
+ *   1. Read slot->state without the lock as a cheap "worth visiting"
+ *      check; FREE -> nothing to emit.
+ *   2. Allocate the worst-case result buffer BEFORE taking the lock,
+ *      so the palloc -- which can bottom out in a glibc mmap syscall
+ *      for the ~5 MB worst-case size -- runs without holding the
+ *      WaitEventTraceCtl lock.
+ *   3. Acquire WaitEventTraceCtl->lock in LW_SHARED.  All slot
+ *      transitions take LW_EXCLUSIVE, so the slot's identity, state,
+ *      and ring_ptr are stable for the duration of the iteration.
+ *   4. Re-check state under the lock and resolve ring_ptr via
+ *      dsa_get_address.  Read write_pos.
+ *   5. Iterate every live ring index [read_start, write_pos).  For
+ *      each record do the per-record POSITION-ENCODED IDENTITY
+ *      seqlock check ON SHARED MEMORY (see the comment on the loop
+ *      below).
+ *   6. Release the lock.
+ *   7. Walk the local result array and emit rows into the tuplestore.
+ *      This is the expensive part (potential disk spill); doing it
+ *      after release minimises lock-hold time.
+ *
+ * Why per-record seqlock against shared memory, not against a local
+ * memcpy of the full ring: the protocol requires the two seq reads
+ * to go to the SAME shared-memory location at DIFFERENT TIMES, with
+ * the payload read between them.  A bulk memcpy then seqlock-on-
+ * local-copy reads the same frozen byte twice, the check degenerates
+ * to a no-op, and torn / stale-cycle reads slip through.
+ *
+ * Why position-encoded identity, not just parity: the writer encodes
+ * the ring position into the seq value (mid-write = pos*2+1, complete
+ * = pos*2+2).  After RING_SIZE writes the slot wraps and is rewritten
+ * with a new numerically-distinct seq.  A parity-only check accepts
+ * any stable even seq -- including the PREVIOUS cycle's seq if cross-
+ * process visibility puts the new write_pos ahead of the new seq
+ * update.  See the loop body for the four failure modes the identity
+ * check rejects.
+ *
+ * Holding LW_SHARED throughout the iteration also makes the
+ * generation-counter retry unnecessary for this caller: slot
+ * transitions take LW_EXCLUSIVE and therefore cannot happen while we
+ * hold LW_SHARED.  The generation counter is still part of the
+ * cross-backend reader contract on WaitEventTraceControl for external
+ * readers that follow a different lock-release pattern (e.g. an
+ * extension that wants to release the lock between batches of records
+ * and re-acquire), but this in-tree implementation does not release
+ * the lock mid-iteration.
+ *
+ * Both OWNED and ORPHANED slots are read uniformly.  For OWNED the
+ * live owner is concurrently writing; the seqlock catches torn reads.
+ * For ORPHANED the records are immutable post-mortem so the check is
+ * essentially a pass-through (it still correctly skips at most one
+ * trailing odd-seq record if the owner died mid-write).
+ *
+ * Lock-hold is O(write_pos - read_start) shared-memory loads, at
+ * roughly the same wall-clock cost as a single 4 MB memcpy of the
+ * full ring (~1 ms on modern hardware), with no I/O and no syscalls.
+ */
+static void
+emit_wait_event_trace_for_procnumber(int procNumber, ReturnSetInfo *rsinfo)
+{
+	WaitEventTraceSlot *slot;
+	WaitEventTraceState *ts;
+	WetValidRecord *valid_records = NULL;
+	uint64		valid_count = 0;
+	uint64		write_pos;
+	uint64		read_start;
+	uint64		i;
+	uint32		state_now;
+
+	if (WaitEventTraceCtl == NULL)
+		return;
+
+	/*
+	 * Range check.  Negative or out-of-range procnumbers return an
+	 * empty result rather than ERRORing because the most natural use
+	 * pattern for cross-backend readers is to iterate every possible
+	 * slot index (a monitoring background worker doesn't know the
+	 * exact NUM_WAIT_EVENT_TIMING_SLOTS at SQL level), and silent-
+	 * empty for out-of-range matches the behaviour of sister functions
+	 * like pg_stat_get_wait_event_timing(NULL) which iterate the
+	 * shared array internally.  FREE-but-in-range slots also return
+	 * empty (see the state check below); the caller cannot
+	 * distinguish out-of-range from FREE, which is fine.
+	 */
+	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
+		return;
+
+	slot = &WaitEventTraceCtl->trace_slots[procNumber];
+
+	/*
+	 * If the trace DSA was never created (no backend in the cluster
+	 * has ever set wait_event_capture = trace), every slot is still
+	 * in its initial FREE state.  Skip without taking the lock.
+	 */
+	if (WaitEventTraceCtl->trace_dsa_handle == DSA_HANDLE_INVALID)
+		return;
+
+	/* Unlocked fast-path check; the authoritative check is under the
+	 * lock below. */
+	if (pg_atomic_read_u32(&slot->state) == WET_TRACE_SLOT_FREE)
+		return;
+
+	wait_event_trace_ensure_dsa();
+	if (trace_dsa == NULL)
+		return;
+
+	/*
+	 * Allocate the worst-case result buffer BEFORE taking the lock.
+	 * The buffer is sized for the full ring (~5 MB at default
+	 * RING_SIZE=128K); on a near-empty ring most of it goes unused,
+	 * but that is preferable to holding the WaitEventTraceCtl lock
+	 * during a palloc that may bottom out in a glibc mmap() syscall
+	 * (allocations above the malloc-mmap threshold).  Glibc's
+	 * arena-internal mutex around the syscall would serialise every
+	 * concurrent reader of this lock through one VMA-modifying
+	 * kernel operation; sizing the alloc outside the lock keeps the
+	 * lock-hold time bounded by the per-record loop alone.
+	 *
+	 * After we acquire the lock we will either consume this buffer
+	 * (writing up to (write_pos - read_start) entries) or release
+	 * it unused on an early return.
+	 */
+	valid_records = palloc(sizeof(WetValidRecord) *
+						   WAIT_EVENT_TRACE_RING_SIZE);
+
+	LWLockAcquire(&WaitEventTraceCtl->lock, LW_SHARED);
+
+	state_now = pg_atomic_read_u32(&slot->state);
+	if (state_now == WET_TRACE_SLOT_FREE ||
+		!DsaPointerIsValid(slot->ring_ptr))
+	{
+		LWLockRelease(&WaitEventTraceCtl->lock);
+		pfree(valid_records);
+		return;
+	}
+
+	ts = (WaitEventTraceState *) dsa_get_address(trace_dsa, slot->ring_ptr);
+	write_pos = pg_atomic_read_u64(&ts->write_pos);
+
+	if (write_pos == 0)
+	{
+		LWLockRelease(&WaitEventTraceCtl->lock);
+		pfree(valid_records);
+		return;
+	}
+
+	/* Live range: oldest available to newest. */
+	read_start = (write_pos > WAIT_EVENT_TRACE_RING_SIZE)
+		? write_pos - WAIT_EVENT_TRACE_RING_SIZE : 0;
+
+	for (i = read_start; i < write_pos; i++)
+	{
+		WaitEventTraceRecord *rec_shared =
+			&ts->records[i & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+		WetValidRecord *out = &valid_records[valid_count];
+		uint32		expected_seq;
+		uint32		seq_before;
+		uint32		seq_after;
+
+		/*
+		 * Position-encoded seqlock identity check (NOT just parity).
+		 *
+		 * The writer encodes the ring position into the seq value:
+		 * mid-write -> (uint32)(pos * 2 + 1), complete -> + 2.  After
+		 * RING_SIZE writes the slot wraps and the same memory location
+		 * gets a new seq value (next_pos * 2 + 2) that is numerically
+		 * distinct from the previous cycle's seq.
+		 *
+		 * A parity-only check (skip on odd seq, accept on stable even)
+		 * is INSUFFICIENT for this layout in the cross-backend case:
+		 * if the writer just incremented write_pos to pos+1 but
+		 * cross-process cache coherence has not yet propagated the
+		 * subsequent rec->seq = (pos*2+1) store, this reader at
+		 * i = pos would see the previous cycle's complete-even seq
+		 * (from logical position pos - RING_SIZE).  Both seq_before
+		 * and seq_after would read that stale even value, parity
+		 * passes, identity-against-itself passes, and a record
+		 * belonging to the PREVIOUS cycle gets emitted with the new
+		 * ring_index = pos.  Silent data corruption (wrong attribution,
+		 * not torn bytes).
+		 *
+		 * The fix is identity against EXPECTED: a record is valid for
+		 * iterator position i if and only if its seq equals
+		 * (uint32)(i * 2 + 2) -- the writer's encoded "complete" value
+		 * for that exact ring position.  This rejects:
+		 *
+		 *   * Stale prior cycle (seq <  expected): writer hasn't yet
+		 *     advanced rec->seq for the current cycle.
+		 *   * Mid-write current cycle (seq == expected - 1, odd):
+		 *     writer is in the payload write window.
+		 *   * Ring wrapped past us (seq >  expected): the writer
+		 *     completed a later cycle on this slot during our read.
+		 *
+		 * The uint32 wraparound at 2^31 cycles is safe: we use exact
+		 * equality, and the writer's existing wrap-safety argument
+		 * (sizeof(seq) > worst-case in-flight window by 11 orders of
+		 * magnitude) covers the seq value.
+		 */
+		expected_seq = (uint32)(i * 2 + 2);
+
+		seq_before = rec_shared->seq;
+		pg_read_barrier();
+
+		if (seq_before != expected_seq)
+			continue;
+
+		out->rec = *rec_shared;		/* one 32-byte structure copy */
+
+		pg_read_barrier();
+		seq_after = rec_shared->seq;
+
+		if (seq_after != expected_seq)
+			continue;
+
+		out->ring_index = i;
+		valid_count++;
+	}
+
+	LWLockRelease(&WaitEventTraceCtl->lock);
+
+	/*
+	 * Walk the local result array and emit rows.  No shared-memory
+	 * access from here on, so spills to disk by the tuplestore (if
+	 * the result is large) do not hold any wait-event-timing lock.
+	 */
+	for (i = 0; i < valid_count; i++)
+	{
+		WetValidRecord *vr = &valid_records[i];
+		WaitEventTraceRecord *rec = &vr->rec;
+		Datum		values[6];
+		bool		nulls[6];
+		const char *event_type;
+		const char *event_name;
+		uint8		rtype = rec->record_type;
+		uint32		event_info;
+		int64		duration_ns;
+		int64		query_id;
+
+		if (rtype == TRACE_WAIT_EVENT)
+		{
+			event_info = rec->data.wait.event;
+			duration_ns = rec->data.wait.duration_ns;
+			query_id = 0;
+
+			/* Skip empty wait events. */
+			if (event_info == 0)
+				continue;
+
+			event_type = pgstat_get_wait_event_type(event_info);
+			event_name = pgstat_get_wait_event(event_info);
+		}
+		else if (rtype == TRACE_QUERY_START)
+		{
+			event_info = 0;
+			duration_ns = 0;
+			query_id = rec->data.query.query_id;
+			event_type = "Query";
+			event_name = "QueryStart";
+		}
+		else if (rtype == TRACE_QUERY_END)
+		{
+			event_info = 0;
+			duration_ns = 0;
+			query_id = rec->data.query.query_id;
+			event_type = "Query";
+			event_name = "QueryEnd";
+		}
+		else if (rtype == TRACE_EXEC_START)
+		{
+			event_info = 0;
+			duration_ns = 0;
+			query_id = rec->data.query.query_id;
+			event_type = "Query";
+			event_name = "ExecStart";
+		}
+		else if (rtype == TRACE_EXEC_END)
+		{
+			event_info = 0;
+			duration_ns = 0;
+			query_id = rec->data.query.query_id;
+			event_type = "Query";
+			event_name = "ExecEnd";
+		}
+		else
+		{
+			/* Unrecognised record_type -- skip defensively. */
+			continue;
+		}
+
+		if (event_type == NULL || event_name == NULL)
+			continue;
+
+		memset(nulls, 0, sizeof(nulls));
+
+		values[0] = Int64GetDatum((int64) vr->ring_index);
+		values[1] = Int64GetDatum(rec->timestamp_ns);
+		values[2] = CStringGetTextDatum(event_type);
+		values[3] = CStringGetTextDatum(event_name);
+		values[4] = Float8GetDatum((double) duration_ns / 1000.0);
+		values[5] = Int64GetDatum(query_id);
+
+		tuplestore_putvalues(rsinfo->setResult,
+							 rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	pfree(valid_records);
+}
+
+/*
+ * SQL function: pg_get_wait_event_trace(procnumber int4)
+ *
+ * Cross-backend trace ring reader.  Returns the records from the trace
+ * ring belonging to the backend that currently or previously occupied
+ * the given procNumber slot.  Reads OWNED and ORPHANED slots uniformly;
+ * FREE slots return an empty result.
+ *
+ * This SRF is the in-tree consumer of the orphan-preserved trace data:
+ * a backend that exited while wait_event_capture = trace leaves its
+ * ring allocated in DSA in ORPHANED state, and this function reads it
+ * until either a new backend takes over the same procNumber or the
+ * DBA calls pg_stat_clear_orphaned_wait_event_rings().  External
+ * monitoring background workers (ASH/AWR/10046-style readers) follow
+ * the same snapshot pattern documented on WaitEventTraceControl in
+ * wait_event_timing.h; this function serves as both the reference
+ * implementation and a DBA-facing diagnostic tool.
+ *
+ * Privileges: REVOKE'd from PUBLIC and GRANT'ed to pg_read_all_stats
+ * in system_views.sql, matching the privilege model of the session-
+ * local view pg_backend_wait_event_trace.
+ *
+ * The procnumber argument can be obtained from the procnumber column
+ * of pg_stat_get_wait_event_timing or pg_stat_get_wait_event_timing_
+ * overflow.  For pid-keyed access against live backends, callers can
+ * do:
+ *
+ *   SELECT * FROM pg_get_wait_event_trace(
+ *       (SELECT procnumber FROM pg_stat_get_wait_event_timing(<pid>)
+ *        WHERE pid = <pid> LIMIT 1));
+ *
+ * Note that pid-keyed access cannot read ORPHANED slots because a
+ * dying backend's pid is removed from procArray on exit; for
+ * post-mortem reading of short-lived backends (parallel workers,
+ * autovacuum, walsender) the procNumber must be captured before the
+ * backend exits, or discovered by iterating procnumbers in a
+ * monitoring background worker.
+ */
+Datum
+pg_get_wait_event_trace(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int32		procNumber = PG_GETARG_INT32(0);
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	emit_wait_event_trace_for_procnumber((int) procNumber, rsinfo);
+
+	PG_RETURN_VOID();
+}
+
+/*
  * Request a self-reset on the given backend slot.
  *
  * Lock-free: atomically bumps the slot's reset_generation, then sets the
@@ -2386,7 +2787,7 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 
 		values[0] = Int32GetDatum(beentry->st_procpid);
 		values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
-		values[2] = Int32GetDatum(backend_idx + 1);
+		values[2] = Int32GetDatum(backend_idx);
 		values[3] = Int64GetDatum(state->lwlock_overflow_count);
 		values[4] = Int64GetDatum(state->flat_overflow_count);
 		values[5] = Int64GetDatum(state->reset_count);

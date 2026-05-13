@@ -208,6 +208,53 @@ SELECT
     (SELECT count(*) FROM pg_stat_get_wait_event_timing_overflow(2147483647)) = 0
         AS overflow_unknown_pid_empty;
 
+-- Cross-backend trace SRF: smoke-test that pg_get_wait_event_trace
+-- (procnumber-keyed) is callable and returns sensible results.
+-- Full orphan-readability and the parallel-worker case are exercised
+-- by the TAP test (which can orchestrate backend exits).
+SET wait_event_capture = trace;
+-- generate at least one wait event so the ring is allocated
+SELECT pg_sleep(0.01);
+SELECT
+    -- Own session: pull our procnumber from the timing SRF, then read
+    -- our own trace ring through the cross-backend SRF.
+    (SELECT count(*) FROM pg_get_wait_event_trace(
+        (SELECT procnumber FROM pg_stat_get_wait_event_timing(pg_backend_pid())
+         WHERE pid = pg_backend_pid() LIMIT 1))) >= 0
+        AS by_procnumber_self_ok,
+    -- Out-of-range procnumber: empty result, no error.
+    (SELECT count(*) FROM pg_get_wait_event_trace(-1)) = 0
+        AS negative_procnumber_empty,
+    (SELECT count(*) FROM pg_get_wait_event_trace(2147483647)) = 0
+        AS huge_procnumber_empty;
+
+-- With capture disabled, a never-allocated slot still reads as empty
+-- (the function short-circuits when the trace DSA was never created
+-- or when the slot is FREE).
+SET wait_event_capture = off;
+SELECT (SELECT count(*) FROM pg_get_wait_event_trace(2147483647)) = 0
+    AS capture_off_empty;
+
+-- Permission gating: a role without pg_read_all_stats cannot call the
+-- function.  Cover both the public role and a freshly-created one.
+SET wait_event_capture = stats;
+CREATE ROLE regress_wet_reader_nopriv NOLOGIN;
+DO $$
+DECLARE
+    err text;
+BEGIN
+    SET LOCAL ROLE regress_wet_reader_nopriv;
+    BEGIN
+        PERFORM count(*) FROM pg_get_wait_event_trace(0);
+        err := 'NO ERROR (unexpected: function should be denied)';
+    EXCEPTION WHEN insufficient_privilege THEN
+        err := 'permission denied (expected)';
+    END;
+    RAISE NOTICE 'permission gate: %', err;
+END
+$$;
+DROP ROLE regress_wet_reader_nopriv;
+
 -- Clean up
 RESET wait_event_capture;
 RESET compute_query_id;

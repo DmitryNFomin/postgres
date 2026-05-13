@@ -503,52 +503,114 @@ typedef struct WaitEventTraceSlot
  * -------------------------------------------------
  *
  * External readers (extensions, background workers reading another
- * backend's ring) should:
+ * backend's ring) MUST follow this protocol; the in-tree SRF
+ * pg_get_wait_event_trace() is the reference implementation.
  *
- * 1. Snapshot trace_slots[procNumber].generation BEFORE reading
- *    anything else in the slot.  After reading the ring, snapshot
- *    generation again; if it changed, the slot was reassigned (e.g.
- *    a new backend claimed this procNumber and cleared the orphan)
- *    and the read should be discarded or retried.
+ * 1. Read trace_slots[procNumber].state without the lock as a cheap
+ *    "worth visiting" check.  If FREE, there is no ring -- nothing
+ *    to do.  Otherwise proceed to step 2.
  *
- * 2. Read trace_slots[procNumber].state.  If FREE, there is no ring
- *    to read.  If OWNED, the ring is being actively written by the
- *    owner -- proceed with the seqlock protocol on each record.  If
- *    ORPHANED, the data is post-mortem (immutable, no concurrent
- *    writer) but the seqlock check is still cheap and correct, so
- *    use the same per-record protocol unconditionally.
+ * 2. Acquire WaitEventTraceCtl->lock in LW_SHARED.  All slot
+ *    transitions (FREE <-> OWNED <-> ORPHANED, including
+ *    dsa_allocate / dsa_free of the ring) take LW_EXCLUSIVE, so the
+ *    SHARED hold makes the slot's state, ring_ptr, and ring memory
+ *    stable for the entire iteration that follows.  This is what
+ *    makes the per-slot generation counter optional for callers
+ *    that, like this in-tree reader, keep the lock held across the
+ *    iteration; callers that release and re-acquire the lock
+ *    between batches must use the generation idiom from step 7
+ *    instead.
  *
- * 3. Acquire WaitEventTraceCtl->lock in LW_SHARED before resolving
- *    trace_slots[procNumber].ring_ptr via dsa_get_address.  This
- *    prevents a concurrent transition (e.g. wait_event_trace_release_slot
- *    or pg_stat_clear_orphaned_wait_event_rings()) from dsa_free()'ing
- *    the chunk while you hold a pointer into it.  Hold the lock only
- *    long enough to read write_pos and copy the relevant slice of
- *    records[] into local memory; release the lock BEFORE doing
- *    per-record processing.  Holding the lock during the full
- *    processing path turns every other backend's first-time
- *    wait_event_trace_attach into a wait that scales with your
- *    processing speed -- not acceptable on OLTP workloads.  The
- *    snapshot-then-process pattern caps the lock-hold time at memcpy
- *    bandwidth (~1 ms for the full 4 MB ring; sub-ms for incremental
- *    polls that copy only the delta since the last poll).
+ * 3. Re-check state under the lock.  If FREE, the slot was
+ *    reassigned between step 1 and the lock acquire; release the
+ *    lock and return.
  *
- * 4. Use the seqlock protocol on each record copied: read rec->seq
- *    before and after copying fields; skip the record if either value
- *    is odd or they differ.  This catches concurrent writes by the
- *    owning backend (which never takes the lock above -- the writer
- *    is purely lock-free, see pgstat_report_wait_end_timing).
+ * 4. Resolve trace_slots[procNumber].ring_ptr via dsa_get_address
+ *    and read write_pos = pg_atomic_read_u64(&ts->write_pos).  No
+ *    barrier is required here: the position-encoded identity
+ *    seqlock check in step 5 rejects any stale-cycle visibility
+ *    (writer's write_pos store seen by reader before the rec->seq
+ *    store) by comparing rec->seq against the expected value for
+ *    iterator position i, which the previous cycle's seq cannot
+ *    equal.  An ordering mismatch on weak-memory architectures
+ *    simply causes the reader to skip the in-flight slot until the
+ *    next call.
  *
- * 5. Track write_pos between polls and copy only new records, so the
- *    snapshot under the lock stays small even when scanning many
- *    backends.
+ * 5. Iterate ring indices [read_start, write_pos), masking each
+ *    through the ring (i & (WAIT_EVENT_TRACE_RING_SIZE - 1)).  For
+ *    EACH record do the per-record seqlock protocol AGAINST
+ *    SHARED MEMORY, using a POSITION-ENCODED IDENTITY check
+ *    (not just parity):
  *
- * Same-backend readers (the in-tree pg_get_backend_wait_event_trace SRF)
- * do NOT use the LWLock above -- same-backend serialization is implicit
- * because a backend can only run one command at a time, and the SRF
- * coordinates with wait_event_trace_release_slot via per-backend flags.
- * That mechanism is private to wait_event_timing.c; external code should
- * use the cross-backend protocol described above.
+ *        expected_seq = (uint32)(i * 2 + 2);  / writer's complete-even
+ *                                               value for ring position i /
+ *        seq_before = rec_shared->seq;
+ *        pg_read_barrier();
+ *        if (seq_before != expected_seq) continue;
+ *        local_copy = *rec_shared;            / 32-byte struct copy /
+ *        pg_read_barrier();
+ *        seq_after = rec_shared->seq;
+ *        if (seq_after != expected_seq) continue;
+ *
+ *    Append valid records to a local result buffer for emission
+ *    after the lock is released.
+ *
+ *    The writer encodes the ring position into seq: mid-write is
+ *    (pos * 2 + 1), complete is (pos * 2 + 2).  Identity against
+ *    (i * 2 + 2) rejects four distinct failure modes:
+ *
+ *      - Stale previous cycle (seq < expected): writer just
+ *        advanced write_pos to i+1 but the seq store for cycle i
+ *        has not propagated to this CPU's view yet, so we see the
+ *        even seq value from (i - RING_SIZE) -- the slot's
+ *        previous occupant.  Parity-only seqlock would accept
+ *        this and emit a record belonging to the previous cycle
+ *        with the new ring_index, a silent data-attribution bug.
+ *      - Mid-write (seq == expected - 1, odd): writer is in the
+ *        payload-write window between seq=odd and seq=even.
+ *      - Ring wrapped past us (seq > expected): a later cycle on
+ *        this slot completed during our read.
+ *      - Torn write completed mid-read (seq_after differs from
+ *        seq_before): the writer crossed a full cycle while we
+ *        copied the record.
+ *
+ *    Do NOT memcpy the full records[] array up front and then do
+ *    the seqlock check against the local copy: both seq reads
+ *    would hit the same frozen byte in local memory, the check
+ *    degenerates to a no-op, and torn / stale-cycle reads slip
+ *    through.  The seqlock protocol requires the two seq reads to
+ *    go to shared memory at distinct times around the payload
+ *    read, and they must be compared against the expected
+ *    position-encoded value.
+ *
+ * 6. Release the lock.  Per-record post-processing (event-name
+ *    lookups, tuplestore population, network I/O) happens off the
+ *    lock so spills to disk or slow consumers do not extend
+ *    lock-hold.  Lock-hold time is O(records_in_range) loads from
+ *    shared memory; for the full ring this is ~1 ms on modern
+ *    hardware -- on par with a single 4 MB memcpy and acceptable
+ *    given the lock is contended only by other transitions
+ *    (themselves rare) and other readers (which share with us).
+ *
+ * 7. Optional: snapshot trace_slots[procNumber].generation BEFORE
+ *    step 2 and AFTER step 6; if it changed, the slot was
+ *    reassigned across some lock-release boundary.  This in-tree
+ *    reader does not need the snapshot because it holds the lock
+ *    throughout, but readers that batch their work across multiple
+ *    lock-acquire windows (e.g. an extension that polls many slots
+ *    in sequence without holding any single lock too long) should
+ *    use the generation idiom to detect slot reassignment between
+ *    batches.  The generation counter is bumped under LW_EXCLUSIVE
+ *    on every transition (FREE -> OWNED at attach, OWNED ->
+ *    ORPHANED at backend exit, anything -> FREE at release/clear).
+ *
+ * Same-backend readers (the in-tree pg_get_backend_wait_event_trace
+ * SRF) do NOT use the LWLock above -- same-backend serialization is
+ * implicit because a backend can only run one command at a time,
+ * and the SRF coordinates with wait_event_trace_release_slot via
+ * per-backend flags.  That mechanism is private to
+ * wait_event_timing.c; external code should use the cross-backend
+ * protocol described above.
  */
 typedef struct WaitEventTraceControl
 {

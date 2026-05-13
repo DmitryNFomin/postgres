@@ -5,6 +5,7 @@ EXTENSION = test_wait_event_stress
 DATA = test_wait_event_stress--1.0.sql
 
 REGRESS = test_wait_event_stress
+TAP_TESTS = 1
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config

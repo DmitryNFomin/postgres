@@ -1607,7 +1607,7 @@ CREATE VIEW pg_stat_wait_event_timing AS
     SELECT
         t.pid,
         t.backend_type,
-        t.backend_id,
+        t.procnumber,
         t.wait_event_type,
         t.wait_event,
         t.calls,
@@ -1623,7 +1623,7 @@ CREATE VIEW pg_stat_wait_event_timing_overflow AS
     SELECT
         t.pid,
         t.backend_type,
-        t.backend_id,
+        t.procnumber,
         t.lwlock_overflow_count,
         t.flat_overflow_count,
         t.reset_count
@@ -1651,3 +1651,11 @@ CREATE VIEW pg_backend_wait_event_trace AS
     FROM pg_get_backend_wait_event_trace() t;
 REVOKE ALL ON pg_backend_wait_event_trace FROM PUBLIC;
 GRANT SELECT ON pg_backend_wait_event_trace TO pg_read_all_stats;
+
+-- Cross-backend trace ring reader.  Keyed by procnumber (reads OWNED
+-- and ORPHANED slots uniformly so post-mortem data from short-lived
+-- backends remains observable).  Same privilege model as the
+-- session-local view above: REVOKE'd from PUBLIC and GRANT'ed to
+-- pg_read_all_stats.
+REVOKE EXECUTE ON FUNCTION pg_get_wait_event_trace(int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_get_wait_event_trace(int4) TO pg_read_all_stats;

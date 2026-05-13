@@ -3769,10 +3769,11 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>backend_id</structfield> <type>integer</type>
+       <structfield>procnumber</structfield> <type>integer</type>
       </para>
       <para>
-       Internal slot number (1-based process number)
+       Internal slot number (0-based process number).  Suitable for
+       passing directly to <function>pg_get_wait_event_trace</function>.
       </para></entry>
      </row>
 
@@ -4022,10 +4023,11 @@ ORDER  BY b.bucket_idx;
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>backend_id</structfield> <type>integer</type>
+       <structfield>procnumber</structfield> <type>integer</type>
       </para>
       <para>
-       Internal slot number (1-based process number)
+       Internal slot number (0-based process number).  Suitable for
+       passing directly to <function>pg_get_wait_event_trace</function>.
       </para></entry>
      </row>
 
@@ -6363,10 +6365,64 @@ ORDER  BY b.bucket_idx;
        </para>
        <para>
         Returns individual wait event records from the current session's
-        trace ring buffer.  Reading another session's trace is not
-        supported through this function; the ring lives in per-backend
-        DSA and cross-session access must be arranged by an external
-        consumer (extension or background worker).
+        trace ring buffer.  For another session's ring (live or
+        post-mortem orphaned), use
+        <function>pg_get_wait_event_trace</function> below.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_get_wait_event_trace</primary>
+        </indexterm>
+        <function>pg_get_wait_event_trace</function> ( <parameter>procnumber</parameter> <type>integer</type> )
+        <returnvalue>setof record</returnvalue>
+       </para>
+       <para>
+        Returns individual wait event records from the trace ring of
+        the backend that currently or previously occupied the slot
+        identified by <parameter>procnumber</parameter>.  Reads slots
+        in <literal>OWNED</literal> state (live writer) and
+        <literal>ORPHANED</literal> state (writer has exited but the
+        ring is preserved for post-mortem reading) uniformly.  An
+        empty result indicates the slot is in <literal>FREE</literal>
+        state (no ring) or no records have been written.  Concurrent
+        slot transitions cannot interrupt the read because the
+        function holds the cross-backend trace lock in
+        <literal>SHARED</literal> mode throughout the iteration; the
+        per-record seqlock protocol skips any record being written
+        by a concurrent live writer.
+       </para>
+       <para>
+        This is the canonical cross-backend reader.  External
+        monitoring background workers (ASH/AWR/10046-style ring
+        readers) should follow the same snapshot pattern documented
+        on <structname>WaitEventTraceControl</structname> in
+        <filename>src/include/utils/wait_event_timing.h</filename>;
+        this function serves as both the reference implementation and
+        a DBA-facing diagnostic tool.  The
+        <parameter>procnumber</parameter> argument can be obtained
+        from the <structfield>procnumber</structfield> column of
+        <function>pg_stat_get_wait_event_timing</function> or
+        <function>pg_stat_get_wait_event_timing_overflow</function>
+        for live backends.  For post-mortem reads of short-lived
+        backends (parallel workers, autovacuum, walsender) the
+        <parameter>procnumber</parameter> must be captured while the
+        backend is still alive, or discovered by iterating slots in a
+        monitoring background worker.  A pid-keyed lookup for live
+        backends only is one query away:
+
+<programlisting>
+SELECT * FROM pg_get_wait_event_trace(
+    (SELECT procnumber FROM pg_stat_get_wait_event_timing(<replaceable>target_pid</replaceable>)
+     WHERE pid = <replaceable>target_pid</replaceable> LIMIT 1));
+</programlisting>
+       </para>
+       <para>
+        Requires membership in <literal>pg_read_all_stats</literal>
+        (matching the privilege model of the session-local view
+        <structname>pg_backend_wait_event_trace</structname>).
        </para></entry>
       </row>
 

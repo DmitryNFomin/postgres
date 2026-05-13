@@ -30,4 +30,9 @@ tests += {
       'test_wait_event_stress',
     ],
   },
+  'tap': {
+    'tests': [
+      't/001_orphan_roundtrip.pl',
+    ],
+  },
 }
