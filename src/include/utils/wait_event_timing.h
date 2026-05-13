@@ -649,9 +649,6 @@ extern PGDLLIMPORT int wait_event_capture;
 /* Pointer to this backend's timing state in shared memory */
 extern PGDLLIMPORT WaitEventTimingState *my_wait_event_timing;
 
-/* Pointer to this backend's trace ring buffer in shared memory */
-extern PGDLLIMPORT WaitEventTraceState *my_wait_event_trace;
-
 /* This backend's procNumber for the trace ring, or -1 if not set */
 extern PGDLLIMPORT int my_trace_proc_number;
 
@@ -668,17 +665,7 @@ extern void pgstat_set_wait_event_timing_storage(int procNumber);
 extern void pgstat_reset_wait_event_timing_storage(void);
 
 /* Lazy DSA-based trace ring buffer allocation */
-extern void wait_event_trace_ensure_dsa(void);
 extern void wait_event_trace_attach(int procNumber);
-extern void wait_event_trace_detach(int procNumber);
-
-/*
- * Called from pgstat_set_wait_event_timing_storage() at backend init to
- * release any orphaned trace ring left over from a previous backend that
- * occupied this procNumber.  See the slot-lifecycle comment on
- * WaitEventTraceControl above for why we do not free on backend exit.
- */
-extern void wait_event_trace_clear_orphan_at_init(int procNumber);
 
 /* GUC hooks declared in guc_hooks.h */
 

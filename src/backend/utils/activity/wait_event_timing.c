@@ -194,12 +194,6 @@ pgstat_reset_wait_event_timing_storage(void)
 {
 }
 
-void
-wait_event_trace_clear_orphan_at_init(int procNumber)
-{
-	/* No trace ring infrastructure in stub builds. */
-}
-
 #else							/* USE_WAIT_EVENT_TIMING */
 
 #include "catalog/pg_authid.h"
@@ -232,7 +226,7 @@ wait_event_trace_clear_orphan_at_init(int procNumber)
 WaitEventTimingState *my_wait_event_timing = NULL;
 
 /* Pointer to this backend's trace ring buffer */
-WaitEventTraceState *my_wait_event_trace = NULL;
+static WaitEventTraceState *my_wait_event_trace = NULL;
 
 /*
  * Backend-local copy of the last reset generation we acted on.  Compared
@@ -1080,7 +1074,7 @@ const ShmemCallbacks WaitEventTraceControlShmemCallbacks = {
  * Creates it on first call (any backend), attaches on subsequent calls.
  * Must be called from a backend context (not postmaster).
  */
-void
+static void
 wait_event_trace_ensure_dsa(void)
 {
 	MemoryContext oldcontext;
@@ -1359,7 +1353,7 @@ wait_event_trace_attach(int procNumber)
 /*
  * Free trace ring buffer for this backend on exit.
  */
-void
+static void
 wait_event_trace_detach(int procNumber)
 {
 	/*
@@ -1496,7 +1490,7 @@ wait_event_trace_release_slot(int procNumber)
  * problem was transient), by pg_stat_clear_orphaned_wait_event_rings(),
  * or at next cluster restart.
  */
-void
+static void
 wait_event_trace_clear_orphan_at_init(int procNumber)
 {
 	WaitEventTraceSlot *slot;
