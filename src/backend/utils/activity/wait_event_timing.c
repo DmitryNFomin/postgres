@@ -939,6 +939,31 @@ pgstat_wait_event_timing_lazy_attach(void)
 	if (MyProc == NULL)
 		return;
 
+	/*
+	 * Lazy attach allocates memory (via wait_event_timing_attach_array ->
+	 * dsa_attach -> dsm_attach -> MemoryContextAlloc).  In a critical
+	 * section, MemoryContextAlloc Assert-fails on
+	 * "CritSectionCount == 0 || allowInCritSection".  A backend's very
+	 * first wait event after wait_event_capture is enabled can land
+	 * inside a critical section -- e.g. a parallel worker that hasn't
+	 * yet emitted any wait events does so for the first time in
+	 * BufferSetHintBits16 -> XLogSaveBufferForHint -> XLogInsert ->
+	 * LWLockAcquire, with XLogInsert holding a critical section.
+	 *
+	 * Skipping the attach in that case silently drops the in-flight
+	 * wait event but keeps the backend alive.  The very next wait
+	 * event outside any critical section will hit this function again
+	 * and attach successfully, after which the hot path no longer
+	 * routes through here.  Wait events emitted inside critical
+	 * sections are by their nature brief, infrequent (critical
+	 * sections are short by design), and would be dropped anyway if
+	 * the backend exited from a crash here -- so losing them at the
+	 * very-first-attach moment is an acceptable tradeoff against the
+	 * Assert-induced abort.
+	 */
+	if (CritSectionCount > 0)
+		return;
+
 	procNumber = GetNumberFromPGProc(MyProc);
 	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
 		return;
@@ -1207,6 +1232,26 @@ wait_event_trace_attach(int procNumber)
 		return;
 
 	if (procNumber < 0 || procNumber >= NUM_WAIT_EVENT_TIMING_SLOTS)
+		return;
+
+	/*
+	 * Skip the attach if we are inside a critical section.  Below this
+	 * point we call dsa_create / dsa_attach / dsa_allocate_extended,
+	 * all of which can allocate memory via MemoryContextAlloc and
+	 * Assert-fail on "CritSectionCount == 0 || allowInCritSection".
+	 * The very-first wait event after wait_event_capture = trace can
+	 * land inside a critical section (e.g. a parallel worker scanning
+	 * a heap page hits BufferSetHintBits16 -> XLogSaveBufferForHint ->
+	 * XLogInsert -> LWLockAcquire, with the XLogInsert critical
+	 * section open).
+	 *
+	 * Skipping here silently drops the in-flight wait event (it is
+	 * not traced) but keeps the backend alive.  The next wait event
+	 * outside any critical section will hit this function again and
+	 * attach successfully.  See the matching guard in
+	 * pgstat_wait_event_timing_lazy_attach.
+	 */
+	if (CritSectionCount > 0)
 		return;
 
 	slot = &WaitEventTraceCtl->trace_slots[procNumber];
