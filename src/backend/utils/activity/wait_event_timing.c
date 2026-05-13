@@ -1479,12 +1479,29 @@ wait_event_trace_release_slot(int procNumber)
  * not-yet-exited backend can leave a slot OWNED, and procNumbers are
  * assigned exclusively).  We assert OWNED is not observed in debug
  * builds and conservatively skip the free in production.
+ *
+ * Robustness: this runs during InitProcess() (before the backend can
+ * accept any work), and the work it performs -- dsa_attach() and
+ * dsa_free() -- can raise ERROR on rare runtime failures (corrupted
+ * DSA segment headers, descriptor exhaustion, mmap ENOMEM, etc.).
+ * An uncaught ERROR here would propagate out of InitProcess() and
+ * abort backend startup entirely, even for sessions that never
+ * intended to use wait_event_capture.  To prevent the trace
+ * feature's housekeeping from gating connection establishment, the
+ * body is wrapped in PG_TRY()/PG_CATCH(): any error from dsa_attach
+ * or dsa_free is captured, downgraded to a WARNING with a hint
+ * pointing at the admin sweep function, and execution continues.
+ * The orphan stays in place; it can be reclaimed by the next
+ * backend that inherits the same procNumber (if the underlying
+ * problem was transient), by pg_stat_clear_orphaned_wait_event_rings(),
+ * or at next cluster restart.
  */
 void
 wait_event_trace_clear_orphan_at_init(int procNumber)
 {
 	WaitEventTraceSlot *slot;
 	uint32		state_now;
+	MemoryContext caller_cxt;
 
 	if (WaitEventTraceCtl == NULL)
 		return;
@@ -1502,27 +1519,107 @@ wait_event_trace_clear_orphan_at_init(int procNumber)
 	}
 
 	/*
-	 * The trace DSA is shared across the cluster.  We must attach to it
-	 * before calling dsa_free (which needs the dsa_area pointer).  The
-	 * DSA was created by some earlier backend that wrote a trace
-	 * record (otherwise the slot couldn't have ended up ORPHANED), so
-	 * the handle in WaitEventTraceCtl is valid; ensure_dsa() will
-	 * attach.  Switch to TopMemoryContext for the dsa_area handle.
+	 * Save CurrentMemoryContext so the PG_CATCH path can copy the
+	 * error data into a context that survives FlushErrorState().
+	 * FlushErrorState() calls MemoryContextReset(ErrorContext), so
+	 * CopyErrorData() must run in a different context or the
+	 * returned ErrorData becomes a dangling pointer.
 	 */
-	wait_event_trace_ensure_dsa();
-	if (trace_dsa == NULL)
-		return;					/* allocator unavailable; leave orphan in place */
+	caller_cxt = CurrentMemoryContext;
 
-	LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
-	if (pg_atomic_read_u32(&slot->state) == WET_TRACE_SLOT_ORPHANED &&
-		DsaPointerIsValid(slot->ring_ptr))
+	PG_TRY();
 	{
-		pg_atomic_fetch_add_u64(&slot->generation, 1);
-		dsa_free(trace_dsa, slot->ring_ptr);
-		slot->ring_ptr = InvalidDsaPointer;
-		pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_FREE);
+		/*
+		 * The trace DSA is shared across the cluster.  We must attach
+		 * to it before calling dsa_free (which needs the dsa_area
+		 * pointer).  The DSA was created by some earlier backend that
+		 * wrote a trace record (otherwise the slot couldn't have
+		 * ended up ORPHANED), so the handle in WaitEventTraceCtl is
+		 * valid; ensure_dsa() will attach.  Both ensure_dsa() and
+		 * dsa_free() can raise ERROR; the PG_CATCH below downgrades
+		 * any such error to a WARNING so backend startup is not
+		 * blocked.
+		 */
+		wait_event_trace_ensure_dsa();
+
+		LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
+		if (pg_atomic_read_u32(&slot->state) == WET_TRACE_SLOT_ORPHANED &&
+			DsaPointerIsValid(slot->ring_ptr))
+		{
+			pg_atomic_fetch_add_u64(&slot->generation, 1);
+			dsa_free(trace_dsa, slot->ring_ptr);
+			slot->ring_ptr = InvalidDsaPointer;
+			pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_FREE);
+		}
+		LWLockRelease(&WaitEventTraceCtl->lock);
 	}
-	LWLockRelease(&WaitEventTraceCtl->lock);
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+
+		/*
+		 * Release any LWLocks we (or anything we called) might
+		 * still hold.  Two paths can leave WaitEventTraceCtl->lock
+		 * held when control reaches here:
+		 *
+		 *   1. The outer LWLockAcquire above succeeded and dsa_free
+		 *      raised before we reached LWLockRelease.
+		 *   2. wait_event_trace_ensure_dsa() raised inside its own
+		 *      LWLockAcquire/dsa_attach/LWLockRelease region.
+		 *
+		 * We are running during InitProcess(), BEFORE any
+		 * transaction or PostgresMain sigsetjmp has been set up,
+		 * so PG's standard "AbortTransaction -> LWLockReleaseAll"
+		 * cleanup does NOT fire on the longjmp into PG_CATCH.
+		 * Without an explicit release here the lock would stay
+		 * held for the lifetime of this backend, blocking every
+		 * future LW_EXCLUSIVE acquirer (the orphan-clear sweep,
+		 * release_slot, before_shmem_exit transitions, and
+		 * subsequent backends' clear_orphan_at_init).  That would
+		 * be strictly worse than the original failure-startup
+		 * behavior this commit set out to fix.
+		 *
+		 * LWLockReleaseAll() is the idiomatic catch-path lock
+		 * cleanup used by the standalone aux-process error
+		 * handlers (walwriter.c, checkpointer.c, pgarch.c).  It
+		 * is safe to call broadly here because pgstat_set_wait_
+		 * event_timing_storage runs at a fixed point in
+		 * InitProcess where the caller frame holds no other
+		 * LWLocks across our return: the earlier InitProcess
+		 * steps that touch LWLocks (ProcArrayAdd, etc.) release
+		 * them before returning, and the subsequent steps that
+		 * acquire LWLocks have not yet run.
+		 */
+		LWLockReleaseAll();
+
+		/*
+		 * Switch BACK to the caller's context before CopyErrorData
+		 * so that edata is allocated in a context that survives
+		 * FlushErrorState().  FlushErrorState() calls
+		 * MemoryContextReset(ErrorContext); allocating edata in
+		 * ErrorContext (the default at PG_CATCH entry on the error
+		 * path) would make it a dangling pointer the moment we
+		 * flush.  See the matching pattern in spi.c PG_CATCH
+		 * branches.
+		 */
+		MemoryContextSwitchTo(caller_cxt);
+		edata = CopyErrorData();
+		FlushErrorState();
+
+		ereport(WARNING,
+				(errcode(edata->sqlerrcode),
+				 errmsg("could not clear orphaned wait-event trace ring "
+						"at backend init: %s", edata->message),
+				 errdetail("Backend startup proceeds with the orphan "
+						   "still allocated for procnumber %d.",
+						   procNumber),
+				 errhint("Run pg_stat_clear_orphaned_wait_event_rings() "
+						 "to release the orphan when the underlying "
+						 "condition is resolved.")));
+
+		FreeErrorData(edata);
+	}
+	PG_END_TRY();
 }
 
 /*
