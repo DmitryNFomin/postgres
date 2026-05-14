@@ -3138,21 +3138,54 @@ pg_stat_clear_orphaned_wait_event_rings(PG_FUNCTION_ARGS)
 		PG_RETURN_INT64(0);
 
 	/*
-	 * Walk every slot under the lock.  Total work is bounded:
-	 * NUM_WAIT_EVENT_TIMING_SLOTS atomic loads and at most that many
-	 * dsa_free calls.  We hold the lock for the full sweep so a
-	 * concurrent backend startup cannot transition a slot in or out
-	 * of ORPHANED while we iterate.  For typical MaxBackends this is
-	 * bounded by a few thousand cheap operations, well below any
-	 * reasonable lock-hold concern; in pathological cases an admin
-	 * who is already invoking this manually would tolerate the
-	 * latency.
+	 * Walk every slot, taking and releasing WaitEventTraceCtl->lock per
+	 * slot rather than holding it across the entire sweep.
+	 *
+	 * Rationale: at MaxBackends = 1000 with a fully-orphaned cluster
+	 * the per-slot work (atomic state read + dsa_free + ring_ptr
+	 * clear + atomic state write) totals a few microseconds; holding
+	 * the lock across all slots would yield a millisecond-scale
+	 * lock-hold window during which every concurrent backend startup
+	 * (the lazy wait_event_trace_clear_orphan_at_init path), every
+	 * cross-backend reader (pg_get_wait_event_trace and the external
+	 * snapshot pattern), and every capture step-down or restore
+	 * would stall.  PG's general convention is to keep LWLock-held
+	 * windows in paths that compete with regular activity well under
+	 * 100 microseconds; per-slot release/reacquire gives us a worst-
+	 * case lock-hold of one slot's worth of work regardless of how
+	 * many orphans exist cluster-wide.
+	 *
+	 * An unlocked fast-path read of slot->state skips non-ORPHANED
+	 * slots without an LWLockAcquire/Release pair.  This is safe: if
+	 * a slot races from non-ORPHANED to ORPHANED after we read it,
+	 * we miss that orphan -- but the function is documented as a
+	 * snapshot sweep, the missed orphan can be cleared by a
+	 * subsequent call, and the same race exists for orphans that
+	 * appear after the loop ends.  The authoritative re-check under
+	 * the lock prevents racing on the dsa_free direction (we never
+	 * free a slot whose owner became OWNED again).
+	 *
+	 * CHECK_FOR_INTERRUPTS at the top of the loop body lets the
+	 * caller cancel a long sweep; with the previous single-lock
+	 * structure the InterruptHoldoffCount elevation from
+	 * LWLockAcquire deferred all cancellation until release.
 	 */
-	LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
 	for (i = 0; i < NUM_WAIT_EVENT_TIMING_SLOTS; i++)
 	{
 		WaitEventTraceSlot *slot = &WaitEventTraceCtl->trace_slots[i];
 
+		CHECK_FOR_INTERRUPTS();
+
+		/* Unlocked fast-path: skip non-ORPHANED slots cheaply. */
+		if (pg_atomic_read_u32(&slot->state) != WET_TRACE_SLOT_ORPHANED)
+			continue;
+
+		LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
+
+		/*
+		 * Authoritative re-check under the lock.  A concurrent
+		 * clear_orphan_at_init may have already freed this slot.
+		 */
 		if (pg_atomic_read_u32(&slot->state) == WET_TRACE_SLOT_ORPHANED &&
 			DsaPointerIsValid(slot->ring_ptr))
 		{
@@ -3162,8 +3195,9 @@ pg_stat_clear_orphaned_wait_event_rings(PG_FUNCTION_ARGS)
 			pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_FREE);
 			freed++;
 		}
+
+		LWLockRelease(&WaitEventTraceCtl->lock);
 	}
-	LWLockRelease(&WaitEventTraceCtl->lock);
 
 	PG_RETURN_INT64(freed);
 }
