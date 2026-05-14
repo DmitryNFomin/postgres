@@ -393,6 +393,54 @@ int			my_trace_proc_number = -1;
 static bool wait_event_trace_srf_in_progress = false;
 static bool wait_event_trace_release_pending = false;
 
+/*
+ * Per-backend gate that disables the trace-ring writer in the wait-
+ * event hot path while a slot-state transition is in progress.
+ *
+ * Set true around code paths that either free the local trace ring
+ * (wait_event_trace_release_slot's dsa_free) or transition the slot
+ * out of OWNED (wait_event_trace_before_shmem_exit's OWNED ->
+ * ORPHANED publish).  In both cases an internal LWLock inside
+ * dsa_free / dsa_attach / dsa_pin_mapping / dsa_pin can in
+ * principle contend long enough to dispatch a wait event; that
+ * wait event's pgstat_report_wait_end_timing inline path runs in
+ * the SAME backend, sees capture_level == TRACE (the GUC hasn't
+ * been committed yet by the time the assign hook runs), and would:
+ *
+ *   * during release_slot's dsa_free: write into a ring that has
+ *     already been returned to the DSA freelist -- if another
+ *     allocator has since reused the chunk, this is a stray write
+ *     into someone else's allocation.
+ *
+ *   * during release_slot's dsa_free, alternative timing: see
+ *     my_wait_event_trace == NULL on a naive "clear before free"
+ *     fix and recurse into wait_event_trace_attach, which would
+ *     either deadlock on the WaitEventTraceCtl->lock the outer
+ *     release_slot already holds, or (on a lock-free moment)
+ *     allocate a fresh ring that the outer release_slot would
+ *     then free again as part of its post-acquire DsaPointerIsValid
+ *     check -- a different use-after-free of a freshly-allocated
+ *     chunk.
+ *
+ *   * during before_shmem_exit: write into the ring after the slot
+ *     has been published as ORPHANED, violating the post-mortem
+ *     read-only contract that cross-backend readers rely on.
+ *
+ * The flag is per-backend (static at file scope means per-process
+ * in PG's process-per-backend model), so the hot path's check is a
+ * single cache-warm load and a branch; no atomic, no fence.  The
+ * trace branch is already gated by capture_level == TRACE so the
+ * additional check costs nothing in the common case where capture
+ * is off or stats-only.  The flag is set on the very same backend
+ * that may later read it from the hot path, so there is no
+ * cross-process visibility concern.
+ *
+ * See the release_slot and before_shmem_exit doc comments for the
+ * specific transition each uses this flag around, and review_6.md
+ * issue #10 for the UAF analysis.
+ */
+static bool wait_event_trace_writes_disabled = false;
+
 /* Forward declarations for lazy-attach helpers */
 static void wait_event_timing_ensure_dsa(void);
 static bool wait_event_timing_attach_array(bool allocate_if_missing);
@@ -596,6 +644,15 @@ wait_event_trace_write_marker(uint8 record_type, int64 query_id)
 	 * other doesn't.  query_id == 0 means "no query ID available"
 	 * (utility command or compute_query_id = off), which we skip.
 	 *
+	 * wait_event_trace_writes_disabled is the same per-backend gate
+	 * the wait-event hot path uses; it is raised by release_slot and
+	 * before_shmem_exit around slot-state transitions to keep both
+	 * writers consistent.  Markers cannot fire during those
+	 * transitions today (single-threaded execution, no nested
+	 * executor), but checking here keeps the contract uniform
+	 * across all trace-ring writers and is robust to future code
+	 * paths that might invoke a marker from a nested context.
+	 *
 	 * No likely()/unlikely() annotation: this function is called at
 	 * query/exec boundaries (a handful per query, not per wait event),
 	 * so neither side of the branch dominates often enough for static
@@ -603,7 +660,9 @@ wait_event_trace_write_marker(uint8 record_type, int64 query_id)
 	 * (wait_event_capture = trace) is exactly when the body is hot --
 	 * an annotation on the early-return would point the wrong way.
 	 */
-	if (wait_event_capture != WAIT_EVENT_CAPTURE_TRACE || query_id == 0)
+	if (wait_event_capture != WAIT_EVENT_CAPTURE_TRACE ||
+		wait_event_trace_writes_disabled ||
+		query_id == 0)
 		return;
 
 	/*
@@ -1159,11 +1218,36 @@ wait_event_trace_before_shmem_exit(int code, Datum arg)
 	 */
 	if (pg_atomic_read_u32(&slot->state) != WAIT_EVENT_TRACE_SLOT_OWNED)
 	{
+		wait_event_trace_writes_disabled = true;
 		my_wait_event_trace = NULL;
 		return;
 	}
 
+	/*
+	 * Disable trace-ring writes on this backend before we touch the
+	 * lock.  Writes after this point would race with the
+	 * OWNED -> ORPHANED state publish below: a wait event whose
+	 * end-timing path runs after the state has been published as
+	 * ORPHANED would write into a ring that the patch contract
+	 * declares read-only post-mortem.  Cross-backend readers
+	 * snapshot ORPHANED rings without expecting concurrent writes
+	 * from the dying owner.  See wait_event_trace_writes_disabled
+	 * for the full UAF / contract-violation analysis.
+	 *
+	 * The flag stays true for the remainder of this backend's life
+	 * (we are in proc_exit; there is no subsequent capture re-enable
+	 * to handle), so we do not reset it.
+	 */
+	wait_event_trace_writes_disabled = true;
+
 	LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
+
+	/*
+	 * Drop the local pointer inside the lock-held region as a
+	 * second line of defense; the writes-disabled flag above is
+	 * the primary gate.
+	 */
+	my_wait_event_trace = NULL;
 
 	if (pg_atomic_read_u32(&slot->state) == WAIT_EVENT_TRACE_SLOT_OWNED &&
 		DsaPointerIsValid(slot->ring_ptr))
@@ -1179,8 +1263,6 @@ wait_event_trace_before_shmem_exit(int code, Datum arg)
 	}
 
 	LWLockRelease(&WaitEventTraceCtl->lock);
-
-	my_wait_event_trace = NULL;
 }
 
 /*
@@ -1431,9 +1513,32 @@ wait_event_trace_release_slot(int procNumber)
 	slot = &WaitEventTraceCtl->trace_slots[procNumber];
 
 	in_release = true;
+
+	/*
+	 * Disable trace-ring writes on this backend before we touch the
+	 * lock or call dsa_free.  An internal LWLock inside dsa_free can
+	 * dispatch a wait event whose end-timing path would otherwise see
+	 * capture_level == TRACE (the GUC assign hook is in flight; the
+	 * variable has not been committed by the framework yet) and
+	 * write into the very chunk we are returning to the DSA
+	 * freelist.  See the comment on
+	 * wait_event_trace_writes_disabled for the full UAF analysis.
+	 */
+	wait_event_trace_writes_disabled = true;
+
 	PG_TRY();
 	{
 		LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
+
+		/*
+		 * Drop the local pointer BEFORE the dsa_free as a second line
+		 * of defense (the writes-disabled flag above is the primary
+		 * gate).  Any wait event whose hot path slips past the gate
+		 * check via a compiler or memory-ordering surprise would at
+		 * least see my_wait_event_trace == NULL and skip the write.
+		 */
+		my_wait_event_trace = NULL;
+
 		if (DsaPointerIsValid(slot->ring_ptr))
 		{
 			/*
@@ -1448,11 +1553,10 @@ wait_event_trace_release_slot(int procNumber)
 			pg_atomic_write_u32(&slot->state, WAIT_EVENT_TRACE_SLOT_FREE);
 		}
 		LWLockRelease(&WaitEventTraceCtl->lock);
-
-		my_wait_event_trace = NULL;
 	}
 	PG_FINALLY();
 	{
+		wait_event_trace_writes_disabled = false;
 		in_release = false;
 	}
 	PG_END_TRY();
@@ -1900,13 +2004,22 @@ pgstat_report_wait_end_timing(int capture_level)
 		}
 
 		/* 10046-style per-session trace ring buffer (DSA-backed) */
-		if (unlikely(capture_level == WAIT_EVENT_CAPTURE_TRACE))
+		if (unlikely(capture_level == WAIT_EVENT_CAPTURE_TRACE) &&
+			likely(!wait_event_trace_writes_disabled))
 		{
 			/*
 			 * Lazy attach on first use -- allocation happens here rather
 			 * than in assign_wait_event_capture() to respect the GUC
 			 * assign-hook "must not ereport" contract.  See the comment
 			 * on assign_wait_event_capture() for rationale.
+			 *
+			 * wait_event_trace_writes_disabled (checked above) also
+			 * blocks this re-attach during slot-state transitions
+			 * driven by release_slot / before_shmem_exit; without that
+			 * gate, a nested wait event mid-transition could see
+			 * my_wait_event_trace == NULL and recurse into a fresh
+			 * attach that deadlocks on the lock the outer transition
+			 * already holds.  See review_6.md issue #10.
 			 */
 			if (my_wait_event_trace == NULL && my_trace_proc_number >= 0)
 				wait_event_trace_attach(my_trace_proc_number);
