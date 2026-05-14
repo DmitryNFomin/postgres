@@ -334,6 +334,171 @@ cmp_ok($live_total_observed, '>', 0,
 $writer_bg->query_safe("SELECT 1;");
 $writer_bg->quit;
 
+# ------------------------------------------------------------------
+# Scenario 4: wait_event_trace_clear_orphan_at_init reclaims an
+# orphan when a new backend inherits the same procNumber slot
+# ------------------------------------------------------------------
+#
+# review_6.md issue #8 asked specifically for coverage of the
+# clear_orphan_at_init path (the lazy lifecycle reclaim that
+# runs at every backend's InitProcess and frees a prior orphan
+# whose procNumber the new backend has inherited).  Scenarios 1
+# and 2 above exercise the admin-driven sweep
+# (pg_stat_clear_orphaned_wait_event_rings) but not the init-time
+# per-slot reclaim, leaving a gap in regression coverage for the
+# lifecycle's "common case" path.
+#
+# Strategy:
+#   1. Spawn writer W4, enable wait_event_capture=trace, emit a
+#      wait so W4's slot transitions FREE -> OWNED with a real
+#      trace ring allocated, capture W4's procnumber, disconnect.
+#      W4's slot is now ORPHANED with non-empty ring contents.
+#   2. Verify from the reader session that the orphan is visible
+#      via pg_get_wait_event_trace(w4_proc).
+#   3. Spawn a new backend B with wait_event_capture=stats (so B
+#      does NOT allocate a trace ring of its own).  Query B's
+#      procnumber.  If B inherited W4's procnumber slot, then B's
+#      clear_orphan_at_init must have transitioned the slot from
+#      ORPHANED -> FREE at InitProcess time; we verify that by
+#      asserting pg_get_wait_event_trace(w4_proc) is empty.
+#   4. Retry up to a bounded number of times: procNumber
+#      assignment is determined by ProcGlobal's free list, which
+#      on a quiet single-session test cluster tends to reuse the
+#      just-freed slot quickly, but the reuse is not strictly
+#      guaranteed (aux processes, autovacuum workers, etc. can
+#      take the slot in between).  If we exhaust retries without
+#      a same-procnumber hit, mark the scenario as skipped rather
+#      than fail -- the failure mode is environment-dependent,
+#      not a defect under test.
+
+my $w4 = $node->background_psql('postgres');
+$w4->query_safe("SET client_min_messages = warning;");
+$w4->query_safe("SET wait_event_capture = trace;");
+$w4->query_safe("SELECT pg_sleep(0.01);");
+
+my $w4_proc = $w4->query_safe(
+	"SELECT procnumber FROM pg_stat_get_wait_event_timing(pg_backend_pid()) "
+	. "WHERE pid = pg_backend_pid() LIMIT 1;");
+chomp $w4_proc;
+like($w4_proc, qr/^\d+$/,
+	'scenario-4 writer reported its procnumber');
+
+$w4->quit;
+
+# Wait for W4's full server-side exit before reading the orphan
+# or starting the retry loop.  pg_stat_activity loses the row
+# before the before_shmem_exit callbacks finish (the
+# OWNED -> ORPHANED transition lives in such a callback), so
+# polling pg_stat_activity isn't a perfect signal for the
+# transition itself -- but it IS a perfect signal for "the slot
+# has been returned to ProcGlobal->freeProcs and may now be
+# inherited by a new backend", which is what we need before
+# entering the retry loop.  Without this poll, on slower test
+# environments the next query can race ahead of the cleanup and
+# either observe the slot in OWNED state (which the reader
+# still reads correctly, but is a different invariant from what
+# this scenario tests) or observe $w4 still in pg_stat_activity
+# and fail the "no other client backend" assertion below.
+my $w4_gone = 0;
+for (my $i = 0; $i < 100; $i++)
+{
+	my $count = $reader->query_safe(
+		"SELECT count(*) FROM pg_stat_activity "
+		. "WHERE backend_type = 'client backend' "
+		. "  AND pid <> pg_backend_pid();");
+	chomp $count;
+	if ($count eq '0') { $w4_gone = 1; last; }
+	usleep(20_000);
+}
+ok($w4_gone, 'scenario-4 writer backend has exited');
+
+my $orphan_rows4 = $reader->query_safe(
+	"SELECT count(*) FROM pg_get_wait_event_trace($w4_proc);");
+chomp $orphan_rows4;
+cmp_ok($orphan_rows4, '>=', 1,
+	"scenario-4 orphan visible at procnumber $w4_proc before any reclaim "
+	. "(rows: $orphan_rows4)");
+
+# Retry loop: spawn new backends with capture = stats (does NOT
+# allocate a trace ring), capture procnumber, check whether the
+# inheritance landed on w4_proc.
+my $reclaimed = 0;
+my $attempts = 0;
+# ProcGlobal->freeProcs is a FIFO (dlist_push_tail on backend exit,
+# dlist_pop_head_node on new backend init), so after W4 disconnects
+# the just-freed slot goes to the tail of the queue.  To cycle the
+# queue back around to W4's procnumber, a new backend has to be
+# spawned for every free slot ahead of W4's in the queue.  The
+# cluster's max_connections is the upper bound; query it and add
+# a 20% safety margin to absorb any walsender/bgworker free-list
+# overlap or queue-occupancy fluctuations from autovacuum/etc.
+# This adapts automatically if the test config in $node->append_conf
+# above is changed.
+my $max_connections = $node->safe_psql('postgres',
+	'SHOW max_connections;');
+chomp $max_connections;
+my $max_attempts = int($max_connections * 1.2);
+my @observed_procs;
+
+for (my $i = 0; $i < $max_attempts; $i++)
+{
+	$attempts++;
+	my $b = $node->background_psql('postgres');
+	$b->query_safe("SET client_min_messages = warning;");
+	$b->query_safe("SET wait_event_capture = stats;");
+	# Sleep duration kept slightly above the millisecond range so the
+	# pg_stat_get_wait_event_timing query reliably observes a non-zero
+	# entry count on slow CI hosts that may aggressively optimise
+	# sub-millisecond WaitLatch dispatches.
+	$b->query_safe("SELECT pg_sleep(0.005);");
+
+	my $b_proc = $b->query_safe(
+		"SELECT procnumber FROM pg_stat_get_wait_event_timing(pg_backend_pid()) "
+		. "WHERE pid = pg_backend_pid() LIMIT 1;");
+	chomp $b_proc;
+	push @observed_procs, $b_proc;
+
+	if ($b_proc eq $w4_proc)
+	{
+		# Inheritance landed.  B's clear_orphan_at_init at
+		# InitProcess time must have FREE'd W4's ORPHANED
+		# slot.  Since B used capture = stats (not trace), B
+		# allocated no new trace ring at this slot, so a
+		# subsequent pg_get_wait_event_trace($w4_proc) should
+		# return zero rows.  If it returns >= 1 row, those
+		# rows are W4's stale records -- the reclaim did not
+		# happen and the test fails.
+		my $rows_after = $reader->query_safe(
+			"SELECT count(*) FROM pg_get_wait_event_trace($w4_proc);");
+		chomp $rows_after;
+		is($rows_after, '0',
+			"clear_orphan_at_init reclaimed W4's orphan when B "
+			. "inherited procnumber $w4_proc (attempt $attempts)")
+		  or diag("expected 0 rows but pg_get_wait_event_trace("
+			. "$w4_proc) returned $rows_after; observed procnumber "
+			. "sequence: " . join(",", @observed_procs));
+		$reclaimed = 1;
+		$b->quit;
+		last;
+	}
+	$b->quit;
+}
+
+SKIP:
+{
+	if (!$reclaimed)
+	{
+		diag("observed procnumbers (W4 was $w4_proc): "
+			. join(",", @observed_procs));
+		skip("procnumber $w4_proc was not reused within $max_attempts attempts; "
+			. "the ProcGlobal free-list order is environment-dependent. "
+			. "The clear_orphan_at_init code path is exercised at every "
+			. "backend init that DOES inherit an orphan; scenarios 1 and 2 "
+			. "above also cover orphan reclamation via the admin sweep.",
+			1);
+	}
+}
+
 # Note on test coverage: the position-encoded identity seqlock
 # in emit_wait_event_trace_for_procnumber() has no direct
 # regression test.  The bug it prevents (reader observing the
