@@ -92,7 +92,7 @@ pgstat_report_wait_start(uint32 wait_event_info)
 	 * hot path and lift the body off-page, keeping I-cache pressure
 	 * low at every wait-event call site.
 	 */
-	if (unlikely(wait_event_capture >= WAIT_EVENT_CAPTURE_STATS))
+	if (unlikely(wait_event_capture != WAIT_EVENT_CAPTURE_OFF))
 	{
 		/*
 		 * Lazy attach: the per-backend timing slot lives in a DSA that is
@@ -102,7 +102,21 @@ pgstat_report_wait_start(uint32 wait_event_info)
 		 * branch is cold and perfectly predicted.
 		 */
 		if (unlikely(my_wait_event_timing == NULL))
+		{
 			pgstat_wait_event_timing_lazy_attach();
+
+			/*
+			 * lazy_attach() can dispatch nested wait events while it
+			 * sets up DSA (dsa_attach takes an internal LWLock which
+			 * can contend).  Those nested wait_end() calls clear
+			 * my_wait_event_info to 0, so by the time we return here
+			 * the outer wait's wait_event_info is no longer published
+			 * to pg_stat_activity.  Re-publish to restore visibility.
+			 * Only needed on the first-attach path; subsequent calls
+			 * skip this branch entirely.
+			 */
+			*(volatile uint32 *) my_wait_event_info = wait_event_info;
+		}
 
 		if (likely(my_wait_event_timing != NULL))
 		{
@@ -139,7 +153,7 @@ pgstat_report_wait_end(void)
 		 */
 		int		capture_level = wait_event_capture;
 
-		if (unlikely(capture_level >= WAIT_EVENT_CAPTURE_STATS))
+		if (unlikely(capture_level != WAIT_EVENT_CAPTURE_OFF))
 		{
 			if (unlikely(my_wait_event_timing == NULL))
 				pgstat_wait_event_timing_lazy_attach();

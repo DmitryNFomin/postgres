@@ -646,6 +646,21 @@ typedef enum WaitEventCaptureLevel
 	WAIT_EVENT_CAPTURE_TRACE,
 }			WaitEventCaptureLevel;
 
+/*
+ * The hot path uses (capture_level != OFF) as the "any capture
+ * mode" gate and (capture_level == TRACE) for the trace-specific
+ * gate.  Either form is order-independent, but the values are
+ * also constrained to a strict OFF < STATS < TRACE order so that
+ * future code paths needing "at least STATS" can compare with
+ * >= safely.  Pin the invariant explicitly to catch enum
+ * reordering at compile time rather than via mysterious runtime
+ * mode switches.
+ */
+StaticAssertDecl(WAIT_EVENT_CAPTURE_OFF == 0 &&
+				 WAIT_EVENT_CAPTURE_STATS == 1 &&
+				 WAIT_EVENT_CAPTURE_TRACE == 2,
+				 "WaitEventCaptureLevel values must be 0=OFF < 1=STATS < 2=TRACE");
+
 /* GUC variable */
 extern PGDLLIMPORT int wait_event_capture;
 

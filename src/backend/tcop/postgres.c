@@ -78,9 +78,7 @@
 #include "tcop/tcopprot.h"
 #include "tcop/utility.h"
 #include "utils/guc_hooks.h"
-#ifdef USE_WAIT_EVENT_TIMING
 #include "utils/wait_event_timing.h"
-#endif
 #include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -4688,14 +4686,12 @@ PostgresMain(const char *dbname, const char *username)
 			 * idle waits (ClientRead etc.) are not attributed to the
 			 * finished query.
 			 */
-#ifdef USE_WAIT_EVENT_TIMING
 			{
 				volatile PgBackendStatus *beentry = MyBEEntry;
 
 				if (beentry != NULL && beentry->st_query_id != 0)
 					wait_event_trace_query_end(beentry->st_query_id);
 			}
-#endif
 
 			if (IsAbortedTransactionBlockState())
 			{

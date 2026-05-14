@@ -57,9 +57,7 @@
 #include "parser/parse_relation.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
-#ifdef USE_WAIT_EVENT_TIMING
 #include "utils/wait_event_timing.h"
-#endif
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/backend_status.h"
@@ -136,9 +134,7 @@ ExecutorStart(QueryDesc *queryDesc, int eflags)
 	 */
 	pgstat_report_query_id(queryDesc->plannedstmt->queryId, false);
 
-#ifdef USE_WAIT_EVENT_TIMING
 	wait_event_trace_exec_start(queryDesc->plannedstmt->queryId);
-#endif
 
 	if (ExecutorStart_hook)
 		(*ExecutorStart_hook) (queryDesc, eflags);
@@ -483,9 +479,7 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 void
 ExecutorEnd(QueryDesc *queryDesc)
 {
-#ifdef USE_WAIT_EVENT_TIMING
 	wait_event_trace_exec_end(queryDesc->plannedstmt->queryId);
-#endif
 
 	if (ExecutorEnd_hook)
 		(*ExecutorEnd_hook) (queryDesc);

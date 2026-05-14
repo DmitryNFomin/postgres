@@ -678,12 +678,10 @@ pgstat_report_query_id(int64 query_id, bool force)
 	 * The last-query-to-idle QUERY_END is emitted separately in
 	 * PostgresMain() at send_ready_for_query.
 	 */
-#ifdef USE_WAIT_EVENT_TIMING
 	if (beentry->st_query_id != 0 && beentry->st_query_id != query_id)
 		wait_event_trace_query_end(beentry->st_query_id);
 	if (query_id != 0 && query_id != beentry->st_query_id)
 		wait_event_trace_query_start(query_id);
-#endif
 
 	/*
 	 * Update my status entry, following the protocol of bumping

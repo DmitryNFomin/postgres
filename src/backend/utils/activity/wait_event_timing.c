@@ -194,6 +194,34 @@ pgstat_reset_wait_event_timing_storage(void)
 {
 }
 
+/*
+ * Stub trace-marker entry points.  Declared unconditionally in
+ * wait_event_timing.h so that call sites in execMain.c,
+ * backend_status.c, and postgres.c do not need #ifdef
+ * USE_WAIT_EVENT_TIMING guards around the call.  No-ops here in the
+ * stub build: there is no ring to write to and no infrastructure to
+ * initialise.
+ */
+void
+wait_event_trace_query_start(int64 query_id)
+{
+}
+
+void
+wait_event_trace_query_end(int64 query_id)
+{
+}
+
+void
+wait_event_trace_exec_start(int64 query_id)
+{
+}
+
+void
+wait_event_trace_exec_end(int64 query_id)
+{
+}
+
 #else							/* USE_WAIT_EVENT_TIMING */
 
 #include "catalog/pg_authid.h"
