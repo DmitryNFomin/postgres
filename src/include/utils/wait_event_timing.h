@@ -393,9 +393,9 @@ typedef struct WaitEventTraceState
  */
 typedef enum WaitEventTraceSlotState
 {
-	WET_TRACE_SLOT_FREE = 0,
-	WET_TRACE_SLOT_OWNED,
-	WET_TRACE_SLOT_ORPHANED,
+	WAIT_EVENT_TRACE_SLOT_FREE = 0,
+	WAIT_EVENT_TRACE_SLOT_OWNED,
+	WAIT_EVENT_TRACE_SLOT_ORPHANED,
 }			WaitEventTraceSlotState;
 
 /*

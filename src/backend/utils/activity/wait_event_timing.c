@@ -1058,7 +1058,7 @@ WaitEventTraceControlShmemInit(void *arg)
 		WaitEventTraceSlot *s = &WaitEventTraceCtl->trace_slots[i];
 
 		pg_atomic_init_u64(&s->generation, 0);
-		pg_atomic_init_u32(&s->state, WET_TRACE_SLOT_FREE);
+		pg_atomic_init_u32(&s->state, WAIT_EVENT_TRACE_SLOT_FREE);
 		s->pad = 0;
 		s->ring_ptr = InvalidDsaPointer;
 	}
@@ -1155,7 +1155,7 @@ wait_event_trace_before_shmem_exit(int code, Datum arg)
 	 * fast-path check; the authoritative re-check happens under the
 	 * lock below.
 	 */
-	if (pg_atomic_read_u32(&slot->state) != WET_TRACE_SLOT_OWNED)
+	if (pg_atomic_read_u32(&slot->state) != WAIT_EVENT_TRACE_SLOT_OWNED)
 	{
 		my_wait_event_trace = NULL;
 		return;
@@ -1163,7 +1163,7 @@ wait_event_trace_before_shmem_exit(int code, Datum arg)
 
 	LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
 
-	if (pg_atomic_read_u32(&slot->state) == WET_TRACE_SLOT_OWNED &&
+	if (pg_atomic_read_u32(&slot->state) == WAIT_EVENT_TRACE_SLOT_OWNED &&
 		DsaPointerIsValid(slot->ring_ptr))
 	{
 		/*
@@ -1173,7 +1173,7 @@ wait_event_trace_before_shmem_exit(int code, Datum arg)
 		 * Keep ring_ptr valid -- the data is what we want to preserve.
 		 */
 		pg_atomic_fetch_add_u64(&slot->generation, 1);
-		pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_ORPHANED);
+		pg_atomic_write_u32(&slot->state, WAIT_EVENT_TRACE_SLOT_ORPHANED);
 	}
 
 	LWLockRelease(&WaitEventTraceCtl->lock);
@@ -1282,11 +1282,11 @@ wait_event_trace_attach(int procNumber)
 		 * invariant must hold.  Skip the trace for any wait events
 		 * emitted after our own exit transition.
 		 */
-		if (state_now == WET_TRACE_SLOT_ORPHANED)
+		if (state_now == WAIT_EVENT_TRACE_SLOT_ORPHANED)
 		{
 			/* PG_FINALLY below clears in_attach. */
 		}
-		else if (state_now == WET_TRACE_SLOT_OWNED &&
+		else if (state_now == WAIT_EVENT_TRACE_SLOT_OWNED &&
 				 DsaPointerIsValid(slot->ring_ptr))
 		{
 			/* Already have a ring buffer; re-map to it. */
@@ -1312,7 +1312,7 @@ wait_event_trace_attach(int procNumber)
 			 * will detect the change.
 			 */
 			slot->ring_ptr = p;
-			pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_OWNED);
+			pg_atomic_write_u32(&slot->state, WAIT_EVENT_TRACE_SLOT_OWNED);
 			pg_atomic_fetch_add_u64(&slot->generation, 1);
 			LWLockRelease(&WaitEventTraceCtl->lock);
 
@@ -1443,7 +1443,7 @@ wait_event_trace_release_slot(int procNumber)
 			pg_atomic_fetch_add_u64(&slot->generation, 1);
 			dsa_free(trace_dsa, slot->ring_ptr);
 			slot->ring_ptr = InvalidDsaPointer;
-			pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_FREE);
+			pg_atomic_write_u32(&slot->state, WAIT_EVENT_TRACE_SLOT_FREE);
 		}
 		LWLockRelease(&WaitEventTraceCtl->lock);
 
@@ -1506,9 +1506,9 @@ wait_event_trace_clear_orphan_at_init(int procNumber)
 	slot = &WaitEventTraceCtl->trace_slots[procNumber];
 
 	state_now = pg_atomic_read_u32(&slot->state);
-	if (state_now != WET_TRACE_SLOT_ORPHANED)
+	if (state_now != WAIT_EVENT_TRACE_SLOT_ORPHANED)
 	{
-		Assert(state_now != WET_TRACE_SLOT_OWNED);
+		Assert(state_now != WAIT_EVENT_TRACE_SLOT_OWNED);
 		return;
 	}
 
@@ -1537,13 +1537,13 @@ wait_event_trace_clear_orphan_at_init(int procNumber)
 		wait_event_trace_ensure_dsa();
 
 		LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
-		if (pg_atomic_read_u32(&slot->state) == WET_TRACE_SLOT_ORPHANED &&
+		if (pg_atomic_read_u32(&slot->state) == WAIT_EVENT_TRACE_SLOT_ORPHANED &&
 			DsaPointerIsValid(slot->ring_ptr))
 		{
 			pg_atomic_fetch_add_u64(&slot->generation, 1);
 			dsa_free(trace_dsa, slot->ring_ptr);
 			slot->ring_ptr = InvalidDsaPointer;
-			pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_FREE);
+			pg_atomic_write_u32(&slot->state, WAIT_EVENT_TRACE_SLOT_FREE);
 		}
 		LWLockRelease(&WaitEventTraceCtl->lock);
 	}
@@ -2515,7 +2515,7 @@ emit_wait_event_trace_for_procnumber(int procNumber, ReturnSetInfo *rsinfo)
 
 	/* Unlocked fast-path check; the authoritative check is under the
 	 * lock below. */
-	if (pg_atomic_read_u32(&slot->state) == WET_TRACE_SLOT_FREE)
+	if (pg_atomic_read_u32(&slot->state) == WAIT_EVENT_TRACE_SLOT_FREE)
 		return;
 
 	wait_event_trace_ensure_dsa();
@@ -2544,7 +2544,7 @@ emit_wait_event_trace_for_procnumber(int procNumber, ReturnSetInfo *rsinfo)
 	LWLockAcquire(&WaitEventTraceCtl->lock, LW_SHARED);
 
 	state_now = pg_atomic_read_u32(&slot->state);
-	if (state_now == WET_TRACE_SLOT_FREE ||
+	if (state_now == WAIT_EVENT_TRACE_SLOT_FREE ||
 		!DsaPointerIsValid(slot->ring_ptr))
 	{
 		LWLockRelease(&WaitEventTraceCtl->lock);
@@ -3177,7 +3177,7 @@ pg_stat_clear_orphaned_wait_event_rings(PG_FUNCTION_ARGS)
 		CHECK_FOR_INTERRUPTS();
 
 		/* Unlocked fast-path: skip non-ORPHANED slots cheaply. */
-		if (pg_atomic_read_u32(&slot->state) != WET_TRACE_SLOT_ORPHANED)
+		if (pg_atomic_read_u32(&slot->state) != WAIT_EVENT_TRACE_SLOT_ORPHANED)
 			continue;
 
 		LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
@@ -3186,13 +3186,13 @@ pg_stat_clear_orphaned_wait_event_rings(PG_FUNCTION_ARGS)
 		 * Authoritative re-check under the lock.  A concurrent
 		 * clear_orphan_at_init may have already freed this slot.
 		 */
-		if (pg_atomic_read_u32(&slot->state) == WET_TRACE_SLOT_ORPHANED &&
+		if (pg_atomic_read_u32(&slot->state) == WAIT_EVENT_TRACE_SLOT_ORPHANED &&
 			DsaPointerIsValid(slot->ring_ptr))
 		{
 			pg_atomic_fetch_add_u64(&slot->generation, 1);
 			dsa_free(trace_dsa, slot->ring_ptr);
 			slot->ring_ptr = InvalidDsaPointer;
-			pg_atomic_write_u32(&slot->state, WET_TRACE_SLOT_FREE);
+			pg_atomic_write_u32(&slot->state, WAIT_EVENT_TRACE_SLOT_FREE);
 			freed++;
 		}
 
