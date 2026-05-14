@@ -281,10 +281,23 @@ typedef struct WaitEventTimingState
  * This eliminates the previous per-backend shared-memory hash table.
  *
  * The ring buffer is allocated lazily via DSA (Dynamic Shared Memory Areas)
- * on first use.  Only backends that enable wait_event_trace pay the ~4 MB
- * cost.  A small control struct in fixed shmem holds per-backend DSA pointers.
+ * on first use.  Only backends that enable wait_event_trace pay the
+ * per-ring memory cost.  A small control struct in fixed shmem holds
+ * per-backend DSA pointers.
+ *
+ * The ring size is configurable via the wait_event_trace_ring_size_kb
+ * GUC (PGC_POSTMASTER, default 4096 KB = 4 MB = 131072 records of 32
+ * bytes each).  The size is fixed cluster-wide at server start, so all
+ * rings in a given postmaster run have the same dimensions; each ring
+ * still caches its mask in the WaitEventTraceState header (next to
+ * write_pos) so the hot-path index computation is a single
+ * cache-warm load.
+ *
+ * The size MUST be a power of two: the writer indexes the ring as
+ * (pos & ring_mask), and ring_mask = ring_size - 1 only equals "low
+ * log2(ring_size) bits" when ring_size is a power of two.  The GUC
+ * check hook enforces this.
  */
-#define WAIT_EVENT_TRACE_RING_SIZE	131072	/* must be power of 2, 128K records */
 
 /* Trace record types */
 #define TRACE_WAIT_EVENT	0
@@ -331,24 +344,31 @@ typedef struct WaitEventTraceRecord
  * prose in the header comment above; the asserts make accidental
  * violations (e.g. someone adding a field to WaitEventTraceRecord) a
  * build failure instead of a silently-broken ring.
+ *
+ * The ring size itself is now runtime-configurable via the
+ * wait_event_trace_ring_size_kb GUC; the power-of-two invariant
+ * (required for the mask-indexing pos & ring_mask) is enforced by the
+ * GUC check hook, and the minimum-size invariant by the GUC bounds.
  */
 StaticAssertDecl(sizeof(WaitEventTraceRecord) == 32,
 				 "WaitEventTraceRecord must be exactly 32 bytes: the "
 				 "seqlock wrap-safety argument relies on single-record, "
 				 "single-cache-line writes, and ARR_DATA_PTR / mask-index "
 				 "math assumes a fixed record stride.");
-StaticAssertDecl((WAIT_EVENT_TRACE_RING_SIZE & (WAIT_EVENT_TRACE_RING_SIZE - 1)) == 0,
-				 "WAIT_EVENT_TRACE_RING_SIZE must be a power of two; "
-				 "the ring uses mask indexing (pos & (SIZE - 1)).");
-StaticAssertDecl(WAIT_EVENT_TRACE_RING_SIZE >= 2,
-				 "WAIT_EVENT_TRACE_RING_SIZE must be >= 2 so that the "
-				 "write_pos seqlock parity interleave yields distinct "
-				 "records across neighbouring slots.");
 
+/*
+ * Per-backend trace ring header followed by the records array.  The
+ * records[] slab is variably sized at allocation time (the postmaster's
+ * value of wait_event_trace_ring_size_kb determines the row count).
+ * write_pos and ring_mask live on the same cache line so the hot path
+ * touches a single line for the index calculation.
+ */
 typedef struct WaitEventTraceState
 {
 	pg_atomic_uint64 write_pos;	/* monotonically increasing, wraps via mask */
-	WaitEventTraceRecord records[WAIT_EVENT_TRACE_RING_SIZE];
+	uint32		ring_mask;		/* (ring_size - 1); ring_size is a power of two */
+	uint32		ring_size_pad;	/* keep 16-byte alignment for the records[] slab */
+	WaitEventTraceRecord records[FLEXIBLE_ARRAY_MEMBER];
 } WaitEventTraceState;
 /* ~4 MB per backend (allocated lazily via DSA).  When the ring wraps,
  * old records are silently overwritten.  Readers detect overwritten
@@ -540,8 +560,9 @@ typedef struct WaitEventTraceSlot
  *    next call.
  *
  * 5. Iterate ring indices [read_start, write_pos), masking each
- *    through the ring (i & (WAIT_EVENT_TRACE_RING_SIZE - 1)).  For
- *    EACH record do the per-record seqlock protocol AGAINST
+ *    through the ring (i & ts->ring_mask, where ring_mask is the
+ *    per-ring mask cached next to write_pos in the ring header).
+ *    For EACH record do the per-record seqlock protocol AGAINST
  *    SHARED MEMORY, using a POSITION-ENCODED IDENTITY check
  *    (not just parity):
  *
@@ -661,8 +682,18 @@ StaticAssertDecl(WAIT_EVENT_CAPTURE_OFF == 0 &&
 				 WAIT_EVENT_CAPTURE_TRACE == 2,
 				 "WaitEventCaptureLevel values must be 0=OFF < 1=STATS < 2=TRACE");
 
-/* GUC variable */
+/* GUC variables */
 extern PGDLLIMPORT int wait_event_capture;
+extern PGDLLIMPORT int wait_event_trace_ring_size_kb;
+
+/*
+ * Records-per-ring value derived from wait_event_trace_ring_size_kb at
+ * server start.  Cached file-scope so the allocator and any caller
+ * that wants the total record count (rather than the mask) does not
+ * have to redo the divide.  Set once by ProcessConfigFile()'s startup
+ * sync of POSTMASTER-context GUCs; never updated thereafter.
+ */
+extern PGDLLIMPORT uint32 WaitEventTraceRingSize;
 
 /* Pointer to this backend's timing state in shared memory */
 extern PGDLLIMPORT WaitEventTimingState *my_wait_event_timing;

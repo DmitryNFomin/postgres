@@ -4105,7 +4105,9 @@ ORDER  BY b.bucket_idx;
    <xref linkend="guc-wait-event-capture"/> for the gating rules of
    each marker family.
    Requires <xref linkend="guc-wait-event-capture"/> to be set to
-   <literal>trace</literal>.  The ring buffer holds up to 131072 records;
+   <literal>trace</literal>.  The ring buffer holds up to
+   <xref linkend="guc-wait-event-trace-ring-size-kb"/> kilobytes of
+   records (default 4096 KB = 131072 records of 32 bytes each);
    older records are overwritten in FIFO order.  The view is session-local
    and analogous in scope to
    <link linkend="view-pg-backend-memory-contexts">
@@ -4120,7 +4122,8 @@ ORDER  BY b.bucket_idx;
    running ad-hoc <literal>SELECT</literal> queries against your own
    session's trace from <application>psql</application> while
    investigating wait-event behaviour.  The view materialises up to
-   <literal>131072</literal> records (about 4&nbsp;MB) into a
+   one ring's worth of records (default ~4&nbsp;MB, controlled by
+   <xref linkend="guc-wait-event-trace-ring-size-kb"/>) into a
    tuplestore on each call, which is bounded and acceptable for that
    use; for narrow result sets, append
    <literal>ORDER BY seq DESC LIMIT <replaceable>N</replaceable></literal>

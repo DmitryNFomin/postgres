@@ -9267,6 +9267,52 @@ GRANT SET ON PARAMETER wait_event_capture TO pg_monitor;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-wait-event-trace-ring-size-kb" xreflabel="wait_event_trace_ring_size_kb">
+      <term><varname>wait_event_trace_ring_size_kb</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>wait_event_trace_ring_size_kb</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Per-backend size, in kilobytes, of the wait-event-trace ring
+        buffer allocated when a session sets
+        <xref linkend="guc-wait-event-capture"/> to
+        <literal>trace</literal>.  Must be a power of two.  Sized at
+        server start (<literal>PGC_POSTMASTER</literal>); all rings in
+        a given postmaster run have the same size.  This parameter has
+        no effect on builds compiled without
+        <option>--enable-wait-event-timing</option>.
+       </para>
+       <para>
+        Each record is 32 bytes, so the record count is the kilobyte
+        value times 32.  The default of <literal>4096</literal> KB
+        (= 131072 records, ~4&nbsp;MB) gives roughly 0.5&ndash;1
+        second of retention at peak wait-event rates of 200K/s.
+        Larger values give longer retention before the FIFO wrap
+        overwrites the oldest records; smaller values reduce
+        per-backend memory at high <varname>max_connections</varname>.
+        Allowed range is <literal>8</literal>&ndash;<literal>32768</literal>
+        KB (256 records to ~1 million records per ring).
+       </para>
+       <para>
+        Worst-case total memory is approximately
+        <varname>max_connections</varname> *
+        <varname>wait_event_trace_ring_size_kb</varname>, allocated
+        lazily from a cluster-wide DSA only as backends enable
+        <varname>wait_event_capture</varname> = <literal>trace</literal>.
+        Memory is reclaimed when backends exit and their slots are
+        recycled, or explicitly via
+        <function>pg_stat_clear_orphaned_wait_event_rings</function>.
+       </para>
+       <para>
+        Setting can only be changed at server start.  Only superusers
+        and users with the appropriate <literal>SET</literal> privilege
+        can change this setting.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-track-functions" xreflabel="track_functions">
       <term><varname>track_functions</varname> (<type>enum</type>)
       <indexterm>

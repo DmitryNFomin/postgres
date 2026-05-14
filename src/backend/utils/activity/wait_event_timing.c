@@ -27,6 +27,7 @@
 #include "postgres.h"
 
 #include "utils/guc.h"
+#include "utils/guc_hooks.h"
 #include "utils/wait_event_timing.h"
 
 /*
@@ -46,6 +47,23 @@ int			wait_event_capture = WAIT_EVENT_CAPTURE_OFF;
 int			wait_event_timing_max_tranches = 192;
 
 /*
+ * GUC: per-backend wait-event-trace ring buffer size, in kilobytes.
+ * Power of two; sized at server start.  Always defined so the GUC
+ * machinery has a backing variable even in stub builds.
+ */
+int			wait_event_trace_ring_size_kb = 4096;
+
+/*
+ * Records-per-ring derived from wait_event_trace_ring_size_kb at
+ * server start.  Set once during the postmaster's GUC initialisation;
+ * read by the writer hot path (via the per-ring cached mask) and by
+ * the allocator.  Stays at zero until the GUC framework has committed
+ * the boot value, after which any code reading it sees the final
+ * cluster-wide ring size.
+ */
+uint32		WaitEventTraceRingSize = 0;
+
+/*
  * Enum value table consumed by guc.c.  Order matches the
  * WaitEventCaptureLevel enum and the documented "off < stats < trace"
  * ordering.
@@ -59,6 +77,31 @@ const struct config_enum_entry wait_event_capture_options[] = {
 
 StaticAssertDecl(lengthof(wait_event_capture_options) == (WAIT_EVENT_CAPTURE_TRACE + 2),
 				 "wait_event_capture_options length mismatch");
+
+/*
+ * GUC check hook for wait_event_trace_ring_size_kb.
+ *
+ * The ring size in records must be a power of two so the writer's
+ * mask-indexing (pos & ring_mask) works.  Since each record is exactly
+ * 32 bytes, the kilobyte value is a power of two iff records-count is
+ * (kb * 32 is a power of two iff kb is, as 32 itself is).
+ *
+ * Defined for both build configurations so the GUC framework can
+ * validate the value uniformly; the value itself is unused in stub
+ * builds.
+ */
+bool
+check_wait_event_trace_ring_size_kb(int *newval, void **extra, GucSource source)
+{
+	int		v = *newval;
+
+	if (v <= 0 || (v & (v - 1)) != 0)
+	{
+		GUC_check_errdetail("wait_event_trace_ring_size_kb must be a positive power of two.");
+		return false;
+	}
+	return true;
+}
 
 #ifndef USE_WAIT_EVENT_TIMING
 
@@ -722,7 +765,7 @@ wait_event_trace_write_marker(uint8 record_type, int64 query_id)
 	 */
 	pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
 	pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
-	rec = &my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+	rec = &my_wait_event_trace->records[pos & my_wait_event_trace->ring_mask];
 	seq = (uint32)(pos * 2 + 1);
 
 	rec->seq = seq;
@@ -1408,12 +1451,30 @@ wait_event_trace_attach(int procNumber)
 		}
 		else
 		{
+			Size	alloc_size;
+
 			wait_event_trace_ensure_dsa();
 
-			p = dsa_allocate_extended(trace_dsa, sizeof(WaitEventTraceState),
-									  DSA_ALLOC_ZERO);
+			/*
+			 * Cache the cluster-wide ring size on first allocation in
+			 * this backend.  wait_event_trace_ring_size_kb is
+			 * PGC_POSTMASTER, so by the time any backend reaches
+			 * here, its boot value has been committed by the GUC
+			 * framework.  All rings in the postmaster run share the
+			 * same dimensions.
+			 */
+			if (WaitEventTraceRingSize == 0)
+				WaitEventTraceRingSize =
+					(uint32) wait_event_trace_ring_size_kb * 1024U /
+					(uint32) sizeof(WaitEventTraceRecord);
+
+			alloc_size = offsetof(WaitEventTraceState, records) +
+				(Size) WaitEventTraceRingSize * sizeof(WaitEventTraceRecord);
+
+			p = dsa_allocate_extended(trace_dsa, alloc_size, DSA_ALLOC_ZERO);
 			ts = dsa_get_address(trace_dsa, p);
 			pg_atomic_init_u64(&ts->write_pos, 0);
+			ts->ring_mask = WaitEventTraceRingSize - 1;
 
 			LWLockAcquire(&WaitEventTraceCtl->lock, LW_EXCLUSIVE);
 			/*
@@ -2082,7 +2143,7 @@ pgstat_report_wait_end_timing(int capture_level)
 				 */
 				INJECTION_POINT("wait-event-trace-after-write-pos", NULL);
 
-				rec = &my_wait_event_trace->records[pos & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+				rec = &my_wait_event_trace->records[pos & my_wait_event_trace->ring_mask];
 				seq = (uint32)(pos * 2 + 1);
 
 				rec->seq = seq;
@@ -2352,10 +2413,11 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
  * any deferred dsa_free is performed even on ereport(ERROR).
  *
  * Uses InitMaterializedSRF (materialize-all).  The ring holds up to
- * WAIT_EVENT_TRACE_RING_SIZE (131072) records; full materialization
- * caps the per-call cost at ~4 MB of tuplestore memory, which is
- * acceptable for the use case this SRF is designed for: interactive
- * own-session diagnostics from psql.
+ * WaitEventTraceRingSize records (set at server start from the
+ * wait_event_trace_ring_size_kb GUC; defaults to 131072 = 4 MB);
+ * full materialization caps the per-call cost at the ring size of
+ * tuplestore memory, which is acceptable for the use case this SRF
+ * is designed for: interactive own-session diagnostics from psql.
  *
  * This SRF is NOT the path for cross-backend monitoring tools --
  * cross-backend readers should use pg_get_wait_event_trace for SQL
@@ -2412,8 +2474,12 @@ pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
 		PG_RETURN_VOID();
 
 	/* Read from oldest available to newest */
-	read_start = (write_pos > WAIT_EVENT_TRACE_RING_SIZE)
-		? write_pos - WAIT_EVENT_TRACE_RING_SIZE : 0;
+	{
+		uint64	ring_size = (uint64) ts->ring_mask + 1;
+
+		read_start = (write_pos > ring_size)
+			? write_pos - ring_size : 0;
+	}
 
 	/*
 	 * Mark the iteration in progress so wait_event_trace_release_slot
@@ -2427,7 +2493,7 @@ pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
 	for (i = read_start; i < write_pos; i++)
 	{
 		WaitEventTraceRecord *rec =
-			&ts->records[i & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+			&ts->records[i & ts->ring_mask];
 		Datum		values[6];
 		bool		nulls[6];
 		const char *event_type;
@@ -2683,8 +2749,17 @@ emit_wait_event_trace_for_procnumber(int procNumber, ReturnSetInfo *rsinfo)
 	 * (writing up to (write_pos - read_start) entries) or release
 	 * it unused on an early return.
 	 */
-	valid_records = palloc(sizeof(WetValidRecord) *
-						   WAIT_EVENT_TRACE_RING_SIZE);
+	/*
+	 * Worst-case size = ring size.  Derive it from the GUC on first
+	 * use in this backend; subsequent calls see the cached value.
+	 * The GUC is PGC_POSTMASTER so the value is the same across
+	 * every backend in this postmaster run and never changes.
+	 */
+	if (WaitEventTraceRingSize == 0)
+		WaitEventTraceRingSize =
+			(uint32) wait_event_trace_ring_size_kb * 1024U /
+			(uint32) sizeof(WaitEventTraceRecord);
+	valid_records = palloc(sizeof(WetValidRecord) * WaitEventTraceRingSize);
 
 	LWLockAcquire(&WaitEventTraceCtl->lock, LW_SHARED);
 
@@ -2708,13 +2783,17 @@ emit_wait_event_trace_for_procnumber(int procNumber, ReturnSetInfo *rsinfo)
 	}
 
 	/* Live range: oldest available to newest. */
-	read_start = (write_pos > WAIT_EVENT_TRACE_RING_SIZE)
-		? write_pos - WAIT_EVENT_TRACE_RING_SIZE : 0;
+	{
+		uint64	ring_size = (uint64) ts->ring_mask + 1;
+
+		read_start = (write_pos > ring_size)
+			? write_pos - ring_size : 0;
+	}
 
 	for (i = read_start; i < write_pos; i++)
 	{
 		WaitEventTraceRecord *rec_shared =
-			&ts->records[i & (WAIT_EVENT_TRACE_RING_SIZE - 1)];
+			&ts->records[i & ts->ring_mask];
 		WetValidRecord *out = &valid_records[valid_count];
 		uint32		expected_seq;
 		uint32		seq_before;
