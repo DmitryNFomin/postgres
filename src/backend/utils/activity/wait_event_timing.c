@@ -1111,12 +1111,14 @@ wait_event_trace_ensure_dsa(void)
  * dsm_backend_shutdown() detaches the DSA.
  *
  * Crucially, we do NOT free the ring here.  The ring stays allocated in
- * DSA so that cross-backend consumers (ASH/AWR/10046-style monitoring
- * background workers, future or external) can read the dying backend's
- * final waits -- the original "free at exit" design lost data the
- * instant a worker terminated, which was particularly bad for parallel
- * workers exiting in milliseconds at end-of-parallel-query.  See the
- * lifecycle comment on WaitEventTraceControl for the full design
+ * DSA so that cross-backend consumers -- the in-tree
+ * pg_get_wait_event_trace SRF and any extension following the
+ * snapshot pattern documented on WaitEventTraceControl -- can read
+ * the dying backend's final waits.  The original "free at exit"
+ * design lost data the instant a worker terminated, which was
+ * particularly bad for parallel workers exiting in milliseconds at
+ * end-of-parallel-query.  See the lifecycle comment on
+ * WaitEventTraceControl for the full design
  * rationale and the bounded-memory cost we accept in exchange.
  *
  * The ORPHANED slot is reclaimed in one of two ways:
@@ -2215,9 +2217,11 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
  * own-session diagnostics from psql.
  *
  * This SRF is NOT the path for cross-backend monitoring tools --
- * cross-backend readers (ASH/AWR/10046-style background workers that
- * consume the per-backend trace rings) should NOT call this function
- * via SPI.
+ * cross-backend readers should use pg_get_wait_event_trace for SQL
+ * access, or follow the shared-memory snapshot pattern documented
+ * on WaitEventTraceControl in wait_event_timing.h to consume the
+ * per-backend trace rings directly.  They should NOT call this
+ * function via SPI.
  * It is hard-coded to return only the calling backend's own ring,
  * so a bgworker calling SELECT * FROM pg_backend_wait_event_trace
  * would get only the bgworker's own (typically empty) ring, not the
@@ -2738,8 +2742,8 @@ emit_wait_event_trace_for_procnumber(int procNumber, ReturnSetInfo *rsinfo)
  * ring allocated in DSA in ORPHANED state, and this function reads it
  * until either a new backend takes over the same procNumber or the
  * DBA calls pg_stat_clear_orphaned_wait_event_rings().  External
- * monitoring background workers (ASH/AWR/10046-style readers) follow
- * the same snapshot pattern documented on WaitEventTraceControl in
+ * extensions that need cross-backend access follow the same
+ * snapshot pattern documented on WaitEventTraceControl in
  * wait_event_timing.h; this function serves as both the reference
  * implementation and a DBA-facing diagnostic tool.
  *
@@ -3075,8 +3079,10 @@ pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)
  * Why this exists.  When a backend that had wait_event_capture = trace
  * exits, we deliberately do NOT free its ~4 MB trace ring (see the
  * lifecycle discussion on WaitEventTraceControl): the data must remain
- * readable by cross-backend consumers (ASH/AWR/10046-style monitoring
- * background workers), and an exit-time dsa_free would defeat that.
+ * readable by cross-backend consumers -- the in-tree
+ * pg_get_wait_event_trace SRF and any extension following the
+ * snapshot pattern on WaitEventTraceControl -- and an exit-time
+ * dsa_free would defeat that.
  * The reclaim instead happens lazily in two places:
  *
  *   (a) wait_event_trace_clear_orphan_at_init(): when a new backend

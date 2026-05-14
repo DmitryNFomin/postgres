@@ -361,8 +361,10 @@ typedef struct WaitEventTraceState
  * backend exits we deliberately do NOT free its ring.  Instead we
  * transition the slot to ORPHANED and leave the ring allocated in DSA.
  * That preserves trace data past backend exit so it remains readable by
- * cross-backend consumers (ASH/AWR/10046-style monitoring background
- * workers) -- the original per-backend-ring design lost data the
+ * cross-backend consumers: the in-tree pg_get_wait_event_trace SRF and
+ * any extension that follows the snapshot pattern documented on
+ * WaitEventTraceControl below.  The original per-backend-ring design
+ * lost data the
  * instant a parallel worker (or any short-lived backend) terminated,
  * because the worker's before_shmem_exit callback ran dsa_free before
  * any consumer could observe the final waits.  See "Slot lifecycle and
@@ -414,8 +416,9 @@ typedef enum WaitEventTraceSlotState
  * lifecycle plus admin cleanups).
  *
  * state is pg_atomic_uint32 only for cheap unlocked "is this slot
- * worth visiting" probes (e.g. an ASH reader iterating MaxBackends
- * slots and skipping FREE ones without taking the lock).  Authoritative
+ * worth visiting" probes (e.g. an iterating reader that walks all
+ * MaxBackends slots and skips FREE ones without taking the lock).
+ * Authoritative
  * reads of state-and-ring_ptr together MUST be done under
  * WaitEventTraceCtl->lock in LW_SHARED, paired with the
  * generation-snapshot retry loop above.  Writers always hold the lock
@@ -465,10 +468,10 @@ typedef struct WaitEventTraceSlot
  * older design that called dsa_free in the backend's
  * before_shmem_exit callback.  That older design lost trace data the
  * instant a backend exited, because the data was gone before any
- * cross-backend reader (e.g. an ASH/AWR-style ring reader) could observe
- * it.  This was particularly acute for parallel workers, which exit
- * in milliseconds at end-of-parallel-query; a sampler running at
- * 1 Hz would never see their waits.
+ * cross-backend reader could observe it.  This was particularly
+ * acute for parallel workers, which exit in milliseconds at
+ * end-of-parallel-query; a reader polling at 1 Hz would never
+ * observe their waits before the data was freed.
  *
  * Persisting the ring past backend exit pays a bounded memory cost:
  * up to NUM_WAIT_EVENT_TIMING_SLOTS orphaned rings can simultaneously
@@ -495,9 +498,9 @@ typedef struct WaitEventTraceSlot
  * (parallel workers, autovacuum, walsender, all transient backends
  * preserve their data), DSA's lazy-allocation property is preserved
  * (capture=off pays zero memory), and the cross-backend reader
- * pattern below works for the future ASH/AWR/10046 background worker
- * with no further plumbing.  See review_5.md issue #26 for the
- * design discussion.
+ * pattern below is what pg_get_wait_event_trace uses; extensions
+ * implementing similar tools follow the same pattern with no further
+ * plumbing.  See review_5.md issue #26 for the design discussion.
  *
  * External reader pattern (cross-backend consumers)
  * -------------------------------------------------

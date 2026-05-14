@@ -4128,16 +4128,19 @@ ORDER  BY b.bucket_idx;
   </para>
 
   <para>
-   Cross-backend monitoring tools &mdash; future Active Session
-   History, Automatic Workload Repository, or 10046-style
-   trace-replay background workers that read wait events losslessly
-   from every backend's ring &mdash; should <emphasis>not</emphasis>
-   consume through this view.  The underlying SQL function returns only the
-   calling backend's own ring; a background worker invoking
+   Cross-backend monitoring tools &mdash; extensions and background
+   workers that read wait events losslessly from every backend's
+   ring &mdash; should <emphasis>not</emphasis> consume through this
+   view.  The in-tree cross-backend reader is
+   <function>pg_get_wait_event_trace</function>
+   (see <xref linkend="monitoring-stats-funcs"/>); the underlying
+   per-session SQL function returns only the calling backend's own
+   ring, so a background worker invoking
    <command>SELECT * FROM pg_backend_wait_event_trace</command> via
    SPI would receive only its own (typically empty) ring, not the
-   target backend's data.  Such tools must instead use the
-   shared-memory snapshot pattern documented on
+   target backend's data.  External tools that need cross-backend
+   access without going through SQL use the shared-memory snapshot
+   pattern documented on
    <structname>WaitEventTraceControl</structname> in
    <filename>src/include/utils/wait_event_timing.h</filename>:
    snapshot <structfield>trace_slots[procNumber].generation</structfield>,
@@ -4168,9 +4171,9 @@ ORDER  BY b.bucket_idx;
    procnumbers.  The lifecycle change matters for short-lived
    backends that exit before any monitoring tool has read their
    data: parallel workers in particular exit in milliseconds at
-   end-of-parallel-query, well below typical sampling cadences,
-   and without orphan-persistence their final waits would be
-   lost.  Orphaned rings are reclaimed automatically when a new
+   end-of-parallel-query, well below typical reader polling
+   intervals, and without orphan-persistence their final waits
+   would be lost.  Orphaned rings are reclaimed automatically when a new
    backend takes over the same <literal>procNumber</literal>
    slot, and the DBA can force a sweep at any time via
    <function>pg_stat_clear_orphaned_wait_event_rings</function>.
@@ -6405,10 +6408,10 @@ ORDER  BY b.bucket_idx;
        </para>
        <para>
         This is the canonical cross-backend reader.  External
-        monitoring background workers (ASH/AWR/10046-style ring
-        readers) should follow the same snapshot pattern documented
-        on <structname>WaitEventTraceControl</structname> in
-        <filename>src/include/utils/wait_event_timing.h</filename>;
+        monitoring extensions that need cross-backend access without
+        going through SQL should follow the same snapshot pattern
+        documented on <structname>WaitEventTraceControl</structname>
+        in <filename>src/include/utils/wait_event_timing.h</filename>;
         this function serves as both the reference implementation and
         a DBA-facing diagnostic tool.  The
         <parameter>procnumber</parameter> argument can be obtained
@@ -6524,8 +6527,10 @@ SELECT * FROM pg_get_wait_event_trace(
         When a backend that had <varname>wait_event_capture</varname> =
         <literal>trace</literal> exits, its ~4 MB trace ring is
         intentionally <emphasis>not</emphasis> freed at exit so that
-        cross-backend monitoring tools (ASH/AWR/10046-style background
-        workers) can still read the dying backend's final waits.  The
+        cross-backend consumers
+        (<function>pg_get_wait_event_trace</function> and extensions
+        following the snapshot pattern) can still read the dying
+        backend's final waits.  The
         memory is reclaimed lazily: in the common case, the ring is
         freed automatically when a new backend takes over the same
         <literal>procNumber</literal> slot.  This function is the
