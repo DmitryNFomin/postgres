@@ -410,7 +410,9 @@ typedef struct WaitEventTraceState
  *             or (b) the DBA calls
  *                  pg_stat_clear_orphaned_wait_event_rings()
  *             to release the memory.  Worst-case orphan footprint is
- *             bounded at NUM_WAIT_EVENT_TIMING_SLOTS * 4 MB (one
+ *             bounded at NUM_WAIT_EVENT_TIMING_SLOTS times the
+ *             per-backend ring size set by
+ *             wait_event_trace_ring_size_kb (default 4 MB; one
  *             orphaned ring per procNumber); see WaitEventTraceControl.
  */
 typedef enum WaitEventTraceSlotState
@@ -495,8 +497,12 @@ typedef struct WaitEventTraceSlot
  *
  * Persisting the ring past backend exit pays a bounded memory cost:
  * up to NUM_WAIT_EVENT_TIMING_SLOTS orphaned rings can simultaneously
- * exist, each ~4 MB.  At MaxBackends=100 + auxiliaries that ceiling
- * is ~400 MB; at MaxBackends=1000 it is ~4 GB.  The ceiling is only
+ * exist, each sized by wait_event_trace_ring_size_kb (default 4 MB).
+ * At the default 4 MB and MaxBackends=100 + auxiliaries that ceiling
+ * is ~400 MB; at MaxBackends=1000 it is ~4 GB.  Operators who need
+ * a tighter memory cap can lower wait_event_trace_ring_size_kb at
+ * server start (minimum 8 KB); operators who need longer retention
+ * before the FIFO wrap can raise it (maximum 32 MB).  The ceiling is only
  * reached if every procNumber has been used by a tracing backend and
  * none of those procNumbers has been reused since.  In typical
  * deployments this does not happen:
