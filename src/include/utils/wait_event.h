@@ -13,6 +13,10 @@
 /* enums for wait events */
 #include "utils/wait_event_types.h"
 
+#ifdef USE_WAIT_EVENT_TIMING
+#include "utils/wait_event_timing.h"
+#endif
+
 extern const char *pgstat_get_wait_event(uint32 wait_event_info);
 extern const char *pgstat_get_wait_event_type(uint32 wait_event_info);
 static inline void pgstat_report_wait_start(uint32 wait_event_info);
@@ -21,6 +25,11 @@ extern void pgstat_set_wait_event_storage(uint32 *wait_event_info);
 extern void pgstat_reset_wait_event_storage(void);
 
 extern PGDLLIMPORT uint32 *my_wait_event_info;
+
+#ifdef USE_WAIT_EVENT_TIMING
+extern void pgstat_report_wait_start_timing(uint32 wait_event_info);
+extern void pgstat_report_wait_end_timing(int capture_level);
+#endif
 
 
 /*
@@ -61,6 +70,9 @@ extern char **GetWaitEventCustomNames(uint32 classId, int *nwaitevents);
  *
  *	my_wait_event_info initially points to local memory, making it safe to
  *	call this before MyProc has been initialized.
+ *
+ *	When compiled with --enable-wait-event-timing, also records the start
+ *	timestamp for later duration computation in pgstat_report_wait_end().
  * ----------
  */
 static inline void
@@ -71,17 +83,53 @@ pgstat_report_wait_start(uint32 wait_event_info)
 	 * four-bytes, updates are atomic.
 	 */
 	*(volatile uint32 *) my_wait_event_info = wait_event_info;
+
+#ifdef USE_WAIT_EVENT_TIMING
+	/*
+	 * Minimal inline gate: one global load + predicted-not-taken branch.
+	 * Keeping the gate body out-of-line in pgstat_report_wait_start_timing()
+	 * shrinks the inlined call sites and limits the codegen impact on host
+	 * functions (LWLockAcquire, XLogInsert, etc.) to a few bytes each.
+	 *
+	 * unlikely(): wait_event_capture defaults to OFF and is OFF on the
+	 * vast majority of installations.  The annotation steers the compiler
+	 * to lay out the no-op fall-through as the straight-line hot path.
+	 */
+	if (unlikely(wait_event_capture != WAIT_EVENT_CAPTURE_OFF))
+		pgstat_report_wait_start_timing(wait_event_info);
+#endif
 }
 
 /* ----------
  * pgstat_report_wait_end() -
  *
  *	Called to report end of a wait.
+ *
+ *	When compiled with --enable-wait-event-timing and the GUC is enabled,
+ *	calls the out-of-line pgstat_report_wait_end_timing() to compute the
+ *	wait duration and accumulate statistics.  The body is kept out-of-line
+ *	to reduce I-cache pressure at the many call sites.
  * ----------
  */
 static inline void
 pgstat_report_wait_end(void)
 {
+#ifdef USE_WAIT_EVENT_TIMING
+	/*
+	 * Minimal inline gate.  See pgstat_report_wait_start() for the
+	 * unlikely() rationale.  The load of wait_event_capture is reused
+	 * as the argument to pgstat_report_wait_end_timing(), so the
+	 * out-of-line body does not have to re-load it across the call
+	 * boundary (CSE doesn't cross function calls).
+	 */
+	{
+		int		capture_level = wait_event_capture;
+
+		if (unlikely(capture_level != WAIT_EVENT_CAPTURE_OFF))
+			pgstat_report_wait_end_timing(capture_level);
+	}
+#endif
+
 	/* see pgstat_report_wait_start() */
 	*(volatile uint32 *) my_wait_event_info = 0;
 }

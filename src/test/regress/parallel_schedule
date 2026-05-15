@@ -135,6 +135,12 @@ test: compression compression_lz4 compression_pglz cluster
 # oidjoins is read-only, though, and should run late for best coverage
 test: oidjoins event_trigger
 
+# wait_event_timing creates and drops temp tables to capture trace-ring
+# state across phases (see wet_phase1/wet_phase2 in the .sql file).  Its
+# DDL would be polluted by event_trigger's ddl_command_end trigger if
+# they ran concurrently, so it gets its own scheduling slot rather than
+# sharing event_trigger's parallel group.
+test: wait_event_timing
 
 # event_trigger_login cannot run concurrently with any other tests because
 # on-login event handling could catch connection of a concurrent test.

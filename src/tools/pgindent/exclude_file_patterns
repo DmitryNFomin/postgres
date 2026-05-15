@@ -17,6 +17,7 @@ src/backend/nodes/\w+\.switch\.c$
 # looks worse with pgindent.
 src/backend/utils/activity/pgstat_wait_event\.c$
 src/backend/utils/activity/wait_event_funcs_data\.c$
+src/backend/utils/activity/wait_event_timing_data\.h$
 src/backend/utils/activity/wait_event_types\.h$
 #
 # This confuses pgindent, and it's a derived file anyway.
