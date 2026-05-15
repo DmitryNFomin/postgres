@@ -9110,6 +9110,209 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-wait-event-capture" xreflabel="wait_event_capture">
+      <term><varname>wait_event_capture</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>wait_event_capture</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Controls collection of wait event instrumentation data.  Requires
+        the server to be compiled with
+        <option>--enable-wait-event-timing</option>.  Possible values are
+        <literal>off</literal>, <literal>stats</literal>, and
+        <literal>trace</literal>; each level is a strict superset of the
+        previous one.
+       </para>
+       <para>
+        At <literal>stats</literal>, the server records per-backend wait
+        event statistics (counts, total and average durations, log2
+        histograms) visible in the
+        <link linkend="monitoring-pg-stat-wait-event-timing-view">
+        <structname>pg_stat_wait_event_timing</structname></link> view.
+        Two <function>clock_gettime()</function> calls are added around
+        every wait event transition, costing approximately
+        40&ndash;100&nbsp;ns each on modern hardware.
+       </para>
+       <para>
+        At <literal>trace</literal>, the server additionally records every
+        individual wait event into a per-session ring buffer (~4&nbsp;MB of
+        DSA per backend, allocated lazily on first enable), exposed via the
+        <link linkend="monitoring-pg-backend-wait-event-trace-view">
+        <structname>pg_backend_wait_event_trace</structname></link> view.
+        Each record carries either a wait event or a query-attribution
+        marker; consumers reconstruct which query owns which wait by
+        interleaving the two streams.
+       </para>
+       <para>
+        Two marker families are emitted into the ring:
+        <itemizedlist>
+         <listitem>
+          <para>
+           <literal>ExecStart</literal>/<literal>ExecEnd</literal> markers
+           bracket every executor invocation
+           (<function>ExecutorStart</function>/<function>ExecutorEnd</function>).
+           They are the primary attribution signal: every executable
+           statement, including those run inside parallel workers and
+           pipelined extended-protocol messages, is bracketed.  Emission
+           requires <xref linkend="guc-compute-query-id"/> to produce a
+           non-zero <structfield>query_id</structfield>; otherwise the
+           markers are silently skipped.  They are <emphasis>not</emphasis>
+           gated on <varname>track_activities</varname>.
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           <literal>QueryStart</literal>/<literal>QueryEnd</literal> markers
+           fire at top-level query identifier transitions and at the
+           transition to idle, providing inter-statement boundaries that
+           the executor markers cannot (e.g. the
+           <literal>ClientRead</literal> wait between statements).  They
+           require both <xref linkend="guc-track-activities"/> and
+           <xref linkend="guc-compute-query-id"/> to be enabled.
+          </para>
+         </listitem>
+        </itemizedlist>
+        A <literal>WARNING</literal> is logged at the time
+        <varname>wait_event_capture</varname> is set to <literal>trace</literal>
+        if either prerequisite is missing.
+       </para>
+       <para>
+        The default is <literal>off</literal>.  Only superusers and users
+        with the appropriate <literal>SET</literal> privilege can change
+        this setting.
+       </para>
+       <para>
+        The setting is gated to superuser by default because
+        <literal>trace</literal> mode allocates approximately 4&nbsp;MB
+        of dynamic shared memory per backend that enables it; an
+        unprivileged role enabling trace on every connection in a
+        large pool could consume substantial cluster-wide memory.
+        Read access to the resulting statistics is controlled
+        separately by membership in the
+        <link linkend="predefined-roles"><literal>pg_read_all_stats</literal></link>
+        role (which the <literal>pg_monitor</literal> role inherits),
+        so a monitoring operator can typically read
+        <structname>pg_stat_wait_event_timing</structname> but cannot
+        toggle <varname>wait_event_capture</varname> itself.
+       </para>
+       <para>
+        To delegate the ability to change this setting to a
+        non-superuser role &mdash; for example, the
+        <literal>pg_monitor</literal> role in environments where the
+        cluster owner is not the operator on call &mdash; use the
+        standard PostgreSQL <command>GRANT SET ON PARAMETER</command>
+        mechanism:
+<programlisting>
+GRANT SET ON PARAMETER wait_event_capture TO pg_monitor;
+</programlisting>
+        After this, any role that has the <literal>pg_monitor</literal>
+        role membership can run
+        <command>SET wait_event_capture = stats</command> (or
+        <literal>= trace</literal>) for its own session.  The grant is
+        per-installation policy rather than baked into the GUC, so
+        managed-PostgreSQL environments and self-hosted clusters can
+        choose independently whether monitoring roles should be able to
+        flip this on.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-wait-event-timing-max-tranches" xreflabel="wait_event_timing_max_tranches">
+      <term><varname>wait_event_timing_max_tranches</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>wait_event_timing_max_tranches</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets the maximum number of distinct LWLock tranches whose timing
+        is recorded individually per backend.  PostgreSQL maintains a
+        per-backend hash table that maps each tranche the backend
+        encounters to its histogram bucket; once the table fills, further
+        tranches encountered by that backend are counted against
+        <structfield>lwlock_overflow_count</structfield> in
+        <link linkend="monitoring-pg-stat-wait-event-timing-overflow-view">
+        <structname>pg_stat_wait_event_timing_overflow</structname></link>
+        and not individually timed.  Sized at server start; this
+        parameter has no effect on builds compiled without
+        <option>--enable-wait-event-timing</option>.  The default is
+        <literal>192</literal>; raise it if your installation loads many
+        extensions that register their own LWLock tranches and you
+        observe non-zero
+        <structfield>lwlock_overflow_count</structfield>.
+       </para>
+       <para>
+        The shared-memory cost is per-backend and proportional to this
+        setting.  Each entry is approximately 152&nbsp;bytes (an
+        LWLock-timing histogram), and the slot table that resolves
+        tranche IDs adds another 4&nbsp;bytes per slot, with the slot
+        count rounded up to the next power of two of twice this value.
+        At default 192 entries (512 slots) the per-backend overhead is
+        roughly 31&nbsp;KB; at 512 entries (1024 slots) roughly
+        80&nbsp;KB.  The total cluster-wide cost is paid only when the
+        first backend in the cluster sets
+        <xref linkend="guc-wait-event-capture"/> to a non-<literal>off</literal>
+        value, and remains allocated for the postmaster's lifetime
+        regardless of subsequent GUC changes.  Builds compiled without
+        <option>--enable-wait-event-timing</option> pay zero memory for
+        this setting.
+       </para>
+       <para>
+        Setting can only be changed at server start.  Only superusers
+        and users with the appropriate <literal>SET</literal> privilege
+        can change this setting.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-wait-event-trace-ring-size-kb" xreflabel="wait_event_trace_ring_size_kb">
+      <term><varname>wait_event_trace_ring_size_kb</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>wait_event_trace_ring_size_kb</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Per-backend size, in kilobytes, of the wait-event-trace ring
+        buffer allocated when a session sets
+        <xref linkend="guc-wait-event-capture"/> to
+        <literal>trace</literal>.  Must be a power of two.  Sized at
+        server start (<literal>PGC_POSTMASTER</literal>); all rings in
+        a given postmaster run have the same size.  This parameter has
+        no effect on builds compiled without
+        <option>--enable-wait-event-timing</option>.
+       </para>
+       <para>
+        Each record is 32 bytes, so the record count is the kilobyte
+        value times 32.  The default of <literal>4096</literal> KB
+        (= 131072 records, ~4&nbsp;MB) gives roughly 0.5&ndash;1
+        second of retention at peak wait-event rates of 200K/s.
+        Larger values give longer retention before the FIFO wrap
+        overwrites the oldest records; smaller values reduce
+        per-backend memory at high <varname>max_connections</varname>.
+        Allowed range is <literal>8</literal>&ndash;<literal>32768</literal>
+        KB (256 records to ~1 million records per ring).
+       </para>
+       <para>
+        Worst-case total memory is approximately
+        <varname>max_connections</varname> *
+        <varname>wait_event_trace_ring_size_kb</varname>, allocated
+        lazily from a cluster-wide DSA only as backends enable
+        <varname>wait_event_capture</varname> = <literal>trace</literal>.
+        Memory is reclaimed when backends exit and their slots are
+        recycled, or explicitly via
+        <function>pg_stat_clear_orphaned_wait_event_rings</function>.
+       </para>
+       <para>
+        Setting can only be changed at server start.  Only superusers
+        and users with the appropriate <literal>SET</literal> privilege
+        can change this setting.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-track-functions" xreflabel="track_functions">
       <term><varname>track_functions</varname> (<type>enum</type>)
       <indexterm>
