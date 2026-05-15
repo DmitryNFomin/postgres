@@ -514,12 +514,19 @@ task:
       # code not being exercised much. Thus specify a very small segment size
       # here. Use a non-power-of-two segment size, given we currently allow
       # that.
+      # --enable-wait-event-timing is tacked on to this entry so the timing
+      # build path (including the expected output at
+      # src/test/regress/expected/wait_event_timing.out) actually gets
+      # exercised by CI; without it, only the stub alt output
+      # wait_event_timing_1.out is consumed and any regression in the
+      # timing-enabled code is invisible to upstream.
       configure_script: |
         su postgres <<-EOF
           set -e
           ./configure \
             --enable-cassert --enable-injection-points --enable-debug \
             --enable-tap-tests --enable-nls \
+            --enable-wait-event-timing \
             --with-segsize-blocks=6 \
             --with-libnuma \
             --with-liburing \
