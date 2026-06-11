@@ -1,9 +1,10 @@
 --
 -- WAIT_EVENT_TIMING
 --
--- Exercises the wait_event_capture = stats instrumentation: the GUC, the
--- pg_stat_get_wait_event_timing() SRF, the pg_stat_wait_event_timing view,
--- and the pg_wait_event_timing_histogram_buckets taxonomy view.
+-- Exercises the wait_event_capture instrumentation: the GUC, the stats
+-- surface (pg_stat_get_wait_event_timing(), the pg_stat_wait_event_timing
+-- and histogram-buckets views, overflow counters, resets), and the trace
+-- surface (the per-session ring, its readers, and the query markers).
 --
 -- Two expected outputs are maintained:
 --   wait_event_timing.out    -- --enable-wait-event-timing builds

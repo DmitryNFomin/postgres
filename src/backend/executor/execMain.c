@@ -57,7 +57,6 @@
 #include "parser/parse_relation.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
-#include "utils/wait_event_timing.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/backend_status.h"
@@ -65,6 +64,7 @@
 #include "utils/partcache.h"
 #include "utils/rls.h"
 #include "utils/snapmgr.h"
+#include "utils/wait_event_timing.h"
 
 
 /* Hooks for plugins to get control in ExecutorStart/Run/Finish/End */

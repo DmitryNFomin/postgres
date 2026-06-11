@@ -12737,7 +12737,7 @@
   prosrc => 'pg_get_backend_wait_event_trace' },
 
 { oid => '9962',
-  descr => 'wait event trace ring for the given procnumber slot (OWNED or ORPHANED)',
+  descr => 'wait event trace ring for the given procnumber slot, live or post-mortem',
   proname => 'pg_get_wait_event_trace', prorows => '1000',
   proretset => 't', provolatile => 'v', proparallel => 'r',
   prorettype => 'record', proargtypes => 'int4',

@@ -3737,7 +3737,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    The <structname>pg_stat_wait_event_timing</structname> view contains one
    row for each combination of backend and wait event that has a non-zero
    call count.  It shows accumulated timing statistics collected when
-   <xref linkend="guc-wait-event-capture"/> is set to <literal>stats</literal>.  Requires the server to be compiled with
+   <xref linkend="guc-wait-event-capture"/> is set to <literal>stats</literal>
+   or <literal>trace</literal>.  Requires the server to be compiled with
    <option>--enable-wait-event-timing</option>.
   </para>
 
@@ -3965,7 +3966,7 @@ ORDER  BY b.bucket_idx;
       <para>
        Short human-readable label for the bin (e.g.
        <literal>&lt;1us</literal>, <literal>1-2us</literal>,
-       <literal>&gt;=16ms</literal>), expressed on the approximate
+       <literal>&gt;=1024s</literal>), expressed on the approximate
        decimal-microsecond grid the bin edges are aligned to.
       </para></entry>
      </row>
@@ -4111,10 +4112,10 @@ ORDER  BY b.bucket_idx;
    <xref linkend="guc-wait-event-capture"/> for the gating rules of
    each marker family.
    Requires <xref linkend="guc-wait-event-capture"/> to be set to
-   <literal>trace</literal>.  The ring buffer holds up to
-   <xref linkend="guc-wait-event-trace-ring-size-kb"/> kilobytes of
-   records (default 4096 KB = 131072 records of 32 bytes each);
-   older records are overwritten in FIFO order.  The view is session-local
+   <literal>trace</literal>.  The ring buffer is sized by
+   <xref linkend="guc-wait-event-trace-ring-size"/> (default 4&nbsp;MB =
+   131072 records of 32 bytes each); older records are overwritten in
+   FIFO order.  The view is session-local
    and analogous in scope to
    <link linkend="view-pg-backend-memory-contexts">
    <structname>pg_backend_memory_contexts</structname></link>; querying it
@@ -4129,7 +4130,7 @@ ORDER  BY b.bucket_idx;
    session's trace from <application>psql</application> while
    investigating wait-event behaviour.  The view materialises up to
    one ring's worth of records (default ~4&nbsp;MB, controlled by
-   <xref linkend="guc-wait-event-trace-ring-size-kb"/>) into a
+   <xref linkend="guc-wait-event-trace-ring-size"/>) into a
    tuplestore on each call, which is bounded and acceptable for that
    use; for narrow result sets, append
    <literal>ORDER BY seq DESC LIMIT <replaceable>N</replaceable></literal>
@@ -4202,9 +4203,10 @@ ORDER  BY b.bucket_idx;
    executor markers are unavailable, <literal>QueryStart</literal>); if
    both have been overwritten, events before the next visible marker are
    unattributed.  Consumers should poll the ring buffer before it wraps
-   and can use <structfield>st_query_id</structfield> from
-   <structname>PgBackendStatus</structname> as a fallback for the current
-   query context.
+   and can use the <structfield>query_id</structfield> column of
+   <link linkend="monitoring-pg-stat-activity-view">
+   <structname>pg_stat_activity</structname></link> as a fallback for the
+   current query context.
   </para>
 
   <para>
@@ -4241,7 +4243,10 @@ ORDER  BY b.bucket_idx;
    durations rather than a single subtraction.  Consumers that just want
    "how long did this query take in the executor" should use the
    <literal>ExecStart</literal>/<literal>ExecEnd</literal> pair, which
-   fires exactly once per statement regardless of protocol.
+   brackets each executor invocation regardless of protocol.  (Statements
+   that invoke the executor recursively &mdash; for example via
+   <application>PL/pgSQL</application> or other server-side code &mdash;
+   produce one pair per invocation.)
   </para>
 
   <table id="pg-backend-wait-event-trace-view" xreflabel="pg_backend_wait_event_trace">

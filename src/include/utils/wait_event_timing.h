@@ -52,7 +52,7 @@ typedef enum WaitEventCaptureLevel
 	WAIT_EVENT_CAPTURE_OFF = 0,
 	WAIT_EVENT_CAPTURE_STATS,
 	WAIT_EVENT_CAPTURE_TRACE,
-}			WaitEventCaptureLevel;
+} WaitEventCaptureLevel;
 
 /*
  * Pin the enum ordering at compile time so code that compares with >= keeps
@@ -93,7 +93,7 @@ typedef struct WaitEventTimingEntry
 	int64		total_ns;		/* total wait duration in nanoseconds */
 	int64		max_ns;			/* longest single wait in nanoseconds */
 	int64		histogram[WAIT_EVENT_TIMING_HISTOGRAM_BUCKETS];
-}			WaitEventTimingEntry;
+} WaitEventTimingEntry;
 
 /*
  * Sentinel marking an empty LWLock-hash slot.  We reserve the top of the
@@ -110,7 +110,7 @@ typedef struct LWLockTimingHashEntry
 {
 	uint16		tranche_id;		/* LWLOCK_TIMING_EMPTY_SLOT marks empty */
 	uint16		dense_idx;		/* index into lwlock_events[] */
-}			LWLockTimingHashEntry;
+} LWLockTimingHashEntry;
 
 /*
  * Header for the per-backend LWLock-timing hash.  The slot table and the
@@ -124,7 +124,7 @@ typedef struct LWLockTimingHash
 	int			num_used;		/* count of occupied entries */
 	int			hash_size;		/* slot-table size (power of two); immutable */
 	int			max_entries;	/* cap on distinct tranches; immutable */
-}			LWLockTimingHash;
+} LWLockTimingHash;
 
 /* Declaration of the GUC (see guc_parameters.dat). */
 extern PGDLLIMPORT int wait_event_timing_max_tranches;
@@ -147,11 +147,11 @@ extern PGDLLIMPORT int wait_event_timing_max_tranches;
 typedef struct WaitEventTimingState
 {
 	/*
-	 * Generation counter for cross-backend reset requests.  Bumped
-	 * atomically by pg_stat_reset_wait_event_timing(target); the owning
-	 * backend notices the change at its next wait_end and clears its own
-	 * counters.  This keeps the hot path lock-free: only the owning backend
-	 * ever writes its statistics, so there is no writer/resetter race.
+	 * Generation counter for cross-backend reset requests.  Bumped atomically
+	 * by pg_stat_reset_wait_event_timing(target); the owning backend notices
+	 * the change at its next wait_end and clears its own counters.  This
+	 * keeps the hot path lock-free: only the owning backend ever writes its
+	 * statistics, so there is no writer/resetter race.
 	 */
 	pg_atomic_uint32 reset_generation;
 
@@ -176,14 +176,14 @@ typedef struct WaitEventTimingState
 
 	/*
 	 * Count of LWLock events dropped because the LWLock-timing hash reached
-	 * its cap (wait_event_timing_max_tranches).  Written here; a later
-	 * commit in the series exposes it via SQL.
+	 * its cap (wait_event_timing_max_tranches).  Exposed via
+	 * pg_stat_wait_event_timing_overflow.
 	 */
 	int64		lwlock_overflow_count;
 
 	/* Count of events dropped because the class index was out of range. */
 	int64		flat_overflow_count;
-}			WaitEventTimingState;
+} WaitEventTimingState;
 
 /* GUC variables (see guc_parameters.dat). */
 extern PGDLLIMPORT int wait_event_capture;
@@ -198,9 +198,10 @@ extern PGDLLIMPORT WaitEventTimingState *my_wait_event_timing;
  */
 extern PGDLLIMPORT const ShmemCallbacks WaitEventTimingShmemCallbacks;
 
-/* Called from InitProcess()/InitAuxiliaryProcess() to point
- * my_wait_event_timing at this backend's slot, and from ProcKill() to
- * clear it. */
+/*
+ * Called from InitProcess()/InitAuxiliaryProcess() to set up this backend's
+ * timing/trace bookkeeping, and from ProcKill() to clear it.
+ */
 extern void pgstat_set_wait_event_timing_storage(int procNumber);
 extern void pgstat_reset_wait_event_timing_storage(void);
 
@@ -210,7 +211,8 @@ extern void pgstat_reset_wait_event_timing_storage(void);
  *
  * In addition to the STATS aggregates, every completed wait (and a set of
  * query-attribution markers) is pushed into a per-session ring buffer --
- * a 10046-style trace.  The ring is allocated lazily in DSA on first use,
+ * one record per completed wait.  The ring is allocated lazily in DSA on
+ * first use,
  * so only sessions that enable trace pay the per-ring memory cost.  External
  * tools read a session's ring via pg_get_backend_wait_event_trace() (own
  * session) or pg_get_wait_event_trace(procnumber) (cross-backend).
@@ -219,7 +221,7 @@ extern void pgstat_reset_wait_event_timing_storage(void);
  * START/END markers delimit which wait events belong to which query_id.
  *
  * The ring size is set cluster-wide at server start by the
- * wait_event_trace_ring_size_kb GUC (PGC_POSTMASTER, default 4 MB).  It
+ * wait_event_trace_ring_size GUC (PGC_POSTMASTER, default 4 MB).  It
  * MUST be a power of two: the writer indexes the ring as (pos & ring_mask).
  * ----------------------------------------------------------------------
  */
@@ -245,19 +247,19 @@ typedef struct WaitEventTraceRecord
 	int64		timestamp_ns;	/* monotonic clock */
 	union
 	{
-		struct						/* record_type = TRACE_WAIT_EVENT */
+		struct					/* record_type = TRACE_WAIT_EVENT */
 		{
 			uint32		event;	/* wait_event_info */
 			uint32		pad2;
 			int64		duration_ns;
 		}			wait;
-		struct						/* QUERY_START/END or EXEC_START/END */
+		struct					/* QUERY_START/END or EXEC_START/END */
 		{
 			int64		query_id;
 			int64		pad2;
 		}			query;
 	}			data;
-}			WaitEventTraceRecord;	/* 32 bytes */
+} WaitEventTraceRecord;			/* 32 bytes */
 
 /*
  * The seqlock wrap-safety argument and the mask-index math both rely on a
@@ -268,17 +270,17 @@ StaticAssertDecl(sizeof(WaitEventTraceRecord) == 32,
 
 /*
  * Per-backend trace ring header followed by the records array.  records[]
- * is variably sized at allocation time (wait_event_trace_ring_size_kb
+ * is variably sized at allocation time (wait_event_trace_ring_size
  * decides the row count).  write_pos and ring_mask share a cache line so
  * the hot-path index calculation touches one line.
  */
 typedef struct WaitEventTraceState
 {
-	pg_atomic_uint64 write_pos;	/* monotonically increasing, wraps via mask */
+	pg_atomic_uint64 write_pos; /* monotonically increasing, wraps via mask */
 	uint32		ring_mask;		/* ring_size - 1; ring_size is a power of two */
 	uint32		ring_size_pad;	/* keep the records[] slab 16-byte aligned */
 	WaitEventTraceRecord records[FLEXIBLE_ARRAY_MEMBER];
-}			WaitEventTraceState;
+} WaitEventTraceState;
 
 /*
  * Per-procNumber trace-ring slot lifecycle.  Decoupled from backend
@@ -297,7 +299,7 @@ typedef enum WaitEventTraceSlotState
 	WAIT_EVENT_TRACE_SLOT_FREE = 0,
 	WAIT_EVENT_TRACE_SLOT_OWNED,
 	WAIT_EVENT_TRACE_SLOT_ORPHANED,
-}			WaitEventTraceSlotState;
+} WaitEventTraceSlotState;
 
 /*
  * Per-procNumber slot.  generation is bumped on every owner transition;
@@ -314,7 +316,7 @@ typedef struct WaitEventTraceSlot
 	uint32		pad;			/* keep ring_ptr 8-aligned */
 	dsa_pointer ring_ptr;		/* InvalidDsaPointer when FREE; else the
 								 * WaitEventTraceState chunk */
-}			WaitEventTraceSlot;
+} WaitEventTraceSlot;
 
 /*
  * Control struct in fixed shared memory.  trace_slots[] is indexed by
@@ -342,21 +344,25 @@ typedef struct WaitEventTraceControl
 	dsa_handle	trace_dsa_handle;	/* DSA_HANDLE_INVALID until first use */
 	LWLock		lock;			/* protects DSA creation and slot transitions */
 	WaitEventTraceSlot trace_slots[FLEXIBLE_ARRAY_MEMBER];	/* per procNumber */
-}			WaitEventTraceControl;
+} WaitEventTraceControl;
 
-/* Trace GUC + derived ring size (see guc_parameters.dat). */
-extern PGDLLIMPORT int wait_event_trace_ring_size_kb;
+/* Trace GUC and the records-per-ring value derived from it at startup. */
+extern PGDLLIMPORT int wait_event_trace_ring_size;
 extern PGDLLIMPORT uint32 WaitEventTraceRingSize;
 
 /* This backend's procNumber for the trace ring, or -1 if not set. */
 extern PGDLLIMPORT int my_trace_proc_number;
 
-/* Trace control shmem (registered via subsystemlist.h; no-op stub when the
- * feature is compiled out). */
+/*
+ * Trace control shmem -- registered via subsystemlist.h; a no-op stub when
+ * the feature is compiled out.
+ */
 extern PGDLLIMPORT const ShmemCallbacks WaitEventTraceControlShmemCallbacks;
 
-/* Lazy DSA-based trace ring allocation (called on first trace write and at
- * backend startup when capture = trace was set via config). */
+/*
+ * Lazy DSA-based trace ring allocation -- called on first trace write and
+ * at backend startup when capture = trace was set via configuration.
+ */
 extern void wait_event_trace_attach(int procNumber);
 
 /* Query-attribution markers (defined in wait_event_timing.c). */

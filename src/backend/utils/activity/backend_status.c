@@ -22,9 +22,9 @@
 #include "storage/shmem.h"
 #include "storage/subsystems.h"
 #include "utils/ascii.h"
-#include "utils/wait_event_timing.h"
 #include "utils/guc.h"			/* for application_name */
 #include "utils/memutils.h"
+#include "utils/wait_event_timing.h"
 
 
 /* ----------

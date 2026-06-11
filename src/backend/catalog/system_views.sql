@@ -1632,7 +1632,8 @@ CREATE VIEW pg_stat_wait_event_timing_overflow AS
 REVOKE ALL ON pg_stat_wait_event_timing_overflow FROM PUBLIC;
 GRANT SELECT ON pg_stat_wait_event_timing_overflow TO pg_read_all_stats;
 
--- Per-session 10046-style wait event trace ring (wait_event_capture = trace).
+-- Per-session wait event trace ring, one record per completed wait
+-- (wait_event_capture = trace).
 -- Reading a session's trace exposes its query_id and wait sequence, which can
 -- leak across SECURITY DEFINER call chains, so the view AND both underlying
 -- SRFs are locked to pg_read_all_stats.
@@ -1654,3 +1655,8 @@ GRANT EXECUTE ON FUNCTION pg_get_backend_wait_event_trace() TO pg_read_all_stats
 -- Cross-backend reader, keyed by procnumber (reads OWNED and ORPHANED slots).
 REVOKE EXECUTE ON FUNCTION pg_get_wait_event_trace(int4) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pg_get_wait_event_trace(int4) TO pg_read_all_stats;
+-- Cluster-scope operations: revoked from PUBLIC (administrators can
+-- delegate with GRANT EXECUTE); not granted to pg_read_all_stats because
+-- they mutate state rather than read it.
+REVOKE EXECUTE ON FUNCTION pg_stat_reset_wait_event_timing_all() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_stat_clear_orphaned_wait_event_rings() FROM PUBLIC;

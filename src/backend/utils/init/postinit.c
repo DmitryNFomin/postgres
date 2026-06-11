@@ -1246,7 +1246,11 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	process_settings(MyDatabaseId, GetSessionUserId());
 
 #ifdef USE_WAIT_EVENT_TIMING
-	/* Attach trace ring if wait_event_capture = trace was set via config/db/role settings */
+
+	/*
+	 * Attach trace ring if wait_event_capture = trace was set via
+	 * config/db/role settings
+	 */
 	if (wait_event_capture == WAIT_EVENT_CAPTURE_TRACE && my_trace_proc_number >= 0)
 		wait_event_trace_attach(my_trace_proc_number);
 #endif

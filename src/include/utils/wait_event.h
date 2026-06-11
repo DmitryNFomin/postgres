@@ -85,6 +85,7 @@ pgstat_report_wait_start(uint32 wait_event_info)
 	*(volatile uint32 *) my_wait_event_info = wait_event_info;
 
 #ifdef USE_WAIT_EVENT_TIMING
+
 	/*
 	 * Minimal inline gate: one global load and a branch.  The body --
 	 * lazy/eager slot resolution, INSTR_TIME read, current-event write --
@@ -92,9 +93,9 @@ pgstat_report_wait_start(uint32 wait_event_info)
 	 * inlined call sites (LWLockAcquire, XLogInsert, ...) stay compact and
 	 * the off-mode codegen impact is a load + test per site.
 	 *
-	 * No unlikely(): wait_event_capture is monomorphic for long stretches,
-	 * so the dynamic branch predictor handles it perfectly with or without
-	 * the hint, and a hint would point the wrong way once capture is on.
+	 * No unlikely(): wait_event_capture is monomorphic for long stretches, so
+	 * the dynamic branch predictor handles it perfectly with or without the
+	 * hint, and a hint would point the wrong way once capture is on.
 	 */
 	if (wait_event_capture != WAIT_EVENT_CAPTURE_OFF)
 		pgstat_report_wait_start_timing(wait_event_info);
@@ -117,9 +118,9 @@ pgstat_report_wait_end(void)
 #ifdef USE_WAIT_EVENT_TIMING
 	/*
 	 * The load of wait_event_capture is reused as the argument to
-	 * pgstat_report_wait_end_timing(), so the out-of-line body does not
-	 * have to re-load it across the call boundary (CSE doesn't cross
-	 * function calls).  See pgstat_report_wait_start() for the no-unlikely()
+	 * pgstat_report_wait_end_timing(), so the out-of-line body does not have
+	 * to re-load it across the call boundary (CSE doesn't cross function
+	 * calls).  See pgstat_report_wait_start() for the no-unlikely()
 	 * rationale.
 	 */
 	{

@@ -9145,7 +9145,7 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         <structname>pg_backend_wait_event_trace</structname></link> view.
         The ring is allocated lazily from dynamic shared memory on first
         use (default 4&nbsp;MB per backend; see
-        <xref linkend="guc-wait-event-trace-ring-size-kb"/>), so only
+        <xref linkend="guc-wait-event-trace-ring-size"/>), so only
         sessions that enable trace pay the per-ring memory cost.  Query
         attribution &mdash; matching each wait to the query that incurred
         it &mdash; requires both <xref linkend="guc-track-activities"/> and
@@ -9193,10 +9193,10 @@ GRANT SET ON PARAMETER wait_event_capture TO pg_monitor;
       </listitem>
      </varlistentry>
 
-     <varlistentry id="guc-wait-event-trace-ring-size-kb" xreflabel="wait_event_trace_ring_size_kb">
-      <term><varname>wait_event_trace_ring_size_kb</varname> (<type>integer</type>)
+     <varlistentry id="guc-wait-event-trace-ring-size" xreflabel="wait_event_trace_ring_size">
+      <term><varname>wait_event_trace_ring_size</varname> (<type>integer</type>)
       <indexterm>
-       <primary><varname>wait_event_trace_ring_size_kb</varname> configuration parameter</primary>
+       <primary><varname>wait_event_trace_ring_size</varname> configuration parameter</primary>
       </indexterm>
       </term>
       <listitem>
