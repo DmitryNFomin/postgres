@@ -403,6 +403,19 @@ static bool wait_event_trace_release_pending = false;
 static bool wait_event_trace_writes_disabled = false;
 
 /*
+ * Re-entrancy guard for the trace-record writer in
+ * pgstat_report_wait_end_timing(): wait events emitted while a trace
+ * record is mid-write are not themselves ring-recorded.  In production the
+ * record write is a handful of plain stores and cannot wait, so this never
+ * fires; it exists for the injection point inside the writer, whose wait
+ * machinery emits nested wait events that would otherwise recurse into the
+ * writer (and, by re-running the injection point, self-deadlock on locks
+ * the outer invocation holds).  Per-backend, single-threaded -- a plain
+ * bool suffices.
+ */
+static bool wait_event_trace_in_write = false;
+
+/*
  * Forward declarations for trace functions referenced before their
  * definitions (the storage/assign hooks call them; the bodies are in the
  * trace machinery section below).
@@ -1934,7 +1947,8 @@ pgstat_report_wait_end_timing(int capture_level)
 
 		/* Trace level: push the completed wait into the per-session ring. */
 		if (capture_level == WAIT_EVENT_CAPTURE_TRACE &&
-			!wait_event_trace_writes_disabled)
+			!wait_event_trace_writes_disabled &&
+			!wait_event_trace_in_write)
 		{
 			/*
 			 * Lazy-attach the ring on first use here (not in the assign hook,
@@ -1958,6 +1972,20 @@ pgstat_report_wait_end_timing(int capture_level)
 				uint64		pos = pg_atomic_read_u64(&my_wait_event_trace->write_pos);
 				WaitEventTraceRecord *rec;
 				uint32		seq;
+
+				/*
+				 * Wait events emitted while a trace record is being written
+				 * must not themselves be ring-recorded (the gate above): the
+				 * record write is plain stores and cannot wait, but the
+				 * injection point below can, and the wait machinery it runs
+				 * (DSM registry lookup, condition-variable sleep) emits wait
+				 * events whose wait_end would recurse into this block --
+				 * re-running the injection point and self-deadlocking on
+				 * locks the outer invocation still holds.  Costs one
+				 * process-local store each way; nested waits still
+				 * accumulate in the stats above.
+				 */
+				wait_event_trace_in_write = true;
 
 				pg_atomic_write_u64(&my_wait_event_trace->write_pos, pos + 1);
 
@@ -1987,6 +2015,8 @@ pgstat_report_wait_end_timing(int capture_level)
 				pg_write_barrier(); /* payload stores must land before
 									 * seq=even */
 				rec->seq = seq + 1;
+
+				wait_event_trace_in_write = false;
 			}
 		}
 
