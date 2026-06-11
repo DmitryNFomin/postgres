@@ -78,6 +78,7 @@
 #include "tcop/tcopprot.h"
 #include "tcop/utility.h"
 #include "utils/guc_hooks.h"
+#include "utils/wait_event_timing.h"
 #include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -1423,6 +1424,17 @@ exec_parse_message(const char *query_string,	/* string to execute */
 	 */
 	debug_query_string = query_string;
 
+	/*
+	 * In pipelined extended protocol, a Parse can arrive while the previous
+	 * query's st_query_id is still set and st_state is still RUNNING (no
+	 * Sync->idle between queries).  Flush the prior id with force=true so the
+	 * QUERY_END marker fires before pgstat_report_activity below zeros
+	 * st_query_id.  Skip when st_state != RUNNING: coming from idle means
+	 * send_ready_for_query already emitted the QUERY_END.
+	 */
+	if (wait_event_capture == WAIT_EVENT_CAPTURE_TRACE &&
+		MyBEEntry != NULL && MyBEEntry->st_state == STATE_RUNNING)
+		pgstat_report_query_id(0, true);
 	pgstat_report_activity(STATE_RUNNING, query_string);
 
 	set_ps_display("PARSE");
@@ -1692,6 +1704,12 @@ exec_bind_message(StringInfo input_message)
 	 */
 	debug_query_string = psrc->query_string;
 
+	/* See exec_parse_message: flush the prior query_id's QUERY_END before
+	 * pgstat_report_activity zeros it; the state gate avoids a duplicate
+	 * QUERY_END right after a Sync->idle transition. */
+	if (wait_event_capture == WAIT_EVENT_CAPTURE_TRACE &&
+		MyBEEntry != NULL && MyBEEntry->st_state == STATE_RUNNING)
+		pgstat_report_query_id(0, true);
 	pgstat_report_activity(STATE_RUNNING, psrc->query_string);
 
 	foreach(lc, psrc->query_list)
@@ -2183,6 +2201,12 @@ exec_execute_message(const char *portal_name, long max_rows)
 	 */
 	debug_query_string = sourceText;
 
+	/* See exec_parse_message: flush the prior query_id's QUERY_END before
+	 * pgstat_report_activity zeros it; the state gate avoids a duplicate
+	 * QUERY_END right after a Sync->idle transition. */
+	if (wait_event_capture == WAIT_EVENT_CAPTURE_TRACE &&
+		MyBEEntry != NULL && MyBEEntry->st_state == STATE_RUNNING)
+		pgstat_report_query_id(0, true);
 	pgstat_report_activity(STATE_RUNNING, sourceText);
 
 	foreach(lc, portal->stmts)
@@ -4654,6 +4678,17 @@ PostgresMain(const char *dbname, const char *username)
 		 */
 		if (send_ready_for_query)
 		{
+			/*
+			 * Emit QUERY_END before going idle so idle waits (ClientRead etc.)
+			 * are not attributed to the finished query.
+			 */
+			{
+				volatile PgBackendStatus *beentry = MyBEEntry;
+
+				if (beentry != NULL && beentry->st_query_id != 0)
+					wait_event_trace_query_end(beentry->st_query_id);
+			}
+
 			if (IsAbortedTransactionBlockState())
 			{
 				set_ps_display("idle in transaction (aborted)");

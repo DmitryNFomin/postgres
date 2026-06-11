@@ -235,6 +235,7 @@ wait_event_trace_exec_end(int64 query_id)
 #include "catalog/pg_type_d.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "nodes/queryjumble.h"
 #include "port/pg_bitutils.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
@@ -979,6 +980,23 @@ assign_wait_event_capture(int newval, void *extra)
 	 */
 	if (newval != WAIT_EVENT_CAPTURE_TRACE && my_wait_event_trace != NULL)
 		wait_event_trace_release_slot(my_trace_proc_number);
+
+	/*
+	 * Trace-level query attribution needs a non-zero query_id (from
+	 * compute_query_id) and the activity reporting that drives the markers
+	 * (track_activities).  Warn -- but never error -- if either is missing;
+	 * assign hooks must not ereport(ERROR).  Trace still records wait events;
+	 * only the query markers are affected.
+	 */
+	if (newval == WAIT_EVENT_CAPTURE_TRACE && !pgstat_track_activities)
+		ereport(WARNING,
+				(errmsg("wait_event_capture = trace query attribution requires track_activities to be enabled")));
+
+	if (newval == WAIT_EVENT_CAPTURE_TRACE &&
+		compute_query_id == COMPUTE_QUERY_ID_OFF)
+		ereport(WARNING,
+				(errmsg("wait_event_capture = trace query attribution requires compute_query_id to be enabled"),
+				 errhint("Set compute_query_id to \"on\" or \"auto\", or load an extension that enables it (e.g. pg_stat_statements).")));
 }
 
 /* ================= Trace-level ring machinery ================= */
