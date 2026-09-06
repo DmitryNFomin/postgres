@@ -1,0 +1,7 @@
+CREATE EXTENSION test_wait_primitive;
+
+SELECT test_wait_primitive_latch_set(1000) > 0 AS positive;
+SELECT test_wait_primitive_latch_timeout(1000) > 0 AS positive;
+SELECT test_wait_primitive_file_read(1000) > 0 AS positive;
+SELECT test_wait_primitive_usleep0(1000) > 0 AS positive;
+SELECT test_wait_primitive_report_only(1000) > 0 AS positive;
