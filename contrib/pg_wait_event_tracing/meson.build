@@ -1,0 +1,23 @@
+# Copyright (c) 2026, PostgreSQL Global Development Group
+
+pg_wait_event_tracing_sources = files(
+  'pg_wait_event_tracing.c',
+)
+
+if host_system == 'windows'
+  pg_wait_event_tracing_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
+    '--NAME', 'pg_wait_event_tracing',
+    '--FILEDESC', 'pg_wait_event_tracing - statistics and trace collection for explicitly instrumented wait events',])
+endif
+
+pg_wait_event_tracing = shared_module('pg_wait_event_tracing',
+  pg_wait_event_tracing_sources,
+  kwargs: contrib_mod_args,
+)
+contrib_targets += pg_wait_event_tracing
+
+install_data(
+  'pg_wait_event_tracing--1.0.sql',
+  'pg_wait_event_tracing.control',
+  kwargs: contrib_data_args,
+)
