@@ -7,6 +7,7 @@
 -- cross-backend, including its authorization), and the per-class capacity
 -- table.  The trace level is a separate patch and is not exercised here.
 --
+CREATE EXTENSION pg_wait_event_tracing;
 -- Default is off.
 SHOW pg_wait_event_tracing.capture;
  pg_wait_event_tracing.capture 
