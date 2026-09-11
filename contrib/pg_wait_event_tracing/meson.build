@@ -21,3 +21,18 @@ install_data(
   'pg_wait_event_tracing.control',
   kwargs: contrib_data_args,
 )
+
+tests += {
+  'name': 'pg_wait_event_tracing',
+  'sd': meson.current_source_dir(),
+  'bd': meson.current_build_dir(),
+  'regress': {
+    'sql': [
+      'pg_wait_event_tracing',
+    ],
+    'regress_args': ['--temp-config', files('pg_wait_event_tracing.conf')],
+    # Needs shared_preload_libraries, which typical runningcheck users do
+    # not have.
+    'runningcheck': false,
+  },
+}
