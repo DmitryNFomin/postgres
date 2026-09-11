@@ -69,6 +69,17 @@ cmp_ok($after_s1 - $baseline, '<', 4 * $MiB,
 # top of the first.
 my $s2 = $node->background_psql('postgres');
 $s2->query_safe("SET pg_wait_event_tracing.capture = stats;");
+# Attach through the next statement's parse analysis, so this
+# measurement does not depend on whether the SET itself attached,
+# and confirm the session really is collecting before measuring.
+$s2->query_safe("SELECT pg_sleep(0.01);");
+my $s2_pid = $s2->query_safe("SELECT pg_backend_pid();");
+is( $node->safe_psql(
+		'postgres',
+		"SELECT count(*) > 0 FROM pg_stat_wait_event_timing "
+		  . "WHERE pid = $s2_pid;"),
+	't',
+	"session s2 is collecting before its footprint is measured");
 
 my $after_s2 = pwet_footprint();
 cmp_ok($after_s2 - $after_s1, '<', 512 * $KiB,
@@ -89,6 +100,17 @@ is($s1_rows, '0',
 # than growing the DSA area again.
 my $s3 = $node->background_psql('postgres');
 $s3->query_safe("SET pg_wait_event_tracing.capture = stats;");
+# Attach through the next statement's parse analysis, so this
+# measurement does not depend on whether the SET itself attached,
+# and confirm the session really is collecting before measuring.
+$s3->query_safe("SELECT pg_sleep(0.01);");
+my $s3_pid = $s3->query_safe("SELECT pg_backend_pid();");
+is( $node->safe_psql(
+		'postgres',
+		"SELECT count(*) > 0 FROM pg_stat_wait_event_timing "
+		  . "WHERE pid = $s3_pid;"),
+	't',
+	"session s3 is collecting before its footprint is measured");
 
 my $after_s3 = pwet_footprint();
 cmp_ok($after_s3, '<=', $after_s2,
