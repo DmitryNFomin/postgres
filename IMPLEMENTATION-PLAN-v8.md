@@ -457,7 +457,7 @@ happens on the fork's CI or on a host the owner provides.
 |---|---|---|---|
 | WP1 | 0003 test_wait_hook module + regress tests — **DONE 2026-09-11**: branch `wet-v8-wp1` commit 1156a3806cf (after review fix: ring filtered to PgSleep, single-wait helper instead of pg_sleep); fork CI run 34580643617 all green, test executed and passed on Linux Meson, Autoconf, Windows VS | — | 1 |
 | WP2 | 0004 module: port collector under the new name, add v6 features, fixes 1/2/4/5, SQL script, capacity test, regress — **DONE 2026-09-11** (compile-clean; CI pending): `wet-v8-wp2` M1 7e518f5bb94, M2 6311e336b25, M3 8ba6561d410, review fixes f4bf69380b8; CI run 34599726028 failed on every platform only because the regress test lacked CREATE EXTENSION (the preloaded library itself started cleanly on Linux, macOS, MinGW and MSVC); fixed in fd0f427c385; re-run 34605913822 green on 8/9 jobs, macOS failed because its CI job forces `debug_parallel_query = regress`, so pg_sleep ran in a parallel worker and the wait was (correctly) recorded under the worker; test fixed in 02fe98d0f97 (`SET debug_parallel_query = off`); **CI run 34609838704 all green, test executed and passed on macOS, Linux Meson 64, Autoconf, Windows MSVC and MinGW**. WP2b and WP4a branched from f4bf69380b8 and must be rebased onto the WP2 tip at assembly | — | 5 |
-| WP2b | option A: control table to fixed shmem; reserved region + in-hook claim for server-side processes; t/006 — **code done 2026-09-11** (M1 control table to fixed shmem, M2 region + lock-free claim + assign-hook fix via `pwet_capture_effective`, M3 t/006), rebased onto the WP2 tip. Review: claim/read barrier pairing correct; **critical bug** — the startup hook creates the ~10 MB region even when capture was off at start (the range never depends on capture), so the postmaster cannot start with capture off (the default); fix sent: store presence and bounds in an always-allocated shared header set by the postmaster, read by EXEC_BACKEND children. Also t/006 must skip the I/O-worker check unless io_method = worker (CI runs some jobs with io_uring); bump `generation` on claim/release. Fix commit + CI pending | WP2 | 1.5 |
+| WP2b | option A: control table to fixed shmem; reserved region + in-hook claim for server-side processes; t/006 — **code done 2026-09-11** (M1 control table to fixed shmem, M2 region + lock-free claim + assign-hook fix via `pwet_capture_effective`, M3 t/006), rebased onto the WP2 tip. Review: claim/read barrier pairing correct; **critical bug** — the startup hook creates the ~10 MB region even when capture was off at start (the range never depends on capture), so the postmaster cannot start with capture off (the default); fix sent: store presence and bounds in an always-allocated shared header set by the postmaster, read by EXEC_BACKEND children. Also t/006 must skip the I/O-worker check unless io_method = worker (CI runs some jobs with io_uring); bump `generation` on claim/release. **Fix commit aa93d6e5fd4 reviewed and correct** (always-allocated `PwetRegionHeader` written only by the postmaster when it first creates shared memory; every process, EXEC_BACKEND children included, reads presence and bounds from it; t/006 skips the I/O-worker check unless io_method = worker; `generation` bumped on claim/release). Branch pushed to the fork; CI pending | WP2 | 1.5 |
 | WP3 | launched 2026-09-11 on `wet-v8-wp2b` (not wp2), before the WP2b fix lands; will be rebased over it | WP2b | 4 |
 | WP3 | 0005 trace: ring, reader, orphans (fix 3), markers incl. xact callback (fix 6), SRFs | WP2 skeleton | 4 |
 | WP4a | TAP tests 001-004 (fixes 1, 2, 4, 5) — **DONE 2026-09-11**: `wet-v8-wp4a` (rebased on WP2 tip) 74310b3a69b + 2c140de41c8 + 53888ba66f2 + cbb10ad23dc; after three CI rounds (causes: capture is PGC_SUSET; PGPROC free list is FIFO; BackgroundPsql dies on the first error; one pg_sleep can be several waits on Windows) **CI run 34636885229 all green, every test executed with no skips**: regress 1, 001 7, 002 9, 003 27, 004 2 on Linux 32/64, macOS, MinGW, MSVC | WP2 | 3 (overlaps) |
@@ -468,6 +468,23 @@ happens on the fork's CI or on a host the owner provides.
 Critical path ≈ WP2 → WP3 → WP6 ≈ 12 working days; calendar target: first full
 local `meson test` green by 2026-09-22, CI + re-measure by 2026-09-26, post by
 2026-09-29.
+
+## 9a. To revisit with the owner after v8 is posted (owner, 2026-09-11)
+
+The owner asked to come back to these three deliberate omissions once the v8
+work is finished. Each is documented in v8; none blocks posting.
+
+1. **No end-of-message marker** for the extended/pipelined protocol: needs a
+   new core hook in the protocol loop (postgres.c). Cost of adding: a third
+   core patch to defend. Loss without it: for pipelining clients the end of a
+   queued statement is taken from the next statement's start.
+2. **No trace for server-side processes before a reload**: option A reserves
+   statistics memory only (~10 MiB); rings (~4 MB each) for ~50 processes
+   would be ~200 MB. Possible follow-up: an opt-in setting naming process
+   types that get a ring at startup (crash-recovery tracing is the real gap).
+3. **No C-level reader API**: SQL functions are the only supported interface
+   (fix for v6 bug 7). Possible follow-up: a versioned C interface designed
+   against a concrete consumer (e.g. EXPLAIN WAITS).
 
 ## 10. Decisions
 
