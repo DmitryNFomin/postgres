@@ -1,11 +1,19 @@
 /*-------------------------------------------------------------------------
  *
  * pg_wait_event_tracing_data.h
- *    Dense wait-event map for the experiment's pinned PostgreSQL base.
+ *    Dense wait-event map, with per-class capacities checked against
+ *    src/backend/utils/activity/wait_event_names.txt on this master
+ *    (headroom >= 8 events per class; see pg_wait_event_tracing_capacity()
+ *    and the "capacity" regression test, which enforce that this table is
+ *    bumped in the same commit that runs a class out of headroom).
  *
- * Generated from wait_event_names.txt at 74c77052bc by the v6
- * generate-wait_event_types.pl implementation.  Keeping the snapshot in
- * the module avoids changing PostgreSQL's ordinary generated headers.
+ * Static counts at the time these capacities were chosen: Lock 12, Buffer 4,
+ * Activity 18, Client 9, Extension 1 (dynamic; WaitEventExtensionNew()
+ * grows this at runtime), IPC 64, Timeout 11, IO 83, InjectionPoint 0
+ * (dynamic; WaitEventInjectionPointNew()).  LWLock is not part of this
+ * table: its "capacity" is the pg_wait_event_tracing.max_tranches GUC,
+ * since LWLock waits are tracked through a per-backend hash, not a flat
+ * per-event array.
  *
  *-------------------------------------------------------------------------
  */
@@ -14,7 +22,7 @@
 
 #define PWET_RAW_CLASSES	12
 #define PWET_DENSE_CLASSES	9
-#define PWET_NUM_EVENTS		544
+#define PWET_NUM_EVENTS		656
 
 static const int8 pwet_class_dense[PWET_RAW_CLASSES] = {
 	-1,							/* 0x00: unused */
@@ -32,31 +40,50 @@ static const int8 pwet_class_dense[PWET_RAW_CLASSES] = {
 };
 
 static const int pwet_class_nevents[PWET_DENSE_CLASSES] = {
-	16,							/* Lock */
-	16,							/* Buffer */
-	32,							/* Activity */
-	16,							/* Client */
-	128,						/* Extension */
-	64,							/* IPC */
-	16,							/* Timeout */
-	128,						/* IO */
-	128							/* InjectionPoint */
+	32,							/* Lock: 12 in use, was 16 (headroom 4) */
+	16,							/* Buffer: 4 in use */
+	32,							/* Activity: 18 in use */
+	32,							/* Client: 9 in use, was 16 (headroom 7) */
+	128,						/* Extension: dynamic */
+	128,						/* IPC: 64 in use, was 64 (headroom 0) */
+	32,							/* Timeout: 11 in use, was 16 (headroom 5) */
+	128,						/* IO: 83 in use */
+	128							/* InjectionPoint: dynamic */
 };
 
 static const int pwet_class_offset[PWET_DENSE_CLASSES] = {
 	0,							/* Lock */
-	16,							/* Buffer */
-	32,							/* Activity */
-	64,							/* Client */
-	80,							/* Extension */
-	208,						/* IPC */
-	272,						/* Timeout */
-	288,						/* IO */
-	416							/* InjectionPoint */
+	32,							/* Buffer */
+	48,							/* Activity */
+	80,							/* Client */
+	112,						/* Extension */
+	240,						/* IPC */
+	368,						/* Timeout */
+	400,						/* IO */
+	528							/* InjectionPoint */
 };
 
 static const uint8 pwet_dense_to_classid[PWET_DENSE_CLASSES] = {
 	0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b
+};
+
+/*
+ * Class names, in the same order as the dense arrays above, matching what
+ * pg_wait_events.type reports for each (see generate-wait_event_types.pl,
+ * which derives the type string from the ClassName section name).  Used by
+ * pg_wait_event_tracing_capacity() so its output can be compared directly
+ * against "SELECT type, count(*) FROM pg_wait_events GROUP BY type".
+ */
+static const char *const pwet_class_names[PWET_DENSE_CLASSES] = {
+	"Lock",
+	"Buffer",
+	"Activity",
+	"Client",
+	"Extension",
+	"IPC",
+	"Timeout",
+	"IO",
+	"InjectionPoint"
 };
 
 #endif							/* PG_WAIT_EVENT_TRACING_DATA_H */

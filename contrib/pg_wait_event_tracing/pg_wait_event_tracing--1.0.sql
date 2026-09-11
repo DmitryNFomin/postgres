@@ -113,3 +113,13 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'pg_stat_reset_wait_event_timing_all'
 LANGUAGE C VOLATILE;
 REVOKE EXECUTE ON FUNCTION pg_stat_reset_wait_event_timing_all() FROM PUBLIC;
+
+-- Per-class capacity of the dense timing table, for comparison against
+-- "SELECT type, count(*) FROM pg_wait_events GROUP BY type" (see the
+-- module's "capacity" regression test).
+CREATE FUNCTION pg_wait_event_tracing_capacity(
+    OUT type text,
+    OUT capacity int4)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'pg_wait_event_tracing_capacity'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;

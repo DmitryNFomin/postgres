@@ -61,6 +61,7 @@ PG_FUNCTION_INFO_V1(pg_stat_get_wait_event_timing);
 PG_FUNCTION_INFO_V1(pg_stat_get_wait_event_timing_overflow);
 PG_FUNCTION_INFO_V1(pg_stat_reset_wait_event_timing);
 PG_FUNCTION_INFO_V1(pg_stat_reset_wait_event_timing_all);
+PG_FUNCTION_INFO_V1(pg_wait_event_tracing_capacity);
 
 PGDLLEXPORT void _PG_init(void);
 
@@ -117,7 +118,6 @@ typedef struct PwetLWLockHash
  */
 typedef struct PwetStats
 {
-	pg_atomic_uint32 reset_generation;
 	instr_time	wait_start;
 	uint32		current_event;
 	int64		reset_count;
@@ -131,13 +131,24 @@ typedef struct PwetStats
  * One entry per possible ProcNumber, always resident in the control
  * segment.  trace_ptr/trace_state are unused placeholders reserved for the
  * trace-level patch.
+ *
+ * owner_pid/owner_start identify the backend that currently owns stats_ptr:
+ * every reader compares them against the live PgBackendStatus entry for
+ * this ProcNumber and ignores the slot on a mismatch, so a successor that
+ * has not (yet) attached its own payload never gets attributed a
+ * predecessor's counters.  reset_generation lives here, not in the DSA
+ * payload, so that a reset request can be published under this same lock
+ * and be tied to the owner token that guards it (see pwet_request_reset()).
  */
 typedef struct PwetSlot
 {
 	dsa_pointer stats_ptr;		/* InvalidDsaPointer when not collecting */
 	dsa_pointer trace_ptr;		/* reserved for the trace level */
 	uint8		trace_state;	/* reserved for the trace level */
+	int			owner_pid;		/* 0 when unowned */
+	TimestampTz owner_start;	/* MyStartTimestamp of the owner */
 	pg_atomic_uint32 generation;	/* bumped on every ownership change */
+	pg_atomic_uint32 reset_generation; /* bumped by a reset request */
 } PwetSlot;
 
 typedef struct PwetControl
@@ -181,7 +192,10 @@ static bool pwet_ensure_control(void);
 static bool pwet_ensure_stats_dsa(void);
 static void pwet_release_stats(void);
 static void pwet_before_shmem_exit(int code, Datum arg);
-static void pwet_request_reset(int procnumber);
+static void pwet_request_reset(int procnumber, int target_pid,
+							   TimestampTz target_start);
+static void pwet_check_reset_privileges(Oid target_role);
+static void pwet_check_class_capacities(void);
 
 static Size
 pwet_control_size(int nslots)
@@ -336,7 +350,10 @@ pwet_control_init(void *ptr, void *arg)
 		ctl->slots[i].stats_ptr = InvalidDsaPointer;
 		ctl->slots[i].trace_ptr = InvalidDsaPointer;
 		ctl->slots[i].trace_state = PWET_TRACE_FREE;
+		ctl->slots[i].owner_pid = 0;
+		ctl->slots[i].owner_start = 0;
 		pg_atomic_init_u32(&ctl->slots[i].generation, 0);
+		pg_atomic_init_u32(&ctl->slots[i].reset_generation, 0);
 	}
 }
 
@@ -423,7 +440,6 @@ pwet_attach_stats(void)
 			if (DsaPointerIsValid(stats_ptr))
 			{
 				state = dsa_get_address(pwet_stats_dsa, stats_ptr);
-				pg_atomic_init_u32(&state->reset_generation, 0);
 				state->lwlock_hash.num_used = 0;
 				state->lwlock_hash.hash_size = hash_size;
 				state->lwlock_hash.max_entries = pwet_max_tranches;
@@ -436,12 +452,15 @@ pwet_attach_stats(void)
 				if (DsaPointerIsValid(slot->stats_ptr))
 					dsa_free(pwet_stats_dsa, slot->stats_ptr);
 				slot->stats_ptr = stats_ptr;
+				slot->owner_pid = MyProcPid;
+				slot->owner_start = MyStartTimestamp;
 				pg_atomic_fetch_add_u32(&slot->generation, 1);
+				pwet_last_reset_generation =
+					pg_atomic_read_u32(&slot->reset_generation);
 				LWLockRelease(&pwet_ctl->lock);
 
 				pwet_my_stats = state;
 				pwet_my_procno = MyProcNumber;
-				pwet_last_reset_generation = 0;
 			}
 		}
 	}
@@ -503,6 +522,8 @@ pwet_release_stats(void)
 	{
 		dsa_free(pwet_stats_dsa, slot->stats_ptr);
 		slot->stats_ptr = InvalidDsaPointer;
+		slot->owner_pid = 0;
+		slot->owner_start = 0;
 		pg_atomic_fetch_add_u32(&slot->generation, 1);
 	}
 	LWLockRelease(&pwet_ctl->lock);
@@ -572,7 +593,14 @@ pwet_wait_end(uint32 wait_event_info)
 		uint32		event = state->current_event;
 		uint32		reset_generation;
 
-		reset_generation = pg_atomic_read_u32(&state->reset_generation);
+		/*
+		 * reset_generation lives in the always-mapped control slot, not the
+		 * DSA payload (see pwet_request_reset()), so this is a plain
+		 * lock-free atomic read: the owner is the only reader, and the
+		 * requester only ever increments it under the control lock.
+		 */
+		reset_generation =
+			pg_atomic_read_u32(&pwet_ctl->slots[pwet_my_procno].reset_generation);
 		if (reset_generation != pwet_last_reset_generation)
 		{
 			memset(state->events, 0, sizeof(state->events));
@@ -772,7 +800,9 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 		LWLockAcquire(&pwet_ctl->lock, LW_SHARED);
 		stats_ptr = slot->stats_ptr;
-		if (!DsaPointerIsValid(stats_ptr))
+		if (!DsaPointerIsValid(stats_ptr) ||
+			slot->owner_pid != beentry->st_procpid ||
+			slot->owner_start != beentry->st_proc_start_timestamp)
 		{
 			LWLockRelease(&pwet_ctl->lock);
 			continue;
@@ -867,7 +897,9 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 			continue;
 
 		LWLockAcquire(&pwet_ctl->lock, LW_SHARED);
-		if (DsaPointerIsValid(slot->stats_ptr))
+		if (DsaPointerIsValid(slot->stats_ptr) &&
+			slot->owner_pid == beentry->st_procpid &&
+			slot->owner_start == beentry->st_proc_start_timestamp)
 		{
 			PwetStats  *state = dsa_get_address(pwet_stats_dsa,
 												slot->stats_ptr);
@@ -911,31 +943,63 @@ pwet_reset_own(void)
 }
 
 /*
- * Request an asynchronous reset on the given slot's stats payload, if it
- * has one.  The owning backend notices at its next wait_end (see
- * pwet_wait_end()) and clears its own counters.  Holding the control
- * lock in shared mode for the whole read-then-bump excludes a concurrent
- * pwet_release_stats()/dsa_free() on the same slot.
+ * Replicate the target-authorization checks of pg_signal_backend() in
+ * src/backend/storage/ipc/signalfuncs.c: a non-superuser cannot touch a
+ * superuser-owned or role-less target, and otherwise needs privileges of
+ * the target role or of pg_signal_backend.  Unlike pg_signal_backend(),
+ * there is no separate carve-out for autovacuum workers: they are
+ * role-less, so they already require superuser here, which is the more
+ * conservative choice for a function that erases diagnostic state.
  */
 static void
-pwet_request_reset(int procnumber)
+pwet_check_reset_privileges(Oid target_role)
+{
+	if (!OidIsValid(target_role) || superuser_arg(target_role))
+	{
+		if (!superuser())
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("permission denied to reset another backend's wait event timing statistics"),
+					 errdetail("Only roles with the %s attribute may reset statistics of a superuser-owned or role-less backend.",
+							   "SUPERUSER")));
+	}
+	else if (!has_privs_of_role(GetUserId(), target_role) &&
+			 !has_privs_of_role(GetUserId(), ROLE_PG_SIGNAL_BACKEND))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to reset another backend's wait event timing statistics"),
+				 errdetail("Only roles with privileges of the target role or the \"%s\" role may reset another backend's wait event timing statistics.",
+						   "pg_signal_backend")));
+}
+
+/*
+ * Request an asynchronous reset on the given slot, if it is still owned by
+ * target_pid/target_start.  The owning backend notices at its next
+ * wait_end() (see pwet_wait_end()) and clears its own counters.
+ *
+ * target_pid/target_start were captured by the caller when it resolved the
+ * pid to a ProcNumber, which can be arbitrarily far in the past by the time
+ * we get the lock (ProcArrayLock was already released by then).  Re-checking
+ * the owner token under the same lock that publishes the request is what
+ * prevents the request from landing on a successor that has since reused
+ * this ProcNumber (a bare "does this slot have a payload" check is not
+ * enough: the successor could be capturing too).
+ */
+static void
+pwet_request_reset(int procnumber, int target_pid, TimestampTz target_start)
 {
 	PwetSlot   *slot;
-	dsa_pointer stats_ptr;
 
-	if (!pwet_ensure_control() || !pwet_ensure_stats_dsa())
+	if (!pwet_ensure_control())
 		return;
 
 	slot = &pwet_ctl->slots[procnumber];
 
-	LWLockAcquire(&pwet_ctl->lock, LW_SHARED);
-	stats_ptr = slot->stats_ptr;
-	if (DsaPointerIsValid(stats_ptr))
-	{
-		PwetStats  *state = dsa_get_address(pwet_stats_dsa, stats_ptr);
+	INJECTION_POINT("pg-wait-event-tracing-reset-before-publish", NULL);
 
-		pg_atomic_fetch_add_u32(&state->reset_generation, 1);
-	}
+	LWLockAcquire(&pwet_ctl->lock, LW_EXCLUSIVE);
+	if (slot->owner_pid == target_pid && slot->owner_start == target_start)
+		pg_atomic_fetch_add_u32(&slot->reset_generation, 1);
 	LWLockRelease(&pwet_ctl->lock);
 }
 
@@ -943,8 +1007,11 @@ pwet_request_reset(int procnumber)
  * SQL function: pg_stat_reset_wait_event_timing(pid int4)
  *
  *   NULL or own pid : reset the caller's own counters synchronously.
- *   another pid     : request a cross-backend reset (pg_signal_backend).
- *   unknown pid     : silent no-op.
+ *   another pid     : request a cross-backend reset, subject to the same
+ *                      target authorization as pg_signal_backend().
+ *   unknown pid     : silent no-op (matching pg_signal_backend()'s WARNING).
+ *   auxiliary pid   : rejected -- BackendPidGetProc() only resolves normal
+ *                      backends, so this falls out of the same check.
  */
 Datum
 pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
@@ -952,6 +1019,7 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 	int			target_pid;
 	PGPROC	   *proc;
 	int			procnumber;
+	PgBackendStatus *beentry;
 
 	if (PG_ARGISNULL(0) || PG_GETARG_INT32(0) == MyProcPid)
 	{
@@ -959,29 +1027,30 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 		PG_RETURN_VOID();
 	}
 
-	/*
-	 * Cross-backend reset requires pg_signal_backend, matching
-	 * pg_stat_reset_backend_stats(pid).
-	 */
-	if (!has_privs_of_role(GetUserId(), ROLE_PG_SIGNAL_BACKEND))
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("permission denied to reset another backend's wait event timing statistics"),
-				 errdetail("Only roles with privileges of the \"pg_signal_backend\" role may reset another backend's wait event timing statistics.")));
-
 	target_pid = PG_GETARG_INT32(0);
 
 	proc = BackendPidGetProc(target_pid);
 	if (proc == NULL)
-		proc = AuxiliaryPidGetProc(target_pid);
-	if (proc == NULL)
-		PG_RETURN_VOID();		/* unknown/dead pid: silent no-op */
+	{
+		/* Matches pg_signal_backend(): unknown pid or auxiliary process. */
+		ereport(WARNING,
+				(errmsg("PID %d is not a PostgreSQL backend process",
+						target_pid)));
+		PG_RETURN_VOID();
+	}
 
 	procnumber = GetNumberFromPGProc(proc);
 	if (procnumber < 0 || procnumber >= PWET_NUM_SLOTS)
 		PG_RETURN_VOID();
 
-	pwet_request_reset(procnumber);
+	pwet_check_reset_privileges(proc->roleId);
+
+	beentry = pgstat_get_beentry_by_proc_number(procnumber);
+	if (beentry == NULL || beentry->st_procpid != target_pid)
+		PG_RETURN_VOID();		/* gone by the time we got here */
+
+	pwet_request_reset(procnumber, target_pid,
+					   beentry->st_proc_start_timestamp);
 
 	PG_RETURN_VOID();
 }
@@ -989,18 +1058,101 @@ pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
 /*
  * SQL function: pg_stat_reset_wait_event_timing_all()
  *
- * Request a reset on every slot.  Execution is revoked from PUBLIC in the
- * extension script; administrators can delegate with GRANT.
+ * Request a reset on every slot.  Superuser-only: unlike the single-pid
+ * form, this is not delegable by granting EXECUTE, matching the "_all()
+ * superuser-only" policy regardless of what the extension script's default
+ * REVOKE/GRANT state happens to be.
  */
 Datum
 pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)
 {
 	int			i;
 
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to reset wait event timing statistics for all backends"),
+				 errdetail("Only roles with the %s attribute may reset statistics for all backends.",
+						   "SUPERUSER")));
+
+	if (!pwet_ensure_control())
+		PG_RETURN_VOID();
+
+	/*
+	 * Unlike the single-pid form, there is no specific owner to re-check:
+	 * bumping an unowned slot's reset_generation is harmless (nothing
+	 * consumes it), and a slot that gets a new owner concurrently either
+	 * sees this generation already accounted for at attach time or picks up
+	 * the bump at its first wait_end, which is a fine outcome either way for
+	 * an operation whose contract is "every backend", not "this backend".
+	 */
+	LWLockAcquire(&pwet_ctl->lock, LW_EXCLUSIVE);
 	for (i = 0; i < PWET_NUM_SLOTS; i++)
-		pwet_request_reset(i);
+		pg_atomic_fetch_add_u32(&pwet_ctl->slots[i].reset_generation, 1);
+	LWLockRelease(&pwet_ctl->lock);
 
 	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function: pg_wait_event_tracing_capacity()
+ *
+ * One row per dense class plus one for LWLock (whose effective capacity is
+ * the max_tranches GUC, not a table entry, since LWLock waits go through a
+ * per-backend hash rather than the flat per-event array).  Meant to be
+ * compared against "SELECT type, count(*) FROM pg_wait_events GROUP BY
+ * type" by the module's regression test, which fails when any class is
+ * within 4 of its capacity.
+ */
+Datum
+pg_wait_event_tracing_capacity(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Datum		values[2];
+	bool		nulls[2] = {0};
+	int			i;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	for (i = 0; i < PWET_DENSE_CLASSES; i++)
+	{
+		values[0] = CStringGetTextDatum(pwet_class_names[i]);
+		values[1] = Int32GetDatum(pwet_class_nevents[i]);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	values[0] = CStringGetTextDatum("LWLock");
+	values[1] = Int32GetDatum(pwet_max_tranches);
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * Warn at load time if today's wait_event_names.txt already has more events
+ * in some class than pg_wait_event_tracing_data.h accounts for: probe the
+ * first event id beyond our capacity and see if the core name lookup still
+ * recognizes it.  A class in this state still works (excess events fall
+ * into flat_overflow_count), but the capacity table needs bumping.
+ */
+static void
+pwet_check_class_capacities(void)
+{
+	int			i;
+
+	for (i = 0; i < PWET_DENSE_CLASSES; i++)
+	{
+		uint32		class_id = (uint32) pwet_dense_to_classid[i] << 24;
+		uint32		probe = class_id | (uint32) pwet_class_nevents[i];
+
+		if (pgstat_get_wait_event(probe) != NULL)
+			ereport(WARNING,
+					(errmsg("wait event class \"%s\" has more events than pg_wait_event_tracing accounts for",
+							pwet_class_names[i]),
+					 errdetail("The class's capacity in pg_wait_event_tracing_data.h is %d; events beyond that are counted in flat_overflow_count instead of being timed individually.",
+							   pwet_class_nevents[i])));
+	}
 }
 
 void
@@ -1048,4 +1200,6 @@ _PG_init(void)
 
 	pwet_active = true;
 	pwet_attach_needed = (pwet_capture != PWET_CAPTURE_OFF);
+
+	pwet_check_class_capacities();
 }
