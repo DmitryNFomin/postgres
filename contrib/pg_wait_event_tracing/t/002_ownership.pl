@@ -20,6 +20,15 @@
 # candidate connections in a loop -- each checks its own ProcNumber and
 # is dropped if it isn't the one being waited for -- up to a generous,
 # bounded number of attempts.
+#
+# B's own activity below never uses pg_sleep(): pg_sleep() loops,
+# calling WaitLatch again until its own clock says the requested time
+# is up, and on some platforms (seen on Windows in CI) the latch
+# timeout and that clock can disagree, so it loops and records more
+# than one wait for a single call. The module is right to count every
+# one of them, but that makes "exactly one PgSleep wait" an unsafe
+# thing to assert, so B is driven with plain statements instead and
+# checked only for "at least one row" and "no PgSleep row at all".
 
 use strict;
 use warnings FATAL => 'all';
@@ -98,7 +107,7 @@ SKIP:
 {
 	skip "ProcNumber $a_procnumber was not reused by any of $attempts "
 	  . "regress_b connections; cannot exercise the reuse path in this run",
-	  6
+	  9
 	  unless defined $B;
 
 	my $b_pid = $B->query_safe("SELECT pg_backend_pid();");
@@ -118,48 +127,71 @@ SKIP:
 		'0',
 		"B has no overflow rows before enabling capture");
 
-	# Now B enables capture and records its own wait.
+	# Now B enables capture.  Two trivial statements: the first attaches
+	# (post_parse_analyze_hook picks it up; the SET's own assign hook
+	# does not reliably, see 001_memory.pl), and sending the second is
+	# what makes the ClientRead wait *between* them -- now that a
+	# payload exists to record into -- complete and show up as a row.
 	$B->query_safe("SET pg_wait_event_tracing.capture = stats;");
-	$B->query_safe("SELECT pg_sleep(0.01);");
+	$B->query_safe("SELECT 1;");
+	$B->query_safe("SELECT 1;");
+
 	my $b_procnumber = $node->safe_psql(
 		'postgres',
 		"SELECT procnumber FROM pg_stat_wait_event_timing "
-		  . "WHERE pid = $b_pid AND wait_event = 'PgSleep';");
-
+		  . "WHERE pid = $b_pid LIMIT 1;");
 	is($b_procnumber, $a_procnumber,
 		"B's own procnumber column agrees with the ProcNumber the loop found"
 	);
 
-	# B's own counters, not A's: a fresh count of 1, read as the
-	# superuser reader.
+	# B has some row of its own fresh activity, but never a PgSleep row
+	# -- it never called pg_sleep -- so a PgSleep row here could only be
+	# A's leftover data.  Checked both as the superuser reader and by B
+	# reading about itself via the function directly (the view is
+	# revoked from PUBLIC, so the latter exercises the self-privilege
+	# branch of the internal check rather than a granted view or
+	# pg_read_all_stats membership).
+	cmp_ok(
+		$node->safe_psql(
+			'postgres',
+			"SELECT count(*) FROM pg_stat_wait_event_timing WHERE pid = $b_pid;"
+		),
+		'>', 0,
+		"superuser reader sees at least one row for B");
 	is( $node->safe_psql(
 			'postgres',
-			"SELECT calls FROM pg_stat_wait_event_timing "
+			"SELECT count(*) FROM pg_stat_wait_event_timing "
 			  . "WHERE pid = $b_pid AND wait_event = 'PgSleep';"
 		),
-		'1',
-		"superuser reader sees B's own fresh count, not A's leftover data"
-	);
-
-	# Same data, read by B itself.  The view is revoked from PUBLIC, so
-	# this exercises the underlying function directly, which relies on
-	# the self-privilege branch of the internal check rather than a
-	# granted view or pg_read_all_stats membership.
+		'0',
+		"...but no PgSleep row, which would only be A's leftover data");
+	cmp_ok(
+		$B->query_safe(
+			"SELECT count(*) FROM pg_stat_get_wait_event_timing(pg_backend_pid());"
+		),
+		'>', 0,
+		"B itself sees at least one row via the function");
 	is( $B->query_safe(
-			"SELECT calls FROM pg_stat_get_wait_event_timing(pg_backend_pid()) "
+			"SELECT count(*) FROM pg_stat_get_wait_event_timing(pg_backend_pid()) "
 			  . "WHERE wait_event = 'PgSleep';"
 		),
-		'1',
-		"B can read its own row via the function despite no view grant"
+		'0',
+		"...and no PgSleep row there either, despite no view grant"
 	);
 
 	# The view itself stays off limits to a role with no
-	# pg_read_all_stats, unlike the function form used above.
-	$B->{stderr} = '';
-	$B->query("SELECT * FROM pg_stat_wait_event_timing;");
-	like($B->{stderr}, qr/permission denied/,
-		"B cannot read the view directly, only the function about itself"
-	);
+	# pg_read_all_stats, unlike the function form used above.  A
+	# one-shot connection is used rather than B's own background_psql
+	# session: BackgroundPsql starts psql with on_error_stop => 1, so
+	# the permission error would make psql exit, and the next call into
+	# $B would die with "process ended prematurely".
+	my ($ret, $out, $err) = $node->psql(
+		'postgres',
+		'SELECT * FROM pg_stat_wait_event_timing;',
+		connstr => $node->connstr('postgres') . ' user=regress_b');
+	isnt($ret, 0, "B cannot read the view directly");
+	like($err, qr/permission denied/,
+		"...only the function about itself, as shown above");
 
 	$B->quit;
 }

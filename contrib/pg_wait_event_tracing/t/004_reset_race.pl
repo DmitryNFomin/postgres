@@ -25,6 +25,14 @@
 # by opening candidate connections in a loop, while the requester is
 # still parked, until one lands on the target's ProcNumber or a
 # generous, bounded number of attempts is exhausted.
+#
+# The final PgSleep count below is asserted as >= 3, not = 3: pg_sleep()
+# loops, calling WaitLatch again until its own clock says the requested
+# time is up, and on some platforms (seen on Windows in CI) the latch
+# timeout and that clock can disagree, so a single call can record more
+# than one wait. The module is right to count every one of them; what
+# this test actually needs decided is reset_count, which stays an exact
+# 0 either way.
 
 use strict;
 use warnings FATAL => 'all';
@@ -133,12 +141,13 @@ SKIP:
 	# t/003_reset_acl.pl) has every opportunity to show up here too.
 	$B->query_safe("SELECT pg_sleep(0.01);");
 
-	is( $node->safe_psql(
+	cmp_ok(
+		$node->safe_psql(
 			'postgres',
 			"SELECT calls FROM pg_stat_wait_event_timing "
 			  . "WHERE pid = $b_pid AND wait_event = 'PgSleep';"
 		),
-		'3',
+		'>=', 3,
 		"B's PgSleep count reflects all three of its own waits");
 	is( $node->safe_psql(
 			'postgres',

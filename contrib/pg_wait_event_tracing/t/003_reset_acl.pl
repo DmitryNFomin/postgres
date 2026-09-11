@@ -19,6 +19,16 @@
 # always takes the synchronous self-reset path regardless of role, so
 # none of the authorization branches below are reachable from a single
 # session.
+#
+# None of the assertions below treat "one pg_sleep(0.01) call" as "one
+# recorded wait": pg_sleep() loops, calling WaitLatch again until its
+# own clock says the requested time is up, and on some platforms (seen
+# on Windows in CI) the latch timeout and that clock can disagree, so
+# it loops and records more than one wait for a single call. The module
+# is right to count every one of them, so a fixture or a post-reset
+# check uses >= 1 (or compares against a value read just before the
+# event in question) rather than an exact count; only reset_count, and
+# a synchronous self-reset's calls == 0, are exact signals here.
 
 use strict;
 use warnings FATAL => 'all';
@@ -107,9 +117,9 @@ $B->query_safe("SET pg_wait_event_tracing.capture = stats;");
 $B->query_safe("SELECT pg_sleep(0.01);");
 my $b_pid = $B->query_safe("SELECT pg_backend_pid();");
 
-is(pgsleep_calls($su_pid), '1', "fixture: SU has one recorded wait");
-is(pgsleep_calls($a_pid),  '1', "fixture: A has one recorded wait");
-is(pgsleep_calls($b_pid),  '1', "fixture: B has one recorded wait");
+cmp_ok(pgsleep_calls($su_pid), '>=', 1, "fixture: SU has a recorded wait");
+cmp_ok(pgsleep_calls($a_pid),  '>=', 1, "fixture: A has a recorded wait");
+cmp_ok(pgsleep_calls($b_pid),  '>=', 1, "fixture: B has a recorded wait");
 
 ###
 # own reset (NULL and own pid) by regress_b: succeeds, synchronously.
@@ -138,9 +148,11 @@ is($ret, 0, "regress_a2 can reset regress_a's session");
 is($stderr, '', "...with no error output");
 
 $A->query_safe("SELECT pg_sleep(0.01);");
-is(pgsleep_calls($a_pid), '1',
-	"A's counters were cleared before this wait was recorded");
-is(reset_count($a_pid), $rc + 1, "A's reset_count reflects the cross-backend reset");
+cmp_ok(pgsleep_calls($a_pid), '>=', 1,
+	"A has a recorded wait again after the reset");
+is(reset_count($a_pid), $rc + 1,
+	"A's reset_count is the decisive signal that the cross-backend reset landed"
+);
 
 ###
 # regress_sig resets regress_b's session: succeeds (sig is a member of
@@ -152,28 +164,40 @@ is($ret, 0, "regress_sig can reset regress_b's session");
 is($stderr, '', "...with no error output");
 
 $B->query_safe("SELECT pg_sleep(0.01);");
-is(pgsleep_calls($b_pid), '1',
-	"B's counters were cleared before this wait was recorded");
-is(reset_count($b_pid), $rc + 1, "B's reset_count reflects the cross-backend reset");
+cmp_ok(pgsleep_calls($b_pid), '>=', 1,
+	"B has a recorded wait again after the reset");
+is(reset_count($b_pid), $rc + 1,
+	"B's reset_count is the decisive signal that the cross-backend reset landed"
+);
 
 ###
 # regress_b resets regress_su's session: permission denied (regress_b is
 # neither superuser nor a member of pg_signal_backend, and the target is
 # superuser-owned).
 ###
+my $su_calls_before = pgsleep_calls($su_pid);
+my $su_reset_before = reset_count($su_pid);
 ($ret, $stdout, $stderr) = reset_as('regress_b', $su_pid);
 isnt($ret, 0, "regress_b cannot reset regress_su's session");
 like($stderr, qr/permission denied/, "...permission denied error");
-is(pgsleep_calls($su_pid), '1', "SU's counters are untouched by the failed attempt");
+is(pgsleep_calls($su_pid), $su_calls_before,
+	"SU's calls are untouched by the failed attempt");
+is(reset_count($su_pid), $su_reset_before,
+	"SU's reset_count is untouched by the failed attempt");
 
 ###
 # regress_b resets regress_a's session: permission denied (regress_b has
 # privileges of neither regress_a nor pg_signal_backend).
 ###
+my $a_calls_before = pgsleep_calls($a_pid);
+my $a_reset_before = reset_count($a_pid);
 ($ret, $stdout, $stderr) = reset_as('regress_b', $a_pid);
 isnt($ret, 0, "regress_b cannot reset regress_a's session");
 like($stderr, qr/permission denied/, "...permission denied error");
-is(pgsleep_calls($a_pid), '1', "A's counters are untouched by the failed attempt");
+is(pgsleep_calls($a_pid), $a_calls_before,
+	"A's calls are untouched by the failed attempt");
+is(reset_count($a_pid), $a_reset_before,
+	"A's reset_count is untouched by the failed attempt");
 
 ###
 # Any role resetting the checkpointer's pid gets pg_signal_backend()'s
