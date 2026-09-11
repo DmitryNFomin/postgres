@@ -9,6 +9,12 @@
 --
 CREATE EXTENSION pg_wait_event_tracing;
 
+-- Statistics are per backend: a parallel worker records its waits under
+-- its own pid.  CI forces parallel query on some platforms
+-- (debug_parallel_query = regress), which would move pg_sleep() below into
+-- a worker, so keep this session's statements in this session.
+SET debug_parallel_query = off;
+
 -- Default is off.
 SHOW pg_wait_event_tracing.capture;
 
