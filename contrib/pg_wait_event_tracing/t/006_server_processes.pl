@@ -58,8 +58,7 @@ $node1->safe_psql(
 
 # Case 1: rows for checkpointer, walwriter, background writer, and an I/O
 # worker, despite this node never having reloaded its configuration.
-for my $backend_type (qw(checkpointer walwriter), 'background writer',
-	'io worker')
+for my $backend_type (qw(checkpointer walwriter), 'background writer')
 {
 	# None of these fixed literal values need SQL-escaping.
 	ok( $node1->poll_query_until(
@@ -67,6 +66,23 @@ for my $backend_type (qw(checkpointer walwriter), 'background writer',
 			"SELECT EXISTS (SELECT 1 FROM pg_stat_wait_event_timing WHERE backend_type = '$backend_type')"
 		),
 		"$backend_type has rows in pg_stat_wait_event_timing without a reload"
+	);
+}
+
+# I/O workers only exist under io_method = worker; several CI jobs force
+# io_method = io_uring via PG_TEST_INITDB_EXTRA_OPTS, which has none, so
+# this check would otherwise time out there instead of failing cleanly.
+my $io_method = $node1->safe_psql('postgres', 'SHOW io_method');
+SKIP:
+{
+	skip "io_method is '$io_method', not 'worker': no I/O workers exist", 1
+	  unless $io_method eq 'worker';
+
+	ok( $node1->poll_query_until(
+			'postgres',
+			q(SELECT EXISTS (SELECT 1 FROM pg_stat_wait_event_timing WHERE backend_type = 'io worker'))
+		),
+		'io worker has rows in pg_stat_wait_event_timing without a reload'
 	);
 }
 

@@ -94,6 +94,7 @@ PGDLLEXPORT void _PG_init(void);
 
 #define PWET_CONTROL_NAME "pg_wait_event_tracing"
 #define PWET_CONTROL_STRUCT_NAME "pg_wait_event_tracing control"
+#define PWET_REGION_HEADER_NAME "pg_wait_event_tracing header"
 #define PWET_SERVER_REGION_NAME "pg_wait_event_tracing server processes"
 #define PWET_STATS_DSA_NAME "pg_wait_event_tracing_stats"
 #define PWET_NUM_SLOTS (MaxBackends + NUM_AUXILIARY_PROCS)
@@ -201,6 +202,25 @@ typedef struct PwetSlot
 	pg_atomic_uint32 reset_generation; /* bumped by a reset request */
 } PwetSlot;
 
+/*
+ * A small, always-allocated (regardless of capture) record of the one
+ * decision that can only be made once, by whichever process creates
+ * shared memory: whether the server-process region was requested, and
+ * if so, its bounds.  shmem_request_hook decides this from pwet_capture
+ * at postmaster start, but shmem_startup_hook -- which is what actually
+ * opens the region -- also runs in every EXEC_BACKEND child, potentially
+ * long after a reload has changed pwet_capture to something else.  A
+ * child must never re-derive the decision from its own (possibly
+ * reloaded) pwet_capture; it has to read what the postmaster actually
+ * decided and reserved, from here.
+ */
+typedef struct PwetRegionHeader
+{
+	bool		server_region_present;
+	int			server_region_start;
+	int			server_region_end;
+} PwetRegionHeader;
+
 static const struct config_enum_entry pwet_capture_options[] = {
 	{"off", PWET_CAPTURE_OFF, false},
 	{"stats", PWET_CAPTURE_STATS, false},
@@ -240,14 +260,30 @@ static LWLock *pwet_lock;
 static dsa_area *pwet_stats_dsa;
 
 /*
+ * Set by pwet_shmem_request() from pwet_capture, in the postmaster only,
+ * immediately before conditionally requesting the region's bytes; read
+ * back by pwet_shmem_startup() in that same process, immediately after,
+ * to decide whether to record the region as present in the header (see
+ * PwetRegionHeader).  Meaningless in any other process: an EXEC_BACKEND
+ * child never calls shmem_request_hook at all (only the postmaster does,
+ * once, before shared memory exists), so this stays at its unused
+ * default there -- which is fine, since a child reads presence/bounds
+ * from the header, never from this.
+ */
+static bool pwet_region_requested;
+
+/*
  * The reserved server-process region (plan section 4.2a).  NULL unless
- * capture was already non-off in the configuration at postmaster start
- * (see pwet_shmem_request()); [pwet_server_region_start,
- * pwet_server_region_end) is R, a sub-range of ProcNumbers, and
- * pwet_server_stride is the byte size of one process's slice, computed
- * once (from pwet_max_tranches, a PGC_POSTMASTER GUC) at the same time as
- * the region itself and never recomputed, so every process addresses the
- * region the same way it was originally sized.
+ * the header (see PwetRegionHeader) records it as present -- which the
+ * header can only ever say if capture was already non-off in the
+ * configuration at postmaster start (see pwet_shmem_request()/
+ * pwet_shmem_startup()).  [pwet_server_region_start,
+ * pwet_server_region_end) is R, a sub-range of ProcNumbers, read from the
+ * header the same way; pwet_server_stride is the byte size of one
+ * process's slice, computed once (from pwet_max_tranches, a
+ * PGC_POSTMASTER GUC) at the same time as the region itself and never
+ * recomputed, so every process addresses the region the same way it was
+ * originally sized.
  */
 static char *pwet_server_region;
 static int	pwet_server_region_start;
@@ -484,8 +520,9 @@ pwet_compute_server_region(int *start, int *end)
 
 /*
  * shmem_request_hook: request the always-resident control table, its
- * LWLock tranche, and -- only if capture is already configured on --
- * the reserved server-process region.
+ * LWLock tranche, the (also always-resident) region header, and -- only
+ * if capture is already configured on -- the reserved server-process
+ * region.
  *
  * MaxBackends and every GUC referenced by pwet_compute_server_region() are
  * final by the time this runs, and pwet_capture already reflects
@@ -496,6 +533,11 @@ pwet_compute_server_region(int *start, int *end)
  * then), InitializeMaxBackends(), and only then process_shmem_requests()
  * (which calls this hook).  Verified by reading postmaster.c directly,
  * not inferred.
+ *
+ * R is never actually empty (MaxConnections is always < MaxBackends +
+ * PWET_NON_IO_AUX_PROCS + io_max_workers), so whether the region's bytes
+ * get requested here depends entirely on pwet_region_requested, i.e. on
+ * pwet_capture -- never on R's size.
  */
 static void
 pwet_shmem_request(void)
@@ -505,22 +547,23 @@ pwet_shmem_request(void)
 
 	RequestAddinShmemSpace(pwet_control_size(PWET_NUM_SLOTS));
 	RequestNamedLWLockTranche(PWET_CONTROL_NAME, 1);
+	RequestAddinShmemSpace(sizeof(PwetRegionHeader));
 
-	if (pwet_capture != PWET_CAPTURE_OFF)
+	pwet_region_requested = (pwet_capture != PWET_CAPTURE_OFF);
+	if (pwet_region_requested)
 	{
 		int			start,
 					end;
 
 		pwet_compute_server_region(&start, &end);
-		if (end > start)
-			RequestAddinShmemSpace(mul_size(end - start,
-											pwet_stats_payload_size(pwet_max_tranches)));
+		RequestAddinShmemSpace(mul_size(end - start,
+										pwet_stats_payload_size(pwet_max_tranches)));
 	}
 }
 
 /*
- * shmem_startup_hook: create or attach the control table and, if
- * requested, the server-process region.
+ * shmem_startup_hook: create or attach the control table, the region
+ * header, and, if the header says so, the server-process region.
  *
  * Runs once in the postmaster (CreateSharedMemoryAndSemaphores()) and,
  * under EXEC_BACKEND, again in every child (AttachSharedMemoryStructs()) --
@@ -531,13 +574,26 @@ pwet_shmem_request(void)
  * themselves, so each EXEC_BACKEND child must (and does) recompute them
  * here; a fork()-based child instead simply inherits them from the
  * postmaster.
+ *
+ * Whether the region exists, and its bounds, are decided exactly once,
+ * by whichever process creates the header (necessarily the postmaster,
+ * since EXEC_BACKEND children only ever attach to already-created shared
+ * memory): !found below is true only then, and only there do we consult
+ * pwet_region_requested/pwet_compute_server_region() at all.  Every other
+ * call -- an EXEC_BACKEND child, or a later re-entry -- finds the header
+ * already populated and just reads it.  This is required, not just
+ * simpler: a child re-running _PG_init() (and so redefining pwet_capture
+ * from whatever the config currently says, which can differ from its
+ * value at postmaster start if a reload happened in between) must not be
+ * able to change whether the region is treated as present -- the region
+ * itself was only actually allocated if the *original* decision, recorded
+ * here, was to request it.
  */
 static void
 pwet_shmem_startup(void)
 {
 	bool		found;
-	int			start,
-				end;
+	PwetRegionHeader *hdr;
 
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
@@ -553,22 +609,34 @@ pwet_shmem_startup(void)
 	if (!found)
 		pwet_control_init(pwet_ctl);
 
-	/*
-	 * Re-derive R the same way pwet_shmem_request() did.  If capture was
-	 * off then, this evaluates to an empty range and no region was
-	 * requested; ShmemInitStruct() would fail on a zero-size request, so
-	 * skip the call entirely rather than relying on it to no-op.
-	 */
-	pwet_compute_server_region(&start, &end);
-	if (end > start)
+	hdr = (PwetRegionHeader *) ShmemInitStruct(PWET_REGION_HEADER_NAME,
+											   sizeof(PwetRegionHeader),
+											   &found);
+	if (!found)
+	{
+		/* We are the postmaster, creating this for the first time. */
+		hdr->server_region_present = pwet_region_requested;
+		if (pwet_region_requested)
+			pwet_compute_server_region(&hdr->server_region_start,
+									   &hdr->server_region_end);
+		else
+		{
+			hdr->server_region_start = 0;
+			hdr->server_region_end = 0;
+		}
+	}
+
+	pwet_server_region_start = hdr->server_region_start;
+	pwet_server_region_end = hdr->server_region_end;
+
+	if (hdr->server_region_present)
 	{
 		pwet_server_stride = pwet_stats_payload_size(pwet_max_tranches);
 		pwet_server_region = (char *) ShmemInitStruct(PWET_SERVER_REGION_NAME,
-													  mul_size(end - start,
+													  mul_size(pwet_server_region_end -
+															   pwet_server_region_start,
 															   pwet_server_stride),
 													  &found);
-		pwet_server_region_start = start;
-		pwet_server_region_end = end;
 		/* ShmemInitStruct()'s underlying allocation is zeroed on creation. */
 	}
 }
@@ -698,6 +766,13 @@ pwet_claim_fixed_slot(void)
 	pg_write_barrier();
 	slot->owner_pid = MyProcPid;
 
+	/*
+	 * Bumped on every ownership change (section 4.1), same as the DSA
+	 * attach path; nothing reads this yet, but pg_atomic_fetch_add_u32()
+	 * is a plain atomic op, allowed in the hook.
+	 */
+	pg_atomic_fetch_add_u32(&slot->generation, 1);
+
 	/* (4) Cache the pointer the hooks use. */
 	pwet_my_stats = payload;
 	pwet_my_procno = MyProcNumber;
@@ -724,7 +799,13 @@ pwet_release_fixed_slot(void)
 {
 	pwet_my_stats = NULL;
 	if (pwet_my_procno != INVALID_PROC_NUMBER)
-		pwet_ctl[pwet_my_procno].owner_pid = 0;
+	{
+		PwetSlot   *slot = &pwet_ctl[pwet_my_procno];
+
+		slot->owner_pid = 0;
+		/* Bumped on every ownership change (section 4.1), as on attach. */
+		pg_atomic_fetch_add_u32(&slot->generation, 1);
+	}
 }
 
 static bool
