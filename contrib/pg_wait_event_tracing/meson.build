@@ -35,4 +35,9 @@ tests += {
     # not have.
     'runningcheck': false,
   },
+  'tap': {
+    'tests': [
+      't/006_server_processes.pl',
+    ],
+  },
 }
