@@ -22,7 +22,7 @@
 
 #define PWET_RAW_CLASSES	12
 #define PWET_DENSE_CLASSES	9
-#define PWET_NUM_EVENTS		656
+#define PWET_NUM_EVENTS		560
 
 static const int8 pwet_class_dense[PWET_RAW_CLASSES] = {
 	-1,							/* 0x00: unused */
@@ -48,7 +48,9 @@ static const int pwet_class_nevents[PWET_DENSE_CLASSES] = {
 	128,						/* IPC: 64 in use, was 64 (headroom 0) */
 	32,							/* Timeout: 11 in use, was 16 (headroom 5) */
 	128,						/* IO: 83 in use */
-	128							/* InjectionPoint: dynamic */
+	32							/* InjectionPoint: dynamic; only ever
+								 * populated in injection-points-enabled
+								 * test builds, so kept small */
 };
 
 static const int pwet_class_offset[PWET_DENSE_CLASSES] = {

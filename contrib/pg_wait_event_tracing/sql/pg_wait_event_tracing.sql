@@ -68,7 +68,8 @@ WHERE pid = pg_backend_pid();
 -- caller's own backend.
 SELECT pg_stat_reset_wait_event_timing();
 
--- Resetting an unknown pid is a silent no-op, not an error.
+-- Resetting an unknown pid is a WARNING, not an ERROR, matching
+-- pg_signal_backend()'s own wording; the reset itself is a no-op.
 SELECT pg_stat_reset_wait_event_timing(2147483647);
 
 -- Disabling capture releases the payload (fix 1/2): even though the pid is
@@ -81,40 +82,18 @@ FROM pg_stat_wait_event_timing
 WHERE pid = pg_backend_pid();
 
 --
--- Reset authorization (fix 4).  Testing denial against a genuinely
--- different, superuser-owned backend needs a second real connection with a
--- different owning role; open one via dblink and keep it alive for the
--- duration of the checks below.
+-- Reset authorization (fix 4).  The pg_signal_backend-member-vs-ordinary-
+-- target and non-superuser-vs-superuser-target cases need a second, real
+-- backend with a different owning role; those live in the TAP test
+-- t/003_reset_acl.pl (WP4a), which can create and authenticate as extra
+-- roles portably (this regress test cannot: no second connection is
+-- available here, and resetting your own pid always takes the synchronous
+-- self-reset path regardless of role).  What is single-session-testable is
+-- _all()'s superuser requirement, which holds even for a role granted
+-- EXECUTE directly, not just relying on the extension script's default
+-- REVOKE EXECUTE FROM PUBLIC.
 --
-CREATE EXTENSION dblink;
-CREATE ROLE regress_pwet_owner LOGIN;
-CREATE ROLE regress_pwet_super LOGIN SUPERUSER;
-CREATE ROLE regress_pwet_signaler LOGIN;
-GRANT pg_signal_backend TO regress_pwet_signaler;
-SELECT dblink_connect('pwet_owner_conn',
-    'dbname=' || current_database() || ' port=' || current_setting('port')
-    || ' user=regress_pwet_owner');
-SELECT dblink_connect('pwet_super_conn',
-    'dbname=' || current_database() || ' port=' || current_setting('port')
-    || ' user=regress_pwet_super');
-SELECT pid AS pwet_owner_pid
-FROM dblink('pwet_owner_conn', 'SELECT pg_backend_pid()') AS t(pid int) \gset
-SELECT pid AS pwet_super_pid
-FROM dblink('pwet_super_conn', 'SELECT pg_backend_pid()') AS t(pid int) \gset
-SET ROLE regress_pwet_signaler;
-
--- pg_signal_backend lets a non-superuser reset an ordinary backend's
--- statistics.
-SELECT pg_stat_reset_wait_event_timing(:pwet_owner_pid);
-
--- ...but not a superuser-owned one: matches pg_signal_backend()'s own
--- target-authorization rule, not just "is a pg_signal_backend member".
-SELECT pg_stat_reset_wait_event_timing(:pwet_super_pid);
-RESET ROLE;
--- _all() is superuser-only in C, independent of pg_signal_backend
--- membership and even if an administrator delegates EXECUTE explicitly:
--- the extension script's default REVOKE EXECUTE FROM PUBLIC is not the
--- only thing standing in the way.
+CREATE ROLE regress_pwet_signaler;
 GRANT EXECUTE ON FUNCTION pg_stat_reset_wait_event_timing_all()
     TO regress_pwet_signaler;
 SET ROLE regress_pwet_signaler;
@@ -122,12 +101,7 @@ SELECT pg_stat_reset_wait_event_timing_all();
 RESET ROLE;
 REVOKE EXECUTE ON FUNCTION pg_stat_reset_wait_event_timing_all()
     FROM regress_pwet_signaler;
-SELECT dblink_disconnect('pwet_owner_conn');
-SELECT dblink_disconnect('pwet_super_conn');
-DROP ROLE regress_pwet_owner;
-DROP ROLE regress_pwet_super;
 DROP ROLE regress_pwet_signaler;
-DROP EXTENSION dblink;
 --
 -- Per-class capacity (plan sec 3.1).  Every class pg_wait_events knows
 -- about must have a capacity row, and every class must have at least 4

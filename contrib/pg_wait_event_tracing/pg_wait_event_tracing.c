@@ -195,7 +195,6 @@ static void pwet_before_shmem_exit(int code, Datum arg);
 static void pwet_request_reset(int procnumber, int target_pid,
 							   TimestampTz target_start);
 static void pwet_check_reset_privileges(Oid target_role);
-static void pwet_check_class_capacities(void);
 
 static Size
 pwet_control_size(int nslots)
@@ -1129,32 +1128,6 @@ pg_wait_event_tracing_capacity(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
-/*
- * Warn at load time if today's wait_event_names.txt already has more events
- * in some class than pg_wait_event_tracing_data.h accounts for: probe the
- * first event id beyond our capacity and see if the core name lookup still
- * recognizes it.  A class in this state still works (excess events fall
- * into flat_overflow_count), but the capacity table needs bumping.
- */
-static void
-pwet_check_class_capacities(void)
-{
-	int			i;
-
-	for (i = 0; i < PWET_DENSE_CLASSES; i++)
-	{
-		uint32		class_id = (uint32) pwet_dense_to_classid[i] << 24;
-		uint32		probe = class_id | (uint32) pwet_class_nevents[i];
-
-		if (pgstat_get_wait_event(probe) != NULL)
-			ereport(WARNING,
-					(errmsg("wait event class \"%s\" has more events than pg_wait_event_tracing accounts for",
-							pwet_class_names[i]),
-					 errdetail("The class's capacity in pg_wait_event_tracing_data.h is %d; events beyond that are counted in flat_overflow_count instead of being timed individually.",
-							   pwet_class_nevents[i])));
-	}
-}
-
 void
 _PG_init(void)
 {
@@ -1200,6 +1173,4 @@ _PG_init(void)
 
 	pwet_active = true;
 	pwet_attach_needed = (pwet_capture != PWET_CAPTURE_OFF);
-
-	pwet_check_class_capacities();
 }
