@@ -6,12 +6,24 @@
  * The recorder is the peer-review package's collector, ported onto the
  * begin/end wait-event hooks and renamed.  Each collecting backend owns one
  * sparse DSA slot, addressed through a small, always-resident control
- * segment (GetNamedDSMSegment()); the roughly 200 KiB-per-backend timing
- * payload itself lives in a DSA area (GetNamedDSA()) and is allocated only
- * for a backend that actually enables capture.  Hook callbacks only touch
- * preallocated backend-local pointers: allocation, locking, and
- * error-capable work happen from parse/executor safe points, never from the
- * begin/end hooks themselves.
+ * table; the roughly 200 KiB-per-backend timing payload itself lives in a
+ * DSA area (GetNamedDSA()) and is allocated only for a backend that
+ * actually enables capture.  Hook callbacks only touch preallocated
+ * backend-local pointers: allocation, locking, and error-capable work
+ * happen from parse/executor safe points, never from the begin/end hooks
+ * themselves.
+ *
+ * The control table lives in fixed shared memory (shmem_request_hook /
+ * shmem_startup_hook), not the DSM registry: a later patch gives
+ * server-side processes (the checkpointer, an I/O worker, ...) a way to
+ * reach their own slot from inside the begin hook, where they cannot
+ * attach anything -- which requires the table to already be mapped by
+ * the time any hook can fire.  That is true of fixed shmem in every
+ * process from postmaster startup on (the module requires
+ * shared_preload_libraries, so shmem_startup_hook always runs before user
+ * code does), but not of a DSM-registry segment, which is created or
+ * attached lazily on first reference.  This commit only relocates the
+ * table; nothing about its contents or how it is used changes.
  *
  * This file carries the statistics level only.  The trace level (per-backend
  * ring buffer, query markers, trace SRFs) is a separate patch; the slot
@@ -39,6 +51,7 @@
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/procnumber.h"
+#include "storage/shmem.h"
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/backend_status.h"
@@ -66,6 +79,7 @@ PG_FUNCTION_INFO_V1(pg_wait_event_tracing_capacity);
 PGDLLEXPORT void _PG_init(void);
 
 #define PWET_CONTROL_NAME "pg_wait_event_tracing"
+#define PWET_CONTROL_STRUCT_NAME "pg_wait_event_tracing control"
 #define PWET_STATS_DSA_NAME "pg_wait_event_tracing_stats"
 #define PWET_NUM_SLOTS (MaxBackends + NUM_AUXILIARY_PROCS)
 #define PWET_HISTOGRAM_BUCKETS 32
@@ -151,12 +165,6 @@ typedef struct PwetSlot
 	pg_atomic_uint32 reset_generation; /* bumped by a reset request */
 } PwetSlot;
 
-typedef struct PwetControl
-{
-	LWLock		lock;
-	PwetSlot	slots[FLEXIBLE_ARRAY_MEMBER];
-} PwetControl;
-
 static const struct config_enum_entry pwet_capture_options[] = {
 	{"off", PWET_CAPTURE_OFF, false},
 	{"stats", PWET_CAPTURE_STATS, false},
@@ -166,7 +174,9 @@ static const struct config_enum_entry pwet_capture_options[] = {
 static int	pwet_capture = PWET_CAPTURE_OFF;
 static int	pwet_max_tranches = 192;
 
-static PwetControl *pwet_ctl;
+/* The control table: an array of PWET_NUM_SLOTS PwetSlots, nothing else. */
+static PwetSlot *pwet_ctl;
+static LWLock *pwet_lock;
 static dsa_area *pwet_stats_dsa;
 
 static PwetStats *pwet_my_stats;
@@ -184,11 +194,12 @@ static wait_event_hook_type prev_wait_event_begin_hook;
 static wait_event_hook_type prev_wait_event_end_hook;
 static post_parse_analyze_hook_type prev_post_parse_analyze_hook;
 static ExecutorStart_hook_type prev_ExecutorStart_hook;
+static shmem_request_hook_type prev_shmem_request_hook;
+static shmem_startup_hook_type prev_shmem_startup_hook;
 
 static void pwet_wait_begin(uint32 wait_event_info);
 static void pwet_wait_end(uint32 wait_event_info);
 static void pwet_maybe_attach(void);
-static bool pwet_ensure_control(void);
 static bool pwet_ensure_stats_dsa(void);
 static void pwet_release_stats(void);
 static void pwet_before_shmem_exit(int code, Datum arg);
@@ -199,8 +210,7 @@ static void pwet_check_reset_privileges(Oid target_role);
 static Size
 pwet_control_size(int nslots)
 {
-	return add_size(offsetof(PwetControl, slots),
-					mul_size(nslots, sizeof(PwetSlot)));
+	return mul_size(nslots, sizeof(PwetSlot));
 }
 
 static int
@@ -332,48 +342,74 @@ pwet_timing_bucket(int64 duration_ns)
 	return bucket;
 }
 
-/*
- * GetNamedDSMSegment() init callback for the control segment: allocate an
- * LWLock tranche id for the embedded lock and mark every slot empty.
- */
+/* Initialize a freshly created control table: mark every slot empty. */
 static void
-pwet_control_init(void *ptr, void *arg)
+pwet_control_init(PwetSlot *slots)
 {
-	PwetControl *ctl = (PwetControl *) ptr;
-	int			tranche_id = LWLockNewTrancheId(PWET_CONTROL_NAME);
 	int			i;
 
-	LWLockInitialize(&ctl->lock, tranche_id);
 	for (i = 0; i < PWET_NUM_SLOTS; i++)
 	{
-		ctl->slots[i].stats_ptr = InvalidDsaPointer;
-		ctl->slots[i].trace_ptr = InvalidDsaPointer;
-		ctl->slots[i].trace_state = PWET_TRACE_FREE;
-		ctl->slots[i].owner_pid = 0;
-		ctl->slots[i].owner_start = 0;
-		pg_atomic_init_u32(&ctl->slots[i].generation, 0);
-		pg_atomic_init_u32(&ctl->slots[i].reset_generation, 0);
+		slots[i].stats_ptr = InvalidDsaPointer;
+		slots[i].trace_ptr = InvalidDsaPointer;
+		slots[i].trace_state = PWET_TRACE_FREE;
+		slots[i].owner_pid = 0;
+		slots[i].owner_start = 0;
+		pg_atomic_init_u32(&slots[i].generation, 0);
+		pg_atomic_init_u32(&slots[i].reset_generation, 0);
 	}
 }
 
 /*
- * Lazily create or attach the control segment.  Safe to call from any
- * backend at any safe point; never called from the begin/end hooks.
+ * shmem_request_hook: request the always-resident control table and its
+ * LWLock tranche.
+ *
+ * PWET_NUM_SLOTS depends on MaxBackends, which must therefore already be
+ * final here.  Verified by reading postmaster.c: it calls, in order,
+ * process_shared_preload_libraries() (runs every library's _PG_init(),
+ * including this one), InitializeMaxBackends(), and only then
+ * process_shmem_requests() (which calls this hook) -- MaxBackends is
+ * computed strictly between the last two.
  */
-static bool
-pwet_ensure_control(void)
+static void
+pwet_shmem_request(void)
+{
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+
+	RequestAddinShmemSpace(pwet_control_size(PWET_NUM_SLOTS));
+	RequestNamedLWLockTranche(PWET_CONTROL_NAME, 1);
+}
+
+/*
+ * shmem_startup_hook: create or attach the control table.
+ *
+ * Runs once in the postmaster (CreateSharedMemoryAndSemaphores()) and,
+ * under EXEC_BACKEND, again in every child (AttachSharedMemoryStructs()) --
+ * verified in ipci.c, which calls shmem_startup_hook from both places, the
+ * same way pg_stat_statements relies on it to re-derive its own statics in
+ * every child.  pwet_ctl/pwet_lock are plain process-local pointers into
+ * shared memory, not stored in shared memory themselves, so each
+ * EXEC_BACKEND child must (and does) recompute them here; a fork()-based
+ * child instead simply inherits them from the postmaster.
+ */
+static void
+pwet_shmem_startup(void)
 {
 	bool		found;
 
-	if (pwet_ctl != NULL)
-		return true;
+	if (prev_shmem_startup_hook)
+		prev_shmem_startup_hook();
 
-	pwet_ctl = (PwetControl *) GetNamedDSMSegment(PWET_CONTROL_NAME,
-												  pwet_control_size(PWET_NUM_SLOTS),
-												  pwet_control_init,
-												  &found,
-												  NULL);
-	return pwet_ctl != NULL;
+	pwet_ctl = NULL;
+
+	pwet_lock = &(GetNamedLWLockTranche(PWET_CONTROL_NAME))->lock;
+
+	pwet_ctl = (PwetSlot *) ShmemInitStruct(PWET_CONTROL_STRUCT_NAME,
+											pwet_control_size(PWET_NUM_SLOTS),
+											&found);
+	if (!found)
+		pwet_control_init(pwet_ctl);
 }
 
 /*
@@ -421,10 +457,18 @@ pwet_attach_stats(void)
 	if (in_attach || !pwet_can_attach())
 		return false;
 
+	/*
+	 * pwet_ctl/pwet_lock are set up by pwet_shmem_startup() before any
+	 * user code can run (the module requires shared_preload_libraries, so
+	 * that hook always fires first); only the DSA payload area is created
+	 * lazily, on demand, here.
+	 */
+	Assert(pwet_ctl != NULL && pwet_lock != NULL);
+
 	in_attach = true;
 	PG_TRY();
 	{
-		if (pwet_ensure_control() && pwet_ensure_stats_dsa())
+		if (pwet_ensure_stats_dsa())
 		{
 			PwetLWLockHashEntry *entries;
 			int			hash_size;
@@ -446,8 +490,8 @@ pwet_attach_stats(void)
 				for (i = 0; i < hash_size; i++)
 					entries[i].tranche_id = PWET_LWLOCK_EMPTY;
 
-				slot = &pwet_ctl->slots[MyProcNumber];
-				LWLockAcquire(&pwet_ctl->lock, LW_EXCLUSIVE);
+				slot = &pwet_ctl[MyProcNumber];
+				LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
 				if (DsaPointerIsValid(slot->stats_ptr))
 					dsa_free(pwet_stats_dsa, slot->stats_ptr);
 				slot->stats_ptr = stats_ptr;
@@ -456,7 +500,7 @@ pwet_attach_stats(void)
 				pg_atomic_fetch_add_u32(&slot->generation, 1);
 				pwet_last_reset_generation =
 					pg_atomic_read_u32(&slot->reset_generation);
-				LWLockRelease(&pwet_ctl->lock);
+				LWLockRelease(pwet_lock);
 
 				pwet_my_stats = state;
 				pwet_my_procno = MyProcNumber;
@@ -514,9 +558,9 @@ pwet_release_stats(void)
 
 	pwet_stats_writes_disabled = true;
 	pwet_my_stats = NULL;
-	slot = &pwet_ctl->slots[procno];
+	slot = &pwet_ctl[procno];
 
-	LWLockAcquire(&pwet_ctl->lock, LW_EXCLUSIVE);
+	LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
 	if (DsaPointerIsValid(slot->stats_ptr))
 	{
 		dsa_free(pwet_stats_dsa, slot->stats_ptr);
@@ -525,7 +569,7 @@ pwet_release_stats(void)
 		slot->owner_start = 0;
 		pg_atomic_fetch_add_u32(&slot->generation, 1);
 	}
-	LWLockRelease(&pwet_ctl->lock);
+	LWLockRelease(pwet_lock);
 
 	if (!pwet_exit_started)
 		pwet_stats_writes_disabled = was_disabled;
@@ -599,7 +643,7 @@ pwet_wait_end(uint32 wait_event_info)
 		 * requester only ever increments it under the control lock.
 		 */
 		reset_generation =
-			pg_atomic_read_u32(&pwet_ctl->slots[pwet_my_procno].reset_generation);
+			pg_atomic_read_u32(&pwet_ctl[pwet_my_procno].reset_generation);
 		if (reset_generation != pwet_last_reset_generation)
 		{
 			memset(state->events, 0, sizeof(state->events));
@@ -769,7 +813,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 	if (!pwet_pid_range(fcinfo, 0, &start_idx, &end_idx))
 		PG_RETURN_VOID();
-	if (!pwet_ensure_control() || !pwet_ensure_stats_dsa())
+	if (!pwet_ensure_stats_dsa())
 		PG_RETURN_VOID();
 
 	pwet_stats_stride = pwet_stats_payload_size(pwet_max_tranches);
@@ -787,7 +831,7 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 	for (procnumber = start_idx; procnumber < end_idx; procnumber++)
 	{
-		PwetSlot   *slot = &pwet_ctl->slots[procnumber];
+		PwetSlot   *slot = &pwet_ctl[procnumber];
 		PgBackendStatus *beentry;
 		dsa_pointer stats_ptr;
 		int			i;
@@ -797,18 +841,18 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 			!PWET_HAS_STATS_PRIVS(beentry->st_userid))
 			continue;
 
-		LWLockAcquire(&pwet_ctl->lock, LW_SHARED);
+		LWLockAcquire(pwet_lock, LW_SHARED);
 		stats_ptr = slot->stats_ptr;
 		if (!DsaPointerIsValid(stats_ptr) ||
 			slot->owner_pid != beentry->st_procpid ||
 			slot->owner_start != beentry->st_proc_start_timestamp)
 		{
-			LWLockRelease(&pwet_ctl->lock);
+			LWLockRelease(pwet_lock);
 			continue;
 		}
 		memcpy(snapshot, dsa_get_address(pwet_stats_dsa, stats_ptr),
 			   pwet_stats_stride);
-		LWLockRelease(&pwet_ctl->lock);
+		LWLockRelease(pwet_lock);
 
 		for (i = 0; i < PWET_DENSE_CLASSES; i++)
 		{
@@ -876,12 +920,12 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 
 	if (!pwet_pid_range(fcinfo, 0, &start_idx, &end_idx))
 		PG_RETURN_VOID();
-	if (!pwet_ensure_control() || !pwet_ensure_stats_dsa())
+	if (!pwet_ensure_stats_dsa())
 		PG_RETURN_VOID();
 
 	for (procnumber = start_idx; procnumber < end_idx; procnumber++)
 	{
-		PwetSlot   *slot = &pwet_ctl->slots[procnumber];
+		PwetSlot   *slot = &pwet_ctl[procnumber];
 		PgBackendStatus *beentry;
 		Datum		values[6];
 		bool		nulls[6] = {0};
@@ -895,7 +939,7 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 			!PWET_HAS_STATS_PRIVS(beentry->st_userid))
 			continue;
 
-		LWLockAcquire(&pwet_ctl->lock, LW_SHARED);
+		LWLockAcquire(pwet_lock, LW_SHARED);
 		if (DsaPointerIsValid(slot->stats_ptr) &&
 			slot->owner_pid == beentry->st_procpid &&
 			slot->owner_start == beentry->st_proc_start_timestamp)
@@ -908,7 +952,7 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 			reset_count = state->reset_count;
 			matched = true;
 		}
-		LWLockRelease(&pwet_ctl->lock);
+		LWLockRelease(pwet_lock);
 
 		if (!matched)
 			continue;
@@ -987,19 +1031,14 @@ pwet_check_reset_privileges(Oid target_role)
 static void
 pwet_request_reset(int procnumber, int target_pid, TimestampTz target_start)
 {
-	PwetSlot   *slot;
-
-	if (!pwet_ensure_control())
-		return;
-
-	slot = &pwet_ctl->slots[procnumber];
+	PwetSlot   *slot = &pwet_ctl[procnumber];
 
 	INJECTION_POINT("pg-wait-event-tracing-reset-before-publish", NULL);
 
-	LWLockAcquire(&pwet_ctl->lock, LW_EXCLUSIVE);
+	LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
 	if (slot->owner_pid == target_pid && slot->owner_start == target_start)
 		pg_atomic_fetch_add_u32(&slot->reset_generation, 1);
-	LWLockRelease(&pwet_ctl->lock);
+	LWLockRelease(pwet_lock);
 }
 
 /*
@@ -1074,9 +1113,6 @@ pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)
 				 errdetail("Only roles with the %s attribute may reset statistics for all backends.",
 						   "SUPERUSER")));
 
-	if (!pwet_ensure_control())
-		PG_RETURN_VOID();
-
 	/*
 	 * Unlike the single-pid form, there is no specific owner to re-check:
 	 * bumping an unowned slot's reset_generation is harmless (nothing
@@ -1085,10 +1121,10 @@ pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)
 	 * the bump at its first wait_end, which is a fine outcome either way for
 	 * an operation whose contract is "every backend", not "this backend".
 	 */
-	LWLockAcquire(&pwet_ctl->lock, LW_EXCLUSIVE);
+	LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
 	for (i = 0; i < PWET_NUM_SLOTS; i++)
-		pg_atomic_fetch_add_u32(&pwet_ctl->slots[i].reset_generation, 1);
-	LWLockRelease(&pwet_ctl->lock);
+		pg_atomic_fetch_add_u32(&pwet_ctl[i].reset_generation, 1);
+	LWLockRelease(pwet_lock);
 
 	PG_RETURN_VOID();
 }
@@ -1160,6 +1196,11 @@ _PG_init(void)
 							NULL,
 							NULL);
 	MarkGUCPrefixReserved("pg_wait_event_tracing");
+
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = pwet_shmem_request;
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = pwet_shmem_startup;
 
 	prev_wait_event_begin_hook = wait_event_begin_hook;
 	prev_wait_event_end_hook = wait_event_end_hook;
