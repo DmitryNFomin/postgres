@@ -46,6 +46,11 @@ CREATE ROLE regress_a LOGIN;
 CREATE ROLE regress_a2 LOGIN IN ROLE regress_a;
 CREATE ROLE regress_b LOGIN;
 CREATE ROLE regress_sig LOGIN IN ROLE pg_signal_backend;
+-- pg_wait_event_tracing.capture is PGC_SUSET, so a non-superuser needs
+-- an explicit SET grant to toggle it; regress_a and regress_b both do
+-- below (the other three roles never SET it, only call the reset
+-- functions).
+GRANT SET ON PARAMETER pg_wait_event_tracing.capture TO regress_a, regress_b;
 ));
 
 sub connect_as

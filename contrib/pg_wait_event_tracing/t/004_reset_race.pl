@@ -16,6 +16,15 @@
 # between resolution and taking the lock -- see pg_wait_event_tracing.c),
 # swaps in a successor while the requester is parked there, and checks
 # the successor's own counters and reset_count come out untouched.
+#
+# PGPROC's free list is FIFO, not LIFO: InitProcess() pops the head
+# (src/backend/storage/lmgr/proc.c) and ProcKill() pushes to the tail,
+# so a freed ProcNumber is only handed out again once every other free
+# slot has been used first.  max_connections is kept small here so that
+# "every other free slot" is a short list, and the successor is found
+# by opening candidate connections in a loop, while the requester is
+# still parked, until one lands on the target's ProcNumber or a
+# generous, bounded number of attempts is exhausted.
 
 use strict;
 use warnings FATAL => 'all';
@@ -27,10 +36,13 @@ use Test::More;
 plan skip_all => 'Injection points not supported by this build'
   unless $ENV{enable_injection_points} eq 'yes';
 
+my $max_connections = 10;
+
 my $node = PostgreSQL::Test::Cluster->new('main');
 $node->init;
 $node->append_conf('postgresql.conf',
 	"shared_preload_libraries = 'pg_wait_event_tracing, injection_points'");
+$node->append_conf('postgresql.conf', "max_connections = $max_connections");
 # Keep pg_sleep() running in the session that issued it, not a parallel
 # worker, so its wait is recorded under the pid this test is watching.
 $node->append_conf('postgresql.conf', "debug_parallel_query = off");
@@ -62,42 +74,64 @@ $R->query_until(
 
 $node->wait_for_event('client backend', $point);
 
-# While R is parked at the injection point, replace A with B: quit A and
-# connect B right away, so the PGPROC free list's LIFO order hands B
-# A's now-vacant ProcNumber.
+# While R is parked at the injection point, replace A with B.
 $A->quit;
 $node->poll_query_until('postgres',
 	"SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $a_pid);"
 ) or die "backend $a_pid did not disappear from pg_stat_activity";
 
-my $B = $node->background_psql('postgres');
-$B->query_safe("SET pg_wait_event_tracing.capture = stats;");
-$B->query_safe("SELECT pg_sleep(0.01);");
-$B->query_safe("SELECT pg_sleep(0.01);");
-my $b_pid = $B->query_safe("SELECT pg_backend_pid();");
-my $b_procnumber = $node->safe_psql(
-	'postgres',
-	"SELECT procnumber FROM pg_stat_wait_event_timing "
-	  . "WHERE pid = $b_pid AND wait_event = 'PgSleep';");
+# Open candidate connections, one at a time, until one lands on A's
+# ProcNumber -- pg_stat_get_backend_idset()'s id is the same
+# proc_number the module's own "procnumber" column reports -- or the
+# budget below is exhausted.  Each candidate runs only this query.
+my $B;
+my $attempts = 0;
+my $max_attempts = 3 * $max_connections;
+while ($attempts < $max_attempts)
+{
+	$attempts++;
+	my $candidate = $node->background_psql('postgres');
+	my $candidate_procnumber = $candidate->query_safe(
+		"SELECT id FROM pg_stat_get_backend_idset() AS id "
+		  . "WHERE pg_stat_get_backend_pid(id) = pg_backend_pid();");
+	if ($candidate_procnumber eq $a_procnumber)
+	{
+		$B = $candidate;
+		last;
+	}
+	$candidate->quit;
+}
 
-# Now let R's stale request through, regardless of whether the reuse
-# below is confirmed: R must not be left blocked at the injection point
-# through the rest of the test (or its teardown).  It targeted A's old
-# owner token, which B's attach has since overwritten, so it must not
-# touch B's slot.
+my $b_pid;
+if (defined $B)
+{
+	# Attach with a fresh owner token while R is still parked, so that
+	# when R's stale request does reach the lock below, it finds this
+	# ProcNumber already reassigned rather than merely unowned.
+	$B->query_safe("SET pg_wait_event_tracing.capture = stats;");
+	$B->query_safe("SELECT pg_sleep(0.01);");
+	$B->query_safe("SELECT pg_sleep(0.01);");
+	$b_pid = $B->query_safe("SELECT pg_backend_pid();");
+}
+
+# Now let R's stale request through, regardless of whether B was found
+# above: R must not be left blocked at the injection point through the
+# rest of the test (or its teardown).  It targeted A's old owner
+# token, which -- if B attached above -- has since been overwritten,
+# so it must not touch B's slot.
 $node->safe_psql('postgres', "SELECT injection_points_wakeup('$point');");
 $R->quit;
 
-# One more wait after the release, so a wrongly-applied reset (which
-# would only be noticed at the *next* wait_end -- see
-# t/003_reset_acl.pl) has every opportunity to show up here too.
-$B->query_safe("SELECT pg_sleep(0.01);");
-
 SKIP:
 {
-	skip "ProcNumber $a_procnumber was not reused by B (B got "
-	  . "$b_procnumber instead); cannot exercise the race in this run", 2
-	  unless $b_procnumber eq $a_procnumber;
+	skip "ProcNumber $a_procnumber was not reused by any of $attempts "
+	  . "connections; cannot exercise the race in this run", 2
+	  unless defined $B;
+
+	# One more wait after the release, so a wrongly-applied reset (which
+	# would only be noticed at the *next* wait_end -- see
+	# t/003_reset_acl.pl) has every opportunity to show up here too.
+	$B->query_safe("SELECT pg_sleep(0.01);");
 
 	is( $node->safe_psql(
 			'postgres',
@@ -113,10 +147,10 @@ SKIP:
 		),
 		'0',
 		"the reset aimed at A's stale token was not consumed by B");
+
+	$B->quit;
 }
 
 $node->safe_psql('postgres', "SELECT injection_points_detach('$point');");
-
-$B->quit;
 
 done_testing();
