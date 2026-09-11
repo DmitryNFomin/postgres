@@ -16,6 +16,10 @@ REGRESS_OPTS = --temp-config $(top_srcdir)/contrib/pg_wait_event_tracing/pg_wait
 # will not have (shared_preload_libraries requires a server restart).
 NO_INSTALLCHECK = 1
 
+TAP_TESTS = 1
+EXTRA_INSTALL = src/test/modules/injection_points
+export enable_injection_points
+
 ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

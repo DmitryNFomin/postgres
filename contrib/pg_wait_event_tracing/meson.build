@@ -35,4 +35,15 @@ tests += {
     # not have.
     'runningcheck': false,
   },
+  'tap': {
+    'env': {
+       'enable_injection_points': get_option('injection_points') ? 'yes' : 'no',
+    },
+    'tests': [
+      't/001_memory.pl',
+      't/002_ownership.pl',
+      't/003_reset_acl.pl',
+      't/004_reset_race.pl',
+    ],
+  },
 }
