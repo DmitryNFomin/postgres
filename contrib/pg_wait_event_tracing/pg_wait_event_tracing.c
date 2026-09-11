@@ -14,16 +14,27 @@
  * themselves.
  *
  * The control table lives in fixed shared memory (shmem_request_hook /
- * shmem_startup_hook), not the DSM registry: a later patch gives
- * server-side processes (the checkpointer, an I/O worker, ...) a way to
- * reach their own slot from inside the begin hook, where they cannot
- * attach anything -- which requires the table to already be mapped by
- * the time any hook can fire.  That is true of fixed shmem in every
- * process from postmaster startup on (the module requires
- * shared_preload_libraries, so shmem_startup_hook always runs before user
- * code does), but not of a DSM-registry segment, which is created or
- * attached lazily on first reference.  This commit only relocates the
- * table; nothing about its contents or how it is used changes.
+ * shmem_startup_hook), not the DSM registry: a server-side process (the
+ * checkpointer, an I/O worker, ...) must reach its slot from inside the
+ * begin hook, where it cannot attach anything (see the "server processes"
+ * block below), so the table has to already be mapped by the time any
+ * hook can fire.  That is true of fixed shmem in every process from
+ * postmaster startup on -- the module requires shared_preload_libraries,
+ * so shmem_startup_hook always runs before user code does -- but is not
+ * true of a DSM-registry segment, which is created/attached lazily on
+ * first reference.
+ *
+ * Server-side processes never reach post_parse_analyze_hook or
+ * ExecutorStart_hook (they don't parse queries or run the executor
+ * through those entry points), so without help they would only ever
+ * attach at the next configuration reload after capture is turned on --
+ * missing everything from process start until then, including
+ * crash-recovery waits in the startup process.  When capture is already
+ * on in the configuration at postmaster start, this module additionally
+ * reserves a second, fixed-size region -- one payload-sized slot per
+ * possible server-side ProcNumber -- and each such process claims its own
+ * slot from inside the begin hook itself (see the claim protocol below),
+ * without allocating, locking, waiting, or erroring.
  *
  * This file carries the statistics level only.  The trace level (per-backend
  * ring buffer, query markers, trace SRFs) is a separate patch; the slot
@@ -45,7 +56,10 @@
 #include "port/pg_bitutils.h"
 #include "port/atomics.h"
 #include "portability/instr_time.h"
+#include "postmaster/autovacuum.h"
+#include "replication/walsender.h"
 #include "storage/dsm_registry.h"
+#include "storage/io_worker.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
 #include "storage/proc.h"
@@ -80,8 +94,20 @@ PGDLLEXPORT void _PG_init(void);
 
 #define PWET_CONTROL_NAME "pg_wait_event_tracing"
 #define PWET_CONTROL_STRUCT_NAME "pg_wait_event_tracing control"
+#define PWET_SERVER_REGION_NAME "pg_wait_event_tracing server processes"
 #define PWET_STATS_DSA_NAME "pg_wait_event_tracing_stats"
 #define PWET_NUM_SLOTS (MaxBackends + NUM_AUXILIARY_PROCS)
+
+/*
+ * "6" in plan section 4.2a's R = [MaxConnections, MaxBackends + 6 +
+ * io_max_workers): the auxiliary process types other than I/O workers
+ * (checkpointer, background writer, WAL writer, WAL summarizer, archiver,
+ * startup process, WAL receiver -- proc.h's own comment on
+ * NUM_AUXILIARY_PROCS explains why 6 of these overlapping-lifetime slots
+ * suffice).  Expressed from proc.h's constants, not as a literal, so it
+ * tracks NUM_AUXILIARY_PROCS/MAX_IO_WORKERS if they ever change.
+ */
+#define PWET_NON_IO_AUX_PROCS (NUM_AUXILIARY_PROCS - MAX_IO_WORKERS)
 #define PWET_HISTOGRAM_BUCKETS 32
 #define PWET_IDX_LWLOCK (-2)
 #define PWET_LWLOCK_EMPTY ((uint16) 0xFFFF)
@@ -146,13 +172,23 @@ typedef struct PwetStats
  * segment.  trace_ptr/trace_state are unused placeholders reserved for the
  * trace-level patch.
  *
- * owner_pid/owner_start identify the backend that currently owns stats_ptr:
- * every reader compares them against the live PgBackendStatus entry for
- * this ProcNumber and ignores the slot on a mismatch, so a successor that
- * has not (yet) attached its own payload never gets attributed a
- * predecessor's counters.  reset_generation lives here, not in the DSA
- * payload, so that a reset request can be published under this same lock
- * and be tied to the owner token that guards it (see pwet_request_reset()).
+ * owner_pid/owner_start identify the process that currently owns the
+ * payload (stats_ptr for a client backend; the matching slice of the fixed
+ * server-process region -- see below -- for a server-side process): every
+ * reader compares them against the live PgBackendStatus entry for this
+ * ProcNumber and ignores the slot on a mismatch, so a successor that has
+ * not (yet) claimed its own payload never gets attributed a predecessor's
+ * counters.
+ *
+ * A client backend publishes owner_pid/owner_start under pwet_lock,
+ * alongside stats_ptr; a server-side process instead publishes them
+ * lock-free from its begin hook (see pwet_claim_fixed_slot()), since the
+ * hook may not take a lock.  reset_generation lives here, not in the
+ * payload itself, so that a reset request (always published under
+ * pwet_lock, regardless of which kind of slot it targets -- see
+ * pwet_request_reset()) can be tied atomically to the owner token that
+ * authorizes it, and so the owning process can later notice it with a
+ * lock-free read (see pwet_wait_end()).
  */
 typedef struct PwetSlot
 {
@@ -174,10 +210,49 @@ static const struct config_enum_entry pwet_capture_options[] = {
 static int	pwet_capture = PWET_CAPTURE_OFF;
 static int	pwet_max_tranches = 192;
 
+/*
+ * guc.c's set_config_with_handle() calls a PGC_ENUM variable's assign_hook
+ * BEFORE storing the new value (assign_hook(newval, newextra) precedes
+ * *conf->variable = newval), so pwet_capture is still the *old* value for
+ * the whole duration of pwet_assign_capture().  A client backend hides
+ * this: pwet_maybe_attach() also runs from post_parse_analyze_hook /
+ * ExecutorStart_hook on the next statement, by which point pwet_capture
+ * has long since been updated.  A server-side process has no "next
+ * statement": with the reserved region absent it depends entirely on the
+ * assign hook's own synchronous pwet_maybe_attach() call to attach via
+ * DSA, and with the region present a released fixed slot depends on
+ * pwet_wait_begin() re-claiming -- which does not go through
+ * pwet_can_attach() at all, but the DSA fallback does, and a stale
+ * pwet_capture there would make pwet_can_attach() see the old (often OFF)
+ * value and refuse forever, since nothing else ever retries it for such a
+ * process.  pwet_capture_effective mirrors pwet_capture except that
+ * pwet_assign_capture() updates it first, so pwet_can_attach() -- the
+ * only place this matters -- always sees the value capture is *becoming*.
+ * The begin/end hooks deliberately keep testing pwet_capture itself (see
+ * pwet_wait_begin()/pwet_wait_end()), so recording never starts or stops
+ * based on a value that has not actually taken effect yet.
+ */
+static int	pwet_capture_effective = PWET_CAPTURE_OFF;
+
 /* The control table: an array of PWET_NUM_SLOTS PwetSlots, nothing else. */
 static PwetSlot *pwet_ctl;
 static LWLock *pwet_lock;
 static dsa_area *pwet_stats_dsa;
+
+/*
+ * The reserved server-process region (plan section 4.2a).  NULL unless
+ * capture was already non-off in the configuration at postmaster start
+ * (see pwet_shmem_request()); [pwet_server_region_start,
+ * pwet_server_region_end) is R, a sub-range of ProcNumbers, and
+ * pwet_server_stride is the byte size of one process's slice, computed
+ * once (from pwet_max_tranches, a PGC_POSTMASTER GUC) at the same time as
+ * the region itself and never recomputed, so every process addresses the
+ * region the same way it was originally sized.
+ */
+static char *pwet_server_region;
+static int	pwet_server_region_start;
+static int	pwet_server_region_end;
+static Size pwet_server_stride;
 
 static PwetStats *pwet_my_stats;
 static ProcNumber pwet_my_procno = INVALID_PROC_NUMBER;
@@ -189,6 +264,15 @@ static bool pwet_attach_needed;
 static bool pwet_exit_started;
 static bool pwet_stats_writes_disabled;
 static bool pwet_exit_callback_registered;
+
+/*
+ * Per-process, computed at most once (see pwet_wait_begin()): does
+ * MyProcNumber fall inside the reserved server-process region?  Cached
+ * because the answer can't change over a process's lifetime, and the
+ * begin/end hooks run on every wait event.
+ */
+static bool pwet_fixed_slot_checked;
+static bool pwet_fixed_slot_eligible;
 
 static wait_event_hook_type prev_wait_event_begin_hook;
 static wait_event_hook_type prev_wait_event_end_hook;
@@ -206,6 +290,10 @@ static void pwet_before_shmem_exit(int code, Datum arg);
 static void pwet_request_reset(int procnumber, int target_pid,
 							   TimestampTz target_start);
 static void pwet_check_reset_privileges(Oid target_role);
+static bool pwet_is_fixed_procnumber(int procnumber);
+static PwetStats *pwet_fixed_payload(int procnumber);
+static void pwet_claim_fixed_slot(void);
+static void pwet_release_fixed_slot(void);
 
 static Size
 pwet_control_size(int nslots)
@@ -361,15 +449,53 @@ pwet_control_init(PwetSlot *slots)
 }
 
 /*
- * shmem_request_hook: request the always-resident control table and its
- * LWLock tranche.
+ * Compute R = [start, end), the sub-range of ProcNumbers server-side
+ * processes can occupy (plan section 4.2a).  Layout, verified on this
+ * master's proc.c (ProcGlobalShmemInit()): ProcNumbers are handed out in
+ * one array, [0, MaxConnections) client backends first, then autovacuum
+ * launcher/workers and the special workers
+ * (autovacuum_worker_slots + NUM_SPECIAL_WORKER_PROCS), then background
+ * workers -- which include parallel query workers and logical replication
+ * workers -- (max_worker_processes), then WAL senders (max_wal_senders),
+ * ending at MaxBackends; then auxiliary processes fill
+ * [MaxBackends, MaxBackends + NUM_AUXILIARY_PROCS) on a first-free linear
+ * search (InitAuxiliaryProcess()), not by type, so with at most
+ * PWET_NON_IO_AUX_PROCS + io_max_workers of them concurrently alive their
+ * ProcNumbers never reach MaxBackends + PWET_NON_IO_AUX_PROCS +
+ * io_max_workers.  io_max_workers is PGC_SIGHUP: if it is raised by a
+ * reload after postmaster start, workers beyond the region reserved here
+ * fall back to the DSA path once they reach a safe point (see
+ * pwet_can_attach()) -- this only shrinks the fixed-slot coverage, it does
+ * not let any process write outside the reserved bytes, since eligibility
+ * is decided against this stored range, not against "is this any kind of
+ * server-side process".  The clamp to MaxBackends + NUM_AUXILIARY_PROCS
+ * is therefore just defense in depth (io_max_workers's own GUC bound
+ * already keeps it <= MAX_IO_WORKERS).
+ */
+static void
+pwet_compute_server_region(int *start, int *end)
+{
+	int			raw_end = MaxBackends + PWET_NON_IO_AUX_PROCS + io_max_workers;
+	int			hard_max = MaxBackends + NUM_AUXILIARY_PROCS;
+
+	*start = MaxConnections;
+	*end = Min(raw_end, hard_max);
+}
+
+/*
+ * shmem_request_hook: request the always-resident control table, its
+ * LWLock tranche, and -- only if capture is already configured on --
+ * the reserved server-process region.
  *
- * PWET_NUM_SLOTS depends on MaxBackends, which must therefore already be
- * final here.  Verified by reading postmaster.c: it calls, in order,
- * process_shared_preload_libraries() (runs every library's _PG_init(),
- * including this one), InitializeMaxBackends(), and only then
- * process_shmem_requests() (which calls this hook) -- MaxBackends is
- * computed strictly between the last two.
+ * MaxBackends and every GUC referenced by pwet_compute_server_region() are
+ * final by the time this runs, and pwet_capture already reflects
+ * postgresql.conf: postmaster.c calls, in order, SelectConfigFiles()
+ * (loads the config file), process_shared_preload_libraries() (runs every
+ * library's _PG_init(), including this one -- DefineCustomEnumVariable()
+ * applies any config-file value for pg_wait_event_tracing.capture right
+ * then), InitializeMaxBackends(), and only then process_shmem_requests()
+ * (which calls this hook).  Verified by reading postmaster.c directly,
+ * not inferred.
  */
 static void
 pwet_shmem_request(void)
@@ -379,29 +505,45 @@ pwet_shmem_request(void)
 
 	RequestAddinShmemSpace(pwet_control_size(PWET_NUM_SLOTS));
 	RequestNamedLWLockTranche(PWET_CONTROL_NAME, 1);
+
+	if (pwet_capture != PWET_CAPTURE_OFF)
+	{
+		int			start,
+					end;
+
+		pwet_compute_server_region(&start, &end);
+		if (end > start)
+			RequestAddinShmemSpace(mul_size(end - start,
+											pwet_stats_payload_size(pwet_max_tranches)));
+	}
 }
 
 /*
- * shmem_startup_hook: create or attach the control table.
+ * shmem_startup_hook: create or attach the control table and, if
+ * requested, the server-process region.
  *
  * Runs once in the postmaster (CreateSharedMemoryAndSemaphores()) and,
  * under EXEC_BACKEND, again in every child (AttachSharedMemoryStructs()) --
  * verified in ipci.c, which calls shmem_startup_hook from both places, the
  * same way pg_stat_statements relies on it to re-derive its own statics in
- * every child.  pwet_ctl/pwet_lock are plain process-local pointers into
- * shared memory, not stored in shared memory themselves, so each
- * EXEC_BACKEND child must (and does) recompute them here; a fork()-based
- * child instead simply inherits them from the postmaster.
+ * every child.  pwet_ctl/pwet_lock/pwet_server_region are plain
+ * process-local pointers into shared memory, not stored in shared memory
+ * themselves, so each EXEC_BACKEND child must (and does) recompute them
+ * here; a fork()-based child instead simply inherits them from the
+ * postmaster.
  */
 static void
 pwet_shmem_startup(void)
 {
 	bool		found;
+	int			start,
+				end;
 
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 
 	pwet_ctl = NULL;
+	pwet_server_region = NULL;
 
 	pwet_lock = &(GetNamedLWLockTranche(PWET_CONTROL_NAME))->lock;
 
@@ -410,6 +552,25 @@ pwet_shmem_startup(void)
 											&found);
 	if (!found)
 		pwet_control_init(pwet_ctl);
+
+	/*
+	 * Re-derive R the same way pwet_shmem_request() did.  If capture was
+	 * off then, this evaluates to an empty range and no region was
+	 * requested; ShmemInitStruct() would fail on a zero-size request, so
+	 * skip the call entirely rather than relying on it to no-op.
+	 */
+	pwet_compute_server_region(&start, &end);
+	if (end > start)
+	{
+		pwet_server_stride = pwet_stats_payload_size(pwet_max_tranches);
+		pwet_server_region = (char *) ShmemInitStruct(PWET_SERVER_REGION_NAME,
+													  mul_size(end - start,
+															   pwet_server_stride),
+													  &found);
+		pwet_server_region_start = start;
+		pwet_server_region_end = end;
+		/* ShmemInitStruct()'s underlying allocation is zeroed on creation. */
+	}
 }
 
 /*
@@ -428,20 +589,142 @@ pwet_ensure_stats_dsa(void)
 	return pwet_stats_dsa != NULL;
 }
 
+/*
+ * Is procnumber inside the reserved server-process region, with the
+ * region actually present?  (It exists only when capture was already
+ * configured on at postmaster start; see pwet_shmem_request().)  A
+ * ProcNumber failing this check always means "not eligible for the fixed
+ * path right now", never "out of bounds": every caller already knows
+ * procnumber < PWET_NUM_SLOTS from other bounds checks.
+ */
+static bool
+pwet_is_fixed_procnumber(int procnumber)
+{
+	return pwet_server_region != NULL &&
+		procnumber >= pwet_server_region_start &&
+		procnumber < pwet_server_region_end;
+}
+
+/* Address of procnumber's slice of the server-process region. */
+static PwetStats *
+pwet_fixed_payload(int procnumber)
+{
+	Assert(pwet_is_fixed_procnumber(procnumber));
+	return (PwetStats *) (pwet_server_region +
+						  (Size) (procnumber - pwet_server_region_start) *
+						  pwet_server_stride);
+}
+
 static bool
 pwet_can_attach(void)
 {
-	if (pwet_exit_started || !pwet_active || pwet_capture == PWET_CAPTURE_OFF)
+	/* See pwet_capture_effective's comment for why this, not pwet_capture. */
+	if (pwet_exit_started || !pwet_active ||
+		pwet_capture_effective == PWET_CAPTURE_OFF)
 		return false;
 	if (MyProc == NULL || MyProcNumber == INVALID_PROC_NUMBER)
 		return false;
 	if (MyProcNumber < 0 || MyProcNumber >= PWET_NUM_SLOTS)
 		return false;
+
+	/*
+	 * A ProcNumber inside the reserved region never takes the DSA path
+	 * while that region exists, even before this process has claimed its
+	 * fixed slot: pwet_attach_stats() would publish stats_ptr under
+	 * pwet_lock and point pwet_my_stats at the DSA payload, but readers
+	 * for a ProcNumber in R always consult the fixed region instead (see
+	 * pwet_is_fixed_procnumber() call sites), so anything recorded there
+	 * would silently never be shown.  When the region does not exist
+	 * (capture was off at postmaster start), this is unreachable and
+	 * today's DSA-at-next-reload behaviour is unchanged.
+	 */
+	if (pwet_is_fixed_procnumber(MyProcNumber))
+		return false;
+
 	if (!IsNormalProcessingMode() || CritSectionCount > 0)
 		return false;
 	if (MyProc->lwWaiting != LW_WS_NOT_WAITING)
 		return false;
 	return true;
+}
+
+/*
+ * Claim this process's slot in the reserved server-process region, from
+ * inside the begin hook (plan section 4.2a's claim protocol).  Called at
+ * most once per process (see pwet_wait_begin()'s cached eligibility
+ * check), so there is never a second live process contending for the same
+ * slot concurrently -- the previous occupant, if any, is long gone by the
+ * time a ProcNumber is reused.  The only concurrent observers are the
+ * lock-free readers (pg_stat_get_wait_event_timing() and friends), which
+ * is why ownership is published in the exact order below rather than in
+ * one step.
+ *
+ * Obeys the hook rules: no allocation, no lock, no wait, no ereport --
+ * only plain loads/stores, one memset on already-mapped fixed shared
+ * memory, and write barriers.
+ */
+static void
+pwet_claim_fixed_slot(void)
+{
+	PwetSlot   *slot = &pwet_ctl[MyProcNumber];
+	PwetStats  *payload = pwet_fixed_payload(MyProcNumber);
+	bool		same_owner;
+
+	same_owner = (slot->owner_pid == MyProcPid &&
+				  slot->owner_start == MyStartTimestamp);
+
+	/* (1) Unpublish before touching anything a reader might be copying. */
+	slot->owner_pid = 0;
+	pg_write_barrier();
+
+	/* (2) Fresh owner: reset the payload exactly as a new DSA slot starts. */
+	if (!same_owner)
+	{
+		int			hash_size = pwet_hash_size_for(pwet_max_tranches);
+		PwetLWLockHashEntry *entries;
+		int			i;
+
+		memset(payload, 0, pwet_server_stride);
+		payload->lwlock_hash.num_used = 0;
+		payload->lwlock_hash.hash_size = hash_size;
+		payload->lwlock_hash.max_entries = pwet_max_tranches;
+		entries = pwet_lwlock_hash_entries(payload);
+		for (i = 0; i < hash_size; i++)
+			entries[i].tranche_id = PWET_LWLOCK_EMPTY;
+	}
+
+	/* (3) Publish the new owner: start timestamp first, pid last. */
+	slot->owner_start = MyStartTimestamp;
+	pg_write_barrier();
+	slot->owner_pid = MyProcPid;
+
+	/* (4) Cache the pointer the hooks use. */
+	pwet_my_stats = payload;
+	pwet_my_procno = MyProcNumber;
+	pwet_last_reset_generation = pg_atomic_read_u32(&slot->reset_generation);
+}
+
+/*
+ * Stop writing to a claimed fixed slot (assign hook, capture -> off).
+ * The region is never freed -- it is reserved for the process's entire
+ * lifetime -- so this only withdraws ownership; the reader's beentry
+ * check then makes the row disappear, matching the DSA release path's
+ * user-visible effect.  Re-enabling capture re-claims at the next begin
+ * hook (pwet_can_attach() already refuses the DSA path for this
+ * ProcNumber, so pwet_maybe_attach() is a no-op here and
+ * pwet_claim_fixed_slot() is what picks it back up).
+ *
+ * No lock: owner_pid/owner_start for a slot in the server region are only
+ * ever written by the process that owns MyProcNumber, whether from the
+ * begin hook or from here -- never by another backend, which only ever
+ * touches reset_generation (under pwet_lock; see pwet_request_reset()).
+ */
+static void
+pwet_release_fixed_slot(void)
+{
+	pwet_my_stats = NULL;
+	if (pwet_my_procno != INVALID_PROC_NUMBER)
+		pwet_ctl[pwet_my_procno].owner_pid = 0;
 }
 
 static bool
@@ -587,6 +870,13 @@ pwet_before_shmem_exit(int code, Datum arg)
 static void
 pwet_assign_capture(int newval, void *extra)
 {
+	/*
+	 * Update the "becoming" value first, before anything below can call
+	 * pwet_can_attach() (see pwet_capture_effective's comment): guc.c has
+	 * not yet stored newval into pwet_capture itself at this point.
+	 */
+	pwet_capture_effective = newval;
+
 	if (pwet_my_stats != NULL)
 	{
 		INSTR_TIME_SET_ZERO(pwet_my_stats->wait_start);
@@ -598,14 +888,31 @@ pwet_assign_capture(int newval, void *extra)
 
 	if (newval == PWET_CAPTURE_OFF)
 	{
-		pwet_release_stats();
+		/*
+		 * pwet_release_stats() only knows how to release a DSA payload
+		 * (it checks slot->stats_ptr, which a fixed-slot owner never
+		 * sets); a process holding a claimed fixed slot instead has
+		 * pwet_fixed_slot_eligible set (see pwet_wait_begin()), and needs
+		 * pwet_release_fixed_slot() to withdraw ownership from the
+		 * control table.
+		 */
+		if (pwet_fixed_slot_eligible)
+			pwet_release_fixed_slot();
+		else
+			pwet_release_stats();
 		pwet_attach_needed = false;
 	}
 	else
 	{
 		pwet_attach_needed = true;
-		/* Attach right away if this is a safe point; otherwise the
-		 * post_parse_analyze/ExecutorStart hooks pick it up. */
+		/*
+		 * Attach right away if this is a safe point; otherwise the
+		 * post_parse_analyze/ExecutorStart hooks pick it up for a client
+		 * backend, or the next begin hook re-claims for a server-side
+		 * process (pwet_can_attach() refuses the DSA path for a
+		 * ProcNumber in the reserved region, so pwet_maybe_attach() below
+		 * is a no-op for those; see pwet_claim_fixed_slot()).
+		 */
 		if (IsNormalProcessingMode())
 			pwet_maybe_attach();
 	}
@@ -617,9 +924,32 @@ pwet_wait_begin(uint32 wait_event_info)
 	if (prev_wait_event_begin_hook != NULL)
 		prev_wait_event_begin_hook(wait_event_info);
 
-	if (pwet_capture == PWET_CAPTURE_OFF ||
-		pwet_stats_writes_disabled || pwet_my_stats == NULL)
+	if (pwet_capture == PWET_CAPTURE_OFF || pwet_stats_writes_disabled)
 		return;
+
+	if (pwet_my_stats == NULL)
+	{
+		/*
+		 * A server-side process never reaches post_parse_analyze_hook or
+		 * ExecutorStart_hook, so this is the only place it can attach; a
+		 * client backend attaches through those hooks (or the assign
+		 * hook) instead, since pwet_is_fixed_procnumber() is never true
+		 * for a ProcNumber below MaxConnections.  Computed at most once
+		 * per process: the answer cannot change over its lifetime, and
+		 * this hook runs on every wait event.
+		 */
+		if (!pwet_fixed_slot_checked)
+		{
+			pwet_fixed_slot_checked = true;
+			pwet_fixed_slot_eligible = pwet_is_fixed_procnumber(MyProcNumber);
+		}
+
+		if (pwet_fixed_slot_eligible)
+			pwet_claim_fixed_slot();
+
+		if (pwet_my_stats == NULL)
+			return;
+	}
 
 	INSTR_TIME_SET_CURRENT(pwet_my_stats->wait_start);
 	pwet_my_stats->current_event = wait_event_info;
@@ -792,6 +1122,67 @@ pwet_emit_timing_row(ReturnSetInfo *rsinfo, PgBackendStatus *beentry,
 }
 
 /*
+ * Lock-free read of a fixed slot's owner token (plan section 4.2a): read
+ * both fields, then a read barrier before the caller looks at the
+ * payload, so a concurrent pwet_claim_fixed_slot() -- whose step (1)
+ * clears owner_pid before touching the payload -- is guaranteed visible
+ * first.  Returns false immediately (without touching the payload at all)
+ * if the slot does not currently belong to beentry.
+ */
+static bool
+pwet_fixed_owner_matches(PwetSlot *slot, PgBackendStatus *beentry,
+						 int *out_pid, TimestampTz *out_start)
+{
+	int			pid = slot->owner_pid;
+	TimestampTz start = slot->owner_start;
+
+	pg_read_barrier();
+
+	if (pid != beentry->st_procpid || start != beentry->st_proc_start_timestamp)
+		return false;
+
+	*out_pid = pid;
+	*out_start = start;
+	return true;
+}
+
+/*
+ * Second half of the double read: re-read the owner token after copying
+ * the payload (with a read barrier first, pairing with
+ * pwet_claim_fixed_slot()'s step (3) write barrier) and confirm it still
+ * matches what pwet_fixed_owner_matches() saw.  A mismatch means a claim
+ * raced with the copy and the payload may be torn or already belong to a
+ * new owner; the caller must discard it.
+ */
+static bool
+pwet_fixed_owner_unchanged(PwetSlot *slot, int pid, TimestampTz start)
+{
+	pg_read_barrier();
+	return slot->owner_pid == pid && slot->owner_start == start;
+}
+
+/*
+ * Lock-free read of a claimed fixed slot's full payload into *snapshot.
+ * See pwet_fixed_owner_matches()/pwet_fixed_owner_unchanged() for the
+ * double-read protocol this brackets the copy with.
+ */
+static bool
+pwet_read_fixed_slot(int procnumber, PgBackendStatus *beentry,
+					 PwetStats *snapshot)
+{
+	PwetSlot   *slot = &pwet_ctl[procnumber];
+	int			pid;
+	TimestampTz start;
+
+	if (!pwet_fixed_owner_matches(slot, beentry, &pid, &start))
+		return false;
+
+	memcpy(snapshot, pwet_fixed_payload(procnumber), pwet_server_stride);
+
+	return pwet_fixed_owner_unchanged(slot, pid, start);
+}
+
+/*
  * SQL function: pg_stat_get_wait_event_timing(pid int4, OUT ...)
  *
  * One row per (backend, wait_event) with a non-zero count.  pid is
@@ -831,9 +1222,8 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 
 	for (procnumber = start_idx; procnumber < end_idx; procnumber++)
 	{
-		PwetSlot   *slot = &pwet_ctl[procnumber];
 		PgBackendStatus *beentry;
-		dsa_pointer stats_ptr;
+		bool		matched;
 		int			i;
 
 		beentry = pgstat_get_beentry_by_proc_number(procnumber);
@@ -841,18 +1231,30 @@ pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
 			!PWET_HAS_STATS_PRIVS(beentry->st_userid))
 			continue;
 
-		LWLockAcquire(pwet_lock, LW_SHARED);
-		stats_ptr = slot->stats_ptr;
-		if (!DsaPointerIsValid(stats_ptr) ||
-			slot->owner_pid != beentry->st_procpid ||
-			slot->owner_start != beentry->st_proc_start_timestamp)
+		if (pwet_is_fixed_procnumber(procnumber))
 		{
-			LWLockRelease(pwet_lock);
-			continue;
+			/* Lock-free: the region is never freed, so this never races
+			 * with anything but the owner's own claim. */
+			matched = pwet_read_fixed_slot(procnumber, beentry, snapshot);
 		}
-		memcpy(snapshot, dsa_get_address(pwet_stats_dsa, stats_ptr),
-			   pwet_stats_stride);
-		LWLockRelease(pwet_lock);
+		else
+		{
+			PwetSlot   *slot = &pwet_ctl[procnumber];
+			dsa_pointer stats_ptr;
+
+			LWLockAcquire(pwet_lock, LW_SHARED);
+			stats_ptr = slot->stats_ptr;
+			matched = DsaPointerIsValid(stats_ptr) &&
+				slot->owner_pid == beentry->st_procpid &&
+				slot->owner_start == beentry->st_proc_start_timestamp;
+			if (matched)
+				memcpy(snapshot, dsa_get_address(pwet_stats_dsa, stats_ptr),
+					   pwet_stats_stride);
+			LWLockRelease(pwet_lock);
+		}
+
+		if (!matched)
+			continue;
 
 		for (i = 0; i < PWET_DENSE_CLASSES; i++)
 		{
@@ -925,7 +1327,6 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 
 	for (procnumber = start_idx; procnumber < end_idx; procnumber++)
 	{
-		PwetSlot   *slot = &pwet_ctl[procnumber];
 		PgBackendStatus *beentry;
 		Datum		values[6];
 		bool		nulls[6] = {0};
@@ -939,20 +1340,41 @@ pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
 			!PWET_HAS_STATS_PRIVS(beentry->st_userid))
 			continue;
 
-		LWLockAcquire(pwet_lock, LW_SHARED);
-		if (DsaPointerIsValid(slot->stats_ptr) &&
-			slot->owner_pid == beentry->st_procpid &&
-			slot->owner_start == beentry->st_proc_start_timestamp)
+		if (pwet_is_fixed_procnumber(procnumber))
 		{
-			PwetStats  *state = dsa_get_address(pwet_stats_dsa,
-												slot->stats_ptr);
+			PwetSlot   *slot = &pwet_ctl[procnumber];
+			int			pid;
+			TimestampTz start;
 
-			lwlock_overflow = state->lwlock_overflow_count;
-			flat_overflow = state->flat_overflow_count;
-			reset_count = state->reset_count;
-			matched = true;
+			if (pwet_fixed_owner_matches(slot, beentry, &pid, &start))
+			{
+				PwetStats  *state = pwet_fixed_payload(procnumber);
+
+				lwlock_overflow = state->lwlock_overflow_count;
+				flat_overflow = state->flat_overflow_count;
+				reset_count = state->reset_count;
+				matched = pwet_fixed_owner_unchanged(slot, pid, start);
+			}
 		}
-		LWLockRelease(pwet_lock);
+		else
+		{
+			PwetSlot   *slot = &pwet_ctl[procnumber];
+
+			LWLockAcquire(pwet_lock, LW_SHARED);
+			if (DsaPointerIsValid(slot->stats_ptr) &&
+				slot->owner_pid == beentry->st_procpid &&
+				slot->owner_start == beentry->st_proc_start_timestamp)
+			{
+				PwetStats  *state = dsa_get_address(pwet_stats_dsa,
+													slot->stats_ptr);
+
+				lwlock_overflow = state->lwlock_overflow_count;
+				flat_overflow = state->flat_overflow_count;
+				reset_count = state->reset_count;
+				matched = true;
+			}
+			LWLockRelease(pwet_lock);
+		}
 
 		if (!matched)
 			continue;
