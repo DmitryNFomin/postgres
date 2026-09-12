@@ -12,15 +12,16 @@ below carry new hashes post-rebase. Worktree
 The main checkout at `<workspace>/postgres`
 stayed on `wet-series` throughout; nothing was pushed.
 
-Four commits on `wet-v8-wp2b` (M1, M2, M3, plus a review-fix commit added
-after all three were reviewed):
+Five commits on `wet-v8-wp2b` (M1, M2, M3, plus two review-fix commits
+added after CI/coordinator review):
 
 | # | Commit | Subject |
 |---|---|---|
 | M1 | `b03eca58d46` | pg_wait_event_tracing: move the control table to fixed shared memory |
 | M2 | `ff43c7fb571` | pg_wait_event_tracing: reserve server-process slots and claim them lock-free |
 | M3 | `f2079090fe2` | pg_wait_event_tracing: add TAP test for server-side process collection |
-| fix | `aa93d6e5fd4` | pg_wait_event_tracing: create the server region only when it was requested |
+| fix 1 | `aa93d6e5fd4` | pg_wait_event_tracing: create the server region only when it was requested |
+| fix 2 | `64f135699e0` | pg_wait_event_tracing: do not inherit the fixed-slot eligibility cache across fork |
 
 All four: author `Dmitry Fomin <fomin.list@gmail.com>`, trailer
 `Discussion: https://postgr.es/m/CAPHG-0mAOn05ae6Kqx1wHXxzOk4E5W7ajjd=QBhgkR7a0uyQmw@mail.gmail.com`.
@@ -235,16 +236,124 @@ hook per the hard rules.
 
 **(d)** See the new open question below.
 
+## Fix 2 — "do not inherit the fixed-slot eligibility cache across fork"
+
+CI run 34640640603 on `aa93d6e5fd4`: `t/006` passed 9/9 on both Windows
+jobs (MinGW and MSVC) but failed on Linux (Meson 32-bit, Meson 64-bit,
+Autoconf) and macOS — checkpointer, walwriter, background writer, io
+worker, and the standby's startup process never got rows (the node2
+reload checks and the region-size check, which don't depend on a
+fork()ed process claiming a slot, passed everywhere).
+
+**Root cause.** `pwet_wait_begin()`'s eligibility cache
+(`pwet_fixed_slot_checked`/`pwet_fixed_slot_eligible`, a bare "have we
+ever checked" bool plus the answer) is process-local static memory — but
+the **postmaster itself** also calls the begin hook: its `ServerLoop()`
+waits through `WaitEventSetWait()` (confirmed at
+`src/backend/postmaster/postmaster.c:1693`), which reports through the
+same timed pair every other wait event does, and the hook is installed
+in `_PG_init()`, which runs in the postmaster during
+`process_shared_preload_libraries()`. The postmaster's `MyProcNumber` is
+`INVALID_PROC_NUMBER` for its entire life (confirmed: only
+`InitProcess()`/`InitAuxiliaryProcess()`, in `proc.c`, ever set it to
+anything else, and the postmaster calls neither), so the very first time
+the postmaster itself hits `pwet_wait_begin()`, the cache computes and
+stores `checked=true, eligible=false` — **permanently, in the
+postmaster's own memory image.** Every child the postmaster later
+`fork()`s (checkpointer, background writer, WAL writer, every ordinary
+backend, the startup process) inherits that exact memory image,
+`checked=true, eligible=false` included, and — since the cache says
+"already checked" — never re-derives its own real answer from its own,
+actual `MyProcNumber`, so it never claims its fixed slot, no matter that
+`MyProcNumber` is right there. An `EXEC_BACKEND` child (Windows) does not
+inherit any of this: it starts from a freshly zeroed image via `exec()`,
+not a copy of the parent's memory, which is exactly why the Windows jobs
+passed and every fork()-based platform failed.
+
+**Fix.** Replaced the bare bool with `pwet_fixed_slot_checked_pid`
+(`static int`, matching `MyProcPid`'s own type), and recompute whenever
+`pwet_fixed_slot_checked_pid != MyProcPid` — which is true for every
+process's own first call, forked or exec'd, since no two simultaneously
+live processes share a pid, and the postmaster (which never updates this
+static, for the reason below) always leaves it at its zero-initialized
+default for every child to inherit. If `MyProcNumber` is still
+`INVALID_PROC_NUMBER` when this runs (always true in the postmaster;
+possible only very early, before `InitProcess()`, in any other process),
+neither claims nor caches — it just returns, so a later call retries;
+this is a few extra branches per wait forever in the postmaster
+specifically (it never gets a ProcNumber, so it retries on every single
+wait for its whole life), acceptable since the postmaster's own waits
+are not a hot path.
+
+**Audit of every other static the hooks/claim/assign-hook read or write,
+for the same "written in the postmaster, wrongly inherited by fork"
+problem** (per the coordinator's request):
+
+- `pwet_my_stats`, `pwet_my_procno`, `pwet_last_reset_generation`: only
+  ever written by `pwet_claim_fixed_slot()` or `pwet_attach_stats()`.
+  Both are gated by checks that are unconditionally false in the
+  postmaster — `pwet_claim_fixed_slot()` is only reached when
+  `pwet_fixed_slot_eligible` is true, which (after this fix) can only
+  happen for a process with a valid `MyProcNumber`, which the postmaster
+  never has; `pwet_attach_stats()` goes through `pwet_can_attach()`,
+  which explicitly checks `MyProc == NULL || MyProcNumber ==
+  INVALID_PROC_NUMBER` and returns false for the postmaster on that
+  basis alone. So all three stay at their fresh-process default
+  (NULL/`INVALID_PROC_NUMBER`/0) in the postmaster forever, and every
+  forked child correctly inherits exactly those same defaults — the
+  values a fresh process would also start with. No bug.
+- `pwet_capture_effective`: **is** written in the postmaster (every time
+  `pwet_assign_capture()` runs there — once for the initial
+  `DefineCustomEnumVariable()` placeholder application in `_PG_init()`,
+  and again on every subsequent reload, since the postmaster reprocesses
+  the config file on SIGHUP too, to know what to pass to future
+  children). But this is intentional and correct, not a bug: outside the
+  narrow synchronous window of an actual `assign_hook` call in progress,
+  `pwet_capture_effective` always equals `pwet_capture` (nothing else
+  ever writes either), and `pwet_capture` itself is a GUC variable that a
+  forked child is *supposed* to inherit from the postmaster (that is how
+  every ordinary GUC reaches a freshly forked child at all) — so a
+  child's inherited `pwet_capture_effective` is, by construction, always
+  consistent with its own inherited `pwet_capture` at fork time.
+- `pwet_attach_needed`: set in `_PG_init()` and `pwet_assign_capture()`
+  in the postmaster and inherited by every fork()ed child — but this is
+  the existing, already-relied-upon mechanism by which a client backend
+  learns to attach at its first `post_parse_analyze`/`ExecutorStart`
+  call; inheriting it is the point, not a bug. A fixed-slot-eligible
+  child ignores it entirely regardless (`pwet_can_attach()`'s R-guard
+  blocks the DSA path outright), so it cannot cause the fixed-slot bug
+  either way.
+- `pwet_exit_started`, `pwet_stats_writes_disabled`,
+  `pwet_exit_callback_registered`, `pwet_active`: all false (respectively
+  true for `pwet_active`) in the postmaster for its whole life (the first
+  three only ever become true via code paths — `pwet_before_shmem_exit()`,
+  `pwet_maybe_attach()`'s success path — that are themselves unreachable
+  in the postmaster, by the same reasoning as `pwet_my_stats` above), and
+  those are exactly the values a fresh child should start with too. No bug.
+- `pwet_ctl`, `pwet_lock`, `pwet_server_region`,
+  `pwet_server_region_start`, `pwet_server_region_end`,
+  `pwet_server_stride`, `pwet_stats_dsa`, `pwet_region_requested`: all
+  either raw pointers into shared memory (valid at the same address in
+  every fork()ed child by construction — this is the *correct,
+  documented* fork-inheritance path, contrasted with EXEC_BACKEND's
+  explicit re-derivation, in `pwet_shmem_startup()`'s own comment) or, for
+  `pwet_region_requested`, meaningless outside the one postmaster-only
+  code path that reads it (see the fix-1 section above). No bug.
+
+Conclusion: `pwet_fixed_slot_checked`/`pwet_fixed_slot_eligible` was the
+only static with this problem. `t/006` (already merged) is the
+regression test for it; no test changes were needed.
+
 ## Validation performed
 
 - `meson setup build-v8-wp2b --buildtype=debugoptimized -Dcassert=true
   -Dwerror=true -Dinjection_points=true` — clean.
 - `ninja -j2 contrib/pg_wait_event_tracing/pg_wait_event_tracing.so` —
   clean under `-Dwerror=true`, re-verified after every commit including
-  the fix commit (not just once at the end).
+  both fix commits (not just once at the end).
 - `ninja -j2 headerscheck` and `ninja -j2 cpluspluscheck` — both pass at
-  every commit boundary, including the final fix commit.
-- `meson test --list` (before the fix commit) showed both
+  every commit boundary, including the final fix 2 commit.
+- `meson test --list` (before the fix commits) showed both
   `pg_wait_event_tracing/regress` and
   `pg_wait_event_tracing/006_server_processes` registered (listing only;
   starts no server); the fix commit does not touch `meson.build`, so this
@@ -267,14 +376,16 @@ hook per the hard rules.
 
 1. ~~`generation` not bumped by the fixed-slot claim/release paths~~ —
    resolved by fix (c).
-2. **M3's `t/006_server_processes.pl` is unexecuted** (hard rule: no
-   server). Case 2's 200000-byte/slot lower bound, case 1's io-worker
-   `SKIP:` condition, and cases 1/3's reliance on background/WAL-writer
-   processes' unconditional main-loop idle wait are all reasoned from
-   reading `method_worker.c`/`wait_event_names.txt`/`guc_parameters.dat`
-   directly, not observed; this needs a real run on the fork's CI, on
-   more than one platform (including a Windows job and a job that forces
-   `io_method = io_uring`), before it can be trusted.
+2. ~~M3's `t/006_server_processes.pl` is unexecuted~~ — it has since run
+   on the fork's CI (run 34640640603, on fix 1's commit `aa93d6e5fd4`):
+   `regress` passes everywhere and the startup fix works (the postmaster
+   starts with capture off); `t/006` itself passed 9/9 on both Windows
+   jobs and failed on Linux (Meson 32/64, Autoconf) and macOS, which is
+   exactly what caught fix 2's fork-inheritance bug (see the "Fix 2"
+   section above) — the node2 reload checks and the region-size check,
+   which don't depend on any fork()ed process claiming a slot, passed on
+   every platform in that run. Fix 2 has not yet had its own CI run as of
+   this report.
 3. Per WP2b's brief, the trace level (WP3) is explicitly out of scope for
    the reservation: server-side processes still only start tracing at
    the first reload with `capture = trace`, via the DSA path, same as
