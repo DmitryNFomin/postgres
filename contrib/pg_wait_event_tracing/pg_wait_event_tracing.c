@@ -106,6 +106,7 @@ PG_FUNCTION_INFO_V1(pg_stat_reset_wait_event_timing_all);
 PG_FUNCTION_INFO_V1(pg_wait_event_tracing_capacity);
 PG_FUNCTION_INFO_V1(pg_get_backend_wait_event_trace);
 PG_FUNCTION_INFO_V1(pg_get_wait_event_trace);
+PG_FUNCTION_INFO_V1(pg_stat_clear_orphaned_wait_event_rings);
 
 PGDLLEXPORT void _PG_init(void);
 
@@ -508,7 +509,9 @@ static void pwet_release_fixed_slot(void);
 static bool pwet_ensure_trace_dsa(void);
 static bool pwet_attach_trace(void);
 static void pwet_release_trace(void);
-static void emit_wait_event_trace(PwetTraceState *ts, ReturnSetInfo *rsinfo);
+static void emit_wait_event_trace(PwetTraceState *ts, int owner_pid,
+								  ReturnSetInfo *rsinfo);
+static void pwet_orphan_trace(void);
 
 static Size
 pwet_control_size(int nslots)
@@ -1308,7 +1311,7 @@ pwet_before_shmem_exit(int code, Datum arg)
 	pwet_exit_started = true;
 	pwet_stats_writes_disabled = true;
 	pwet_trace_writes_disabled = true;
-	pwet_release_trace();
+	pwet_orphan_trace();
 	pwet_release_stats();
 	pwet_my_procno = INVALID_PROC_NUMBER;
 }
@@ -2092,90 +2095,137 @@ pg_wait_event_tracing_capacity(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
-/*
- * Translate one trace record into the SRF's output row shape and put it
- * into the tuplestore.  Shared by the own-session and cross-backend
- * readers.  Returns without emitting anything for a record_type this
- * build does not recognise (defensive; cannot happen with the type list
- * above) or, for PWET_TRACE_WAIT, an event id of 0 (a record whose
- * duration/event fields were never filled in -- cannot happen either,
- * since the writer only ever completes a record after filling them, but
- * kept as a defensive symmetry with the seqlock check itself).
- */
-static void
-pwet_emit_trace_row(ReturnSetInfo *rsinfo, uint64 ring_index,
-					PwetTraceRecord *rec)
+/* Decoded, SRF-shaped view of one trace record; see pwet_decode_trace_record(). */
+typedef struct PwetTraceRowFields
 {
-	Datum		values[7];
-	bool		nulls[7] = {0};
 	const char *event_type;
 	const char *event_name;
-	double		duration_us = 0;
-	int64		query_id = 0;
-	int32		depth = 0;
+	double		duration_us;
+	int64		query_id;
+	int32		depth;
+} PwetTraceRowFields;
+
+/*
+ * Decode one trace record's record_type into the SRF's output row shape.
+ * Shared by the own-session and cross-backend readers.  Returns false
+ * (nothing should be emitted) for a record_type this build does not
+ * recognise (defensive; cannot happen with the type list below) or, for
+ * PWET_TRACE_WAIT, an event id of 0 (a record whose duration/event fields
+ * were never filled in -- cannot happen either, since the writer only
+ * ever completes a record after filling them, but kept as a defensive
+ * symmetry with the seqlock check itself).
+ */
+static bool
+pwet_decode_trace_record(PwetTraceRecord *rec, PwetTraceRowFields *out)
+{
+	out->duration_us = 0;
+	out->query_id = 0;
+	out->depth = 0;
 
 	switch (rec->record_type)
 	{
 		case PWET_TRACE_WAIT:
 			if (rec->data.wait.event == 0)
-				return;
-			event_type = pgstat_get_wait_event_type(rec->data.wait.event);
-			event_name = pgstat_get_wait_event(rec->data.wait.event);
-			duration_us = (double) rec->data.wait.duration_ns / 1000.0;
+				return false;
+			out->event_type = pgstat_get_wait_event_type(rec->data.wait.event);
+			out->event_name = pgstat_get_wait_event(rec->data.wait.event);
+			out->duration_us = (double) rec->data.wait.duration_ns / 1000.0;
 			break;
 		case PWET_TRACE_QUERY_START:
-			event_type = "Query";
-			event_name = "QueryStart";
-			query_id = rec->data.marker.query_id;
+			out->event_type = "Query";
+			out->event_name = "QueryStart";
+			out->query_id = rec->data.marker.query_id;
 			break;
 		case PWET_TRACE_EXEC_START:
-			event_type = "Query";
-			event_name = "ExecStart";
-			query_id = rec->data.marker.query_id;
-			depth = (int32) rec->data.marker.depth;
+			out->event_type = "Query";
+			out->event_name = "ExecStart";
+			out->query_id = rec->data.marker.query_id;
+			out->depth = (int32) rec->data.marker.depth;
 			break;
 		case PWET_TRACE_EXEC_END:
-			event_type = "Query";
-			event_name = "ExecEnd";
-			query_id = rec->data.marker.query_id;
-			depth = (int32) rec->data.marker.depth;
+			out->event_type = "Query";
+			out->event_name = "ExecEnd";
+			out->query_id = rec->data.marker.query_id;
+			out->depth = (int32) rec->data.marker.depth;
 			break;
 		case PWET_TRACE_UTILITY_START:
-			event_type = "Query";
-			event_name = "UtilityStart";
-			query_id = rec->data.marker.query_id;
+			out->event_type = "Query";
+			out->event_name = "UtilityStart";
+			out->query_id = rec->data.marker.query_id;
 			break;
 		case PWET_TRACE_UTILITY_END:
-			event_type = "Query";
-			event_name = "UtilityEnd";
-			query_id = rec->data.marker.query_id;
+			out->event_type = "Query";
+			out->event_name = "UtilityEnd";
+			out->query_id = rec->data.marker.query_id;
 			break;
 		case PWET_TRACE_TXN_COMMIT:
-			event_type = "Query";
-			event_name = "TxnCommit";
+			out->event_type = "Query";
+			out->event_name = "TxnCommit";
 			break;
 		case PWET_TRACE_TXN_ABORT:
-			event_type = "Query";
-			event_name = "TxnAbort";
+			out->event_type = "Query";
+			out->event_name = "TxnAbort";
 			break;
 		case PWET_TRACE_IDLE:
-			event_type = "Query";
-			event_name = "Idle";
+			out->event_type = "Query";
+			out->event_name = "Idle";
 			break;
 		default:
-			return;
+			return false;
 	}
 
-	if (event_type == NULL || event_name == NULL)
+	return out->event_type != NULL && out->event_name != NULL;
+}
+
+/* Own-session row shape: no owner_pid column (it is always MyProcPid). */
+static void
+pwet_emit_trace_row(ReturnSetInfo *rsinfo, uint64 ring_index,
+					PwetTraceRecord *rec)
+{
+	PwetTraceRowFields f;
+	Datum		values[7];
+	bool		nulls[7] = {0};
+
+	if (!pwet_decode_trace_record(rec, &f))
 		return;
 
 	values[0] = Int64GetDatum((int64) ring_index);
 	values[1] = Int64GetDatum(rec->timestamp_ns);
-	values[2] = CStringGetTextDatum(event_type);
-	values[3] = CStringGetTextDatum(event_name);
-	values[4] = Float8GetDatum(duration_us);
-	values[5] = Int64GetDatum(query_id);
-	values[6] = Int32GetDatum(depth);
+	values[2] = CStringGetTextDatum(f.event_type);
+	values[3] = CStringGetTextDatum(f.event_name);
+	values[4] = Float8GetDatum(f.duration_us);
+	values[5] = Int64GetDatum(f.query_id);
+	values[6] = Int32GetDatum(f.depth);
+
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+}
+
+/*
+ * Cross-backend row shape: leads with owner_pid, the pid of the ring's
+ * producer -- live or, for an ORPHANED ring (fix 3), the pid it had before
+ * it exited -- so a caller can identify a post-mortem ring's origin
+ * without a second lookup that would fail anyway (the producer's
+ * PgBackendStatus entry no longer exists once it has exited).
+ */
+static void
+pwet_emit_trace_row_for_procnumber(ReturnSetInfo *rsinfo, int owner_pid,
+								   uint64 ring_index, PwetTraceRecord *rec)
+{
+	PwetTraceRowFields f;
+	Datum		values[8];
+	bool		nulls[8] = {0};
+
+	if (!pwet_decode_trace_record(rec, &f))
+		return;
+
+	values[0] = Int32GetDatum(owner_pid);
+	values[1] = Int64GetDatum((int64) ring_index);
+	values[2] = Int64GetDatum(rec->timestamp_ns);
+	values[3] = CStringGetTextDatum(f.event_type);
+	values[4] = CStringGetTextDatum(f.event_name);
+	values[5] = Float8GetDatum(f.duration_us);
+	values[6] = Int64GetDatum(f.query_id);
+	values[7] = Int32GetDatum(f.depth);
 
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 }
@@ -2263,7 +2313,7 @@ pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
  * odd-seq record if the owner died mid-write).
  */
 static void
-emit_wait_event_trace(PwetTraceState *ts, ReturnSetInfo *rsinfo)
+emit_wait_event_trace(PwetTraceState *ts, int owner_pid, ReturnSetInfo *rsinfo)
 {
 	uint64		write_pos;
 	uint64		read_start;
@@ -2309,7 +2359,8 @@ emit_wait_event_trace(PwetTraceState *ts, ReturnSetInfo *rsinfo)
 	}
 
 	for (i = 0; i < valid_count; i++)
-		pwet_emit_trace_row(rsinfo, valid_indexes[i], &valid_records[i]);
+		pwet_emit_trace_row_for_procnumber(rsinfo, owner_pid,
+										   valid_indexes[i], &valid_records[i]);
 
 	pfree(valid_records);
 	pfree(valid_indexes);
@@ -2320,10 +2371,12 @@ emit_wait_event_trace(PwetTraceState *ts, ReturnSetInfo *rsinfo)
  *
  * Cross-backend trace ring reader.  Returns the records belonging to
  * whichever backend currently or previously occupied procnumber's trace
- * slot; FREE slots (never traced, or already swept) return an empty
- * result.  This is the in-tree consumer of orphan-preserved data (fix 3):
- * a backend that exited while capture = trace leaves its ring ORPHANED,
- * readable here until a successor reclaims the slot or
+ * slot, each tagged with that backend's pid (owner_pid; see
+ * pwet_emit_trace_row_for_procnumber()); FREE slots (never traced, or
+ * already swept) return an empty result.  This is the in-tree consumer of
+ * orphan-preserved data (fix 3): a backend that exited while capture =
+ * trace leaves its ring ORPHANED, readable here (with its last-known pid
+ * still attached) until a successor reclaims the slot or
  * pg_stat_clear_orphaned_wait_event_rings() sweeps it.
  */
 Datum
@@ -2333,6 +2386,7 @@ pg_get_wait_event_trace(PG_FUNCTION_ARGS)
 	int32		procnumber = PG_GETARG_INT32(0);
 	PwetSlot   *slot;
 	PwetTraceState *ts = NULL;
+	int			owner_pid = 0;
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -2350,12 +2404,119 @@ pg_get_wait_event_trace(PG_FUNCTION_ARGS)
 
 	LWLockAcquire(pwet_lock, LW_SHARED);
 	if (slot->trace_state != PWET_TRACE_FREE && DsaPointerIsValid(slot->trace_ptr))
+	{
 		ts = dsa_get_address(pwet_trace_dsa, slot->trace_ptr);
+		owner_pid = slot->trace_owner_pid;
+	}
 	if (ts != NULL)
-		emit_wait_event_trace(ts, rsinfo);
+		emit_wait_event_trace(ts, owner_pid, rsinfo);
 	LWLockRelease(pwet_lock);
 
 	PG_RETURN_VOID();
+}
+
+/*
+ * Transition this backend's trace ring to ORPHANED on process exit (fix
+ * 3), instead of freeing it: trace_owner_pid/trace_owner_start are left
+ * untouched (they already identify this process, the one now exiting),
+ * so pg_get_wait_event_trace() keeps attributing the ring to its producer
+ * post-mortem, like a flight recorder.  A successor that later claims
+ * this ProcNumber and attaches trace reclaims (frees) the orphan in
+ * pwet_attach_trace(); pg_stat_clear_orphaned_wait_event_rings() lets an
+ * administrator sweep every orphan explicitly, for procnumbers that
+ * never get reused (e.g. a long-lived connection pool with capture
+ * briefly enabled).  Nothing runs at process start to reclaim an orphan
+ * earlier (contrast v6's now-removed clear-orphan-at-init step, whose
+ * EXEC_BACKEND ordering bug was V6-3): reclaim happens lazily, at the
+ * successor's own trace attach, which is always a safe point -- so
+ * EXEC_BACKEND's relative ordering of shared-memory attachment and
+ * backend initialization cannot matter here.
+ */
+static void
+pwet_orphan_trace(void)
+{
+	PwetSlot   *slot;
+	ProcNumber	procno = pwet_my_procno;
+
+	if (pwet_my_trace == NULL || procno == INVALID_PROC_NUMBER)
+	{
+		pwet_my_trace = NULL;
+		return;
+	}
+
+	pwet_my_trace = NULL;
+	slot = &pwet_ctl[procno];
+
+	LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
+	if (DsaPointerIsValid(slot->trace_ptr))
+	{
+		slot->trace_state = PWET_TRACE_ORPHANED;
+		pg_atomic_fetch_add_u32(&slot->generation, 1);
+	}
+	LWLockRelease(pwet_lock);
+}
+
+/*
+ * SQL function: pg_stat_clear_orphaned_wait_event_rings()
+ *
+ * Free every trace ring whose owner has exited (trace_state ORPHANED).
+ * Superuser-only in C, matching this module's pg_stat_reset_wait_event_
+ * timing_all() (fix 4's C-level hard-superuser policy for cluster-scope
+ * mutating admin functions, rather than v6's plain SQL-level REVOKE-only
+ * default): this operation, like that one, can disrupt any concurrent
+ * cross-backend reader of any orphan.
+ *
+ * Per-slot lock acquire/release rather than one lock held across the
+ * whole sweep, so a long sweep never holds pwet_lock for more than one
+ * slot's worth of work at a time; CHECK_FOR_INTERRUPTS() lets a caller
+ * cancel a long sweep between slots.  An unlocked fast-path skips a
+ * non-ORPHANED slot without taking the lock at all; the authoritative
+ * re-check under the lock means a concurrent reclaim by a successor's own
+ * attach is never raced (we only ever free a slot we ourselves saw, and
+ * re-saw under the lock, as ORPHANED).
+ */
+Datum
+pg_stat_clear_orphaned_wait_event_rings(PG_FUNCTION_ARGS)
+{
+	int64		freed = 0;
+	int			i;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to clear orphaned wait event trace rings"),
+				 errdetail("Only roles with the %s attribute may free orphaned trace rings.",
+						   "SUPERUSER")));
+
+	if (!pwet_ensure_trace_dsa())
+		PG_RETURN_INT64(0);
+
+	for (i = 0; i < PWET_NUM_SLOTS; i++)
+	{
+		PwetSlot   *slot = &pwet_ctl[i];
+
+		CHECK_FOR_INTERRUPTS();
+
+		/* Unlocked fast-path: skip a non-ORPHANED slot cheaply. */
+		if (slot->trace_state != PWET_TRACE_ORPHANED)
+			continue;
+
+		LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
+		if (slot->trace_state == PWET_TRACE_ORPHANED &&
+			DsaPointerIsValid(slot->trace_ptr))
+		{
+			dsa_free(pwet_trace_dsa, slot->trace_ptr);
+			slot->trace_ptr = InvalidDsaPointer;
+			slot->trace_state = PWET_TRACE_FREE;
+			slot->trace_owner_pid = 0;
+			slot->trace_owner_start = 0;
+			pg_atomic_fetch_add_u32(&slot->generation, 1);
+			freed++;
+		}
+		LWLockRelease(pwet_lock);
+	}
+
+	PG_RETURN_INT64(freed);
 }
 
 void

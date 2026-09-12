@@ -160,10 +160,13 @@ REVOKE EXECUTE ON FUNCTION pg_get_backend_wait_event_trace() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pg_get_backend_wait_event_trace() TO pg_read_all_stats;
 
 -- Cross-backend reader, keyed by procnumber (reads ACTIVE and ORPHANED
--- rings alike; see pg_stat_clear_orphaned_wait_event_rings() below for the
--- orphan lifecycle).
+-- rings alike -- fix 3 -- tagging every row with owner_pid, the ring's
+-- producer, live or, for an orphan, its last-known pid; see
+-- pg_stat_clear_orphaned_wait_event_rings() below for the orphan
+-- lifecycle).
 CREATE FUNCTION pg_get_wait_event_trace(
     procnumber int4,
+    OUT owner_pid int4,
     OUT seq int8,
     OUT timestamp_ns int8,
     OUT wait_event_type text,
@@ -176,3 +179,13 @@ AS 'MODULE_PATHNAME', 'pg_get_wait_event_trace'
 LANGUAGE C VOLATILE PARALLEL RESTRICTED;
 REVOKE EXECUTE ON FUNCTION pg_get_wait_event_trace(int4) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pg_get_wait_event_trace(int4) TO pg_read_all_stats;
+
+-- Administrative sweep (fix 3): free every trace ring whose owner has
+-- exited.  Cluster-scope and mutating, so -- like
+-- pg_stat_reset_wait_event_timing_all() -- it is superuser-only in C and
+-- NOT granted to pg_read_all_stats.
+CREATE FUNCTION pg_stat_clear_orphaned_wait_event_rings()
+RETURNS int8
+AS 'MODULE_PATHNAME', 'pg_stat_clear_orphaned_wait_event_rings'
+LANGUAGE C VOLATILE;
+REVOKE EXECUTE ON FUNCTION pg_stat_clear_orphaned_wait_event_rings() FROM PUBLIC;
