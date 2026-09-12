@@ -383,23 +383,49 @@ pwet_check_trace_ring_size(int *newval, void **extra, GucSource source)
  * guc.c's set_config_with_handle() calls a PGC_ENUM variable's assign_hook
  * BEFORE storing the new value (assign_hook(newval, newextra) precedes
  * *conf->variable = newval), so pwet_capture is still the *old* value for
- * the whole duration of pwet_assign_capture().  A client backend hides
- * this: pwet_maybe_attach() also runs from post_parse_analyze_hook /
- * ExecutorStart_hook on the next statement, by which point pwet_capture
- * has long since been updated.  A server-side process has no "next
- * statement": with the reserved region absent it depends entirely on the
- * assign hook's own synchronous pwet_maybe_attach() call to attach via
- * DSA, and with the region present a released fixed slot depends on
- * pwet_wait_begin() re-claiming -- which does not go through
+ * the whole duration of pwet_assign_capture(), including every function it
+ * calls synchronously (pwet_maybe_attach() and everything that reaches from
+ * there).  pwet_capture_effective mirrors pwet_capture except that
+ * pwet_assign_capture() updates it first, so code that needs the value
+ * capture is *becoming* -- not the value that is (still, momentarily)
+ * current -- can see it.
+ *
+ * THE RULE, stated once here for every call site to follow (found the hard
+ * way: CI run 34703751075 showed the trace regress test recording nothing
+ * for an entire session, root-caused to exactly one site below getting this
+ * backwards -- see pwet_maybe_attach()'s comment for the full story):
+ *
+ *   - An ATTACH decision -- may this process allocate/publish a stats
+ *     payload or a trace ring right now -- tests pwet_capture_effective.
+ *     pwet_can_attach(), pwet_can_attach_trace(), and pwet_maybe_attach()'s
+ *     own trace branch all do.  Getting this wrong makes an attach
+ *     triggered by "SET ... = trace" itself silently skip attaching (the
+ *     assign hook sees the stale old value), and if the caller then also
+ *     clears pwet_attach_needed unconditionally, nothing ever retries for
+ *     the rest of the session.
+ *   - A RECORDING decision -- given an already-attached payload, should
+ *     this hook or marker writer actually write to it right now -- tests
+ *     pwet_capture itself.  pwet_wait_begin(), pwet_wait_end(),
+ *     pwet_trace_write_marker(), and the post_parse_analyze/ExecutorStart/
+ *     ExecutorEnd/ProcessUtility hooks and the xact callback all do this
+ *     deliberately: none of them are ever invoked synchronously from
+ *     inside pwet_assign_capture(), so pwet_capture is always fully
+ *     current by the time they run, and recording must never start or
+ *     stop based on a value that has not actually taken effect yet.
+ *
+ * A server-side process is why this matters at all: it has no "next
+ * statement" to paper over a missed attach the way a client backend would
+ * (pwet_maybe_attach() also runs from post_parse_analyze_hook/
+ * ExecutorStart_hook, which a client backend reaches again almost
+ * immediately, by which point pwet_capture has long since been updated).
+ * With the reserved region absent, a server-side process depends entirely
+ * on the assign hook's own synchronous pwet_maybe_attach() call to attach
+ * via DSA; with the region present, a released fixed slot depends on
+ * pwet_wait_begin() re-claiming, which does not go through
  * pwet_can_attach() at all, but the DSA fallback does, and a stale
  * pwet_capture there would make pwet_can_attach() see the old (often OFF)
  * value and refuse forever, since nothing else ever retries it for such a
- * process.  pwet_capture_effective mirrors pwet_capture except that
- * pwet_assign_capture() updates it first, so pwet_can_attach() -- the
- * only place this matters -- always sees the value capture is *becoming*.
- * The begin/end hooks deliberately keep testing pwet_capture itself (see
- * pwet_wait_begin()/pwet_wait_end()), so recording never starts or stops
- * based on a value that has not actually taken effect yet.
+ * process.
  */
 static int	pwet_capture_effective = PWET_CAPTURE_OFF;
 
@@ -1498,6 +1524,8 @@ pwet_attach_stats(void)
 static void
 pwet_maybe_attach(void)
 {
+	bool		ready;
+
 	/*
 	 * The outer gate is "am I at a safe point at all", not
 	 * pwet_can_attach() (DSA-stats-path eligibility specifically): a
@@ -1549,26 +1577,38 @@ pwet_maybe_attach(void)
 	if (pwet_my_stats == NULL && pwet_can_attach() && !pwet_attach_stats())
 		return;
 
-	if (pwet_capture == PWET_CAPTURE_TRACE)
+	/*
+	 * This is an ATTACH decision: test pwet_capture_effective, not
+	 * pwet_capture -- see the RULE on pwet_capture_effective's own
+	 * declaration for why, and for the CI-found bug (empty trace ring for
+	 * an entire session, every platform) that this line used to cause by
+	 * testing pwet_capture here instead.
+	 */
+	ready = true;
+	if (pwet_capture_effective == PWET_CAPTURE_TRACE)
 	{
 		/*
 		 * pwet_can_attach_trace() requires pwet_my_procno to already be
 		 * set.  For a fixed-region process that has not yet taken its
 		 * first wait event, that identity does not exist yet (only the
 		 * begin hook's pwet_claim_fixed_slot() can create it), so no ring
-		 * can be attributed yet.  Leave pwet_attach_needed set so this
-		 * retries at the next safe point (client backends get one on
-		 * their very next statement; a server-side process retries on
-		 * the next reload -- an accepted, documented limitation of the
-		 * assign-hook-only attach point for that class of process, no
+		 * can be attributed yet -- an accepted, documented limitation of
+		 * the assign-hook-only attach point for that class of process, no
 		 * different in kind from the stats-only gap plan sec 4.2a already
-		 * describes).
+		 * describes.
 		 */
-		if (!pwet_can_attach_trace() || !pwet_attach_trace())
-			return;
+		ready = pwet_can_attach_trace() && pwet_attach_trace();
 	}
 
-	pwet_attach_needed = false;
+	/*
+	 * Clear pwet_attach_needed only once everything this capture level
+	 * requires is actually attached; otherwise leave it set so the next
+	 * safe point (client backends: their very next statement; a
+	 * server-side process: the next reload) retries instead of silently
+	 * giving up for the rest of the session, as the bug above did.
+	 */
+	if (ready)
+		pwet_attach_needed = false;
 }
 
 static void
