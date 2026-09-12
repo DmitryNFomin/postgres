@@ -123,3 +123,56 @@ CREATE FUNCTION pg_wait_event_tracing_capacity(
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_wait_event_tracing_capacity'
 LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+-- Trace level (pg_wait_event_tracing.capture = trace): a per-session ring
+-- buffer of individual completed waits plus query-attribution markers.
+-- Reading a session's trace exposes its query_id and wait sequence, which
+-- can leak across SECURITY DEFINER call chains, so the view AND both
+-- underlying SRFs are locked to pg_read_all_stats, matching v6.
+CREATE FUNCTION pg_get_backend_wait_event_trace(
+    OUT seq int8,
+    OUT timestamp_ns int8,
+    OUT wait_event_type text,
+    OUT wait_event text,
+    OUT duration_us float8,
+    OUT query_id int8,
+    OUT depth int4)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'pg_get_backend_wait_event_trace'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE VIEW pg_backend_wait_event_trace AS
+    SELECT
+        t.seq,
+        t.timestamp_ns,
+        t.wait_event_type,
+        t.wait_event,
+        t.duration_us,
+        t.query_id,
+        t.depth
+    FROM pg_get_backend_wait_event_trace() t;
+REVOKE ALL ON pg_backend_wait_event_trace FROM PUBLIC;
+GRANT SELECT ON pg_backend_wait_event_trace TO pg_read_all_stats;
+-- Revoke the session-local SRF itself, not just the view, so a role that
+-- can enable trace cannot read its own ring via the function and bypass
+-- the view.
+REVOKE EXECUTE ON FUNCTION pg_get_backend_wait_event_trace() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_get_backend_wait_event_trace() TO pg_read_all_stats;
+
+-- Cross-backend reader, keyed by procnumber (reads ACTIVE and ORPHANED
+-- rings alike; see pg_stat_clear_orphaned_wait_event_rings() below for the
+-- orphan lifecycle).
+CREATE FUNCTION pg_get_wait_event_trace(
+    procnumber int4,
+    OUT seq int8,
+    OUT timestamp_ns int8,
+    OUT wait_event_type text,
+    OUT wait_event text,
+    OUT duration_us float8,
+    OUT query_id int8,
+    OUT depth int4)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'pg_get_wait_event_trace'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+REVOKE EXECUTE ON FUNCTION pg_get_wait_event_trace(int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_get_wait_event_trace(int4) TO pg_read_all_stats;

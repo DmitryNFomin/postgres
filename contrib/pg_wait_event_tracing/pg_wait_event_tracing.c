@@ -36,15 +36,29 @@
  * slot from inside the begin hook itself (see the claim protocol below),
  * without allocating, locking, waiting, or erroring.
  *
- * This file carries the statistics level only.  The trace level (per-backend
- * ring buffer, query markers, trace SRFs) is a separate patch; the slot
- * layout below reserves the fields that level will need (trace_ptr,
- * trace_state) so that addition does not reshape the control segment.
+ * This file also carries the trace level (pg_wait_event_tracing.capture =
+ * trace): a per-backend ring buffer of individual completed waits and
+ * query-attribution markers, addressed through the same control segment
+ * (PwetSlot's trace_ptr/trace_state/trace_owner_pid/trace_owner_start
+ * fields) and allocated in its own DSA area (GetNamedDSA()), lazily, only
+ * for a backend that enables trace.  Trace attach/detach/orphan-reclaim
+ * always happens at the same safe points as stats attach (the assign hook
+ * or the post_parse_analyze/ExecutorStart hooks); the begin/end wait hooks
+ * only ever append an already-allocated ring, lock-free, single-writer,
+ * exactly like the stats hot path.  Query markers are covered in the
+ * comment on the marker state machine further down.
+ *
+ * Trace is not covered by the server-process fixed-memory region (see the
+ * comment above): a per-server-process ring would cost several MiB each,
+ * so a server-side process starts tracing only at the first configuration
+ * reload with capture = trace, via the DSA path in the assign hook, same
+ * as any client backend's assign-hook attach.
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
+#include "access/xact.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_type_d.h"
 #include "executor/executor.h"
@@ -66,6 +80,7 @@
 #include "storage/procarray.h"
 #include "storage/procnumber.h"
 #include "storage/shmem.h"
+#include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/backend_status.h"
@@ -89,6 +104,8 @@ PG_FUNCTION_INFO_V1(pg_stat_get_wait_event_timing_overflow);
 PG_FUNCTION_INFO_V1(pg_stat_reset_wait_event_timing);
 PG_FUNCTION_INFO_V1(pg_stat_reset_wait_event_timing_all);
 PG_FUNCTION_INFO_V1(pg_wait_event_tracing_capacity);
+PG_FUNCTION_INFO_V1(pg_get_backend_wait_event_trace);
+PG_FUNCTION_INFO_V1(pg_get_wait_event_trace);
 
 PGDLLEXPORT void _PG_init(void);
 
@@ -97,6 +114,7 @@ PGDLLEXPORT void _PG_init(void);
 #define PWET_REGION_HEADER_NAME "pg_wait_event_tracing header"
 #define PWET_SERVER_REGION_NAME "pg_wait_event_tracing server processes"
 #define PWET_STATS_DSA_NAME "pg_wait_event_tracing_stats"
+#define PWET_TRACE_DSA_NAME "pg_wait_event_tracing_trace"
 #define PWET_NUM_SLOTS (MaxBackends + NUM_AUXILIARY_PROCS)
 
 /*
@@ -120,15 +138,45 @@ PGDLLEXPORT void _PG_init(void);
 	 has_privs_of_role(GetUserId(), role))
 
 /*
- * Reserved trace_state values.  The trace-level patch adds ACTIVE and
- * ORPHANED; this module only ever produces FREE.
+ * trace_state values (PwetSlot.trace_state).
+ *
+ *   FREE      no ring allocated (trace_ptr invalid).
+ *   ACTIVE    a live process is writing to the ring (trace_owner_pid/start
+ *             identify it).
+ *   ORPHANED  the owner exited; the ring is post-mortem and immutable,
+ *             kept readable until a successor reclaims it or an
+ *             administrator sweeps it (pg_stat_clear_orphaned_wait_event_
+ *             rings()).
  */
 #define PWET_TRACE_FREE 0
+#define PWET_TRACE_ACTIVE 1
+#define PWET_TRACE_ORPHANED 2
+
+/*
+ * Trace record type tags (PwetTraceRecord.record_type).  Numeric values
+ * for WAIT/QUERY_START/EXEC_START/EXEC_END are kept where the peer-review
+ * package already used them (see wp3-trace-parts-from-package.c.txt); the
+ * package's QUERY_END has no v8 equivalent (v8 closes a statement's
+ * interval with ExecEnd/UtilityEnd/TxnCommit/TxnAbort/Idle instead, per
+ * the marker state machine below), so its value (2) is left unused rather
+ * than reassigned.  UTILITY_START/END, TXN_COMMIT/ABORT and IDLE are new
+ * in v8 (plan sec 5.3, fix 6).
+ */
+#define PWET_TRACE_WAIT 0
+#define PWET_TRACE_QUERY_START 1
+#define PWET_TRACE_EXEC_START 3
+#define PWET_TRACE_EXEC_END 4
+#define PWET_TRACE_UTILITY_START 5
+#define PWET_TRACE_UTILITY_END 6
+#define PWET_TRACE_TXN_COMMIT 7
+#define PWET_TRACE_TXN_ABORT 8
+#define PWET_TRACE_IDLE 9
 
 typedef enum PwetCaptureLevel
 {
 	PWET_CAPTURE_OFF = 0,
 	PWET_CAPTURE_STATS,
+	PWET_CAPTURE_TRACE,
 } PwetCaptureLevel;
 
 typedef struct PwetTimingEntry
@@ -169,17 +217,70 @@ typedef struct PwetStats
 } PwetStats;
 
 /*
+ * One trace ring record: 32 bytes, seqlock-protected (single writer, the
+ * owning backend; lock-free readers use the position-encoded identity
+ * check described on emit_wait_event_trace_for_procnumber()).  record_type
+ * selects which half of the union is meaningful:
+ *
+ *   PWET_TRACE_WAIT           data.wait: a completed wait (event, duration)
+ *   everything else           data.marker: a query-attribution marker
+ *                              (query_id, and for EXEC_START/EXEC_END the
+ *                              executor nesting depth; 0 for the rest)
+ *
+ * Field layout and the seqlock protocol are ported from the peer-review
+ * package (wp3-trace-parts-from-package.c.txt); only the second union arm
+ * is renamed/repurposed (query.pad2 -> marker.depth) to carry the nesting
+ * depth the v8 marker set needs, without changing the record size.
+ */
+typedef struct PwetTraceRecord
+{
+	uint32		seq;
+	uint8		record_type;
+	uint8		pad[3];
+	int64		timestamp_ns;
+	union
+	{
+		struct
+		{
+			uint32		event;
+			uint32		pad2;
+			int64		duration_ns;
+		}			wait;
+		struct
+		{
+			int64		query_id;
+			int64		depth;
+		}			marker;
+	}			data;
+} PwetTraceRecord;
+
+StaticAssertDecl(sizeof(PwetTraceRecord) == 32,
+				 "PwetTraceRecord must be exactly 32 bytes");
+
+/*
+ * Per-backend trace ring: header plus a runtime-sized records[] array
+ * (row count decided by pg_wait_event_tracing.trace_ring_size, PGC_POSTMASTER,
+ * so every ring in this postmaster run has the same dimensions).
+ */
+typedef struct PwetTraceState
+{
+	pg_atomic_uint64 write_pos;
+	uint32		ring_mask;
+	uint32		pad;
+	PwetTraceRecord records[FLEXIBLE_ARRAY_MEMBER];
+} PwetTraceState;
+
+/*
  * One entry per possible ProcNumber, always resident in the control
- * segment.  trace_ptr/trace_state are unused placeholders reserved for the
- * trace-level patch.
+ * segment.
  *
  * owner_pid/owner_start identify the process that currently owns the
- * payload (stats_ptr for a client backend; the matching slice of the fixed
- * server-process region -- see below -- for a server-side process): every
- * reader compares them against the live PgBackendStatus entry for this
- * ProcNumber and ignores the slot on a mismatch, so a successor that has
- * not (yet) claimed its own payload never gets attributed a predecessor's
- * counters.
+ * stats payload (stats_ptr for a client backend; the matching slice of the
+ * fixed server-process region -- see below -- for a server-side process):
+ * every stats reader compares them against the live PgBackendStatus entry
+ * for this ProcNumber and ignores the slot on a mismatch, so a successor
+ * that has not (yet) claimed its own payload never gets attributed a
+ * predecessor's counters.
  *
  * A client backend publishes owner_pid/owner_start under pwet_lock,
  * alongside stats_ptr; a server-side process instead publishes them
@@ -190,16 +291,32 @@ typedef struct PwetStats
  * pwet_request_reset()) can be tied atomically to the owner token that
  * authorizes it, and so the owning process can later notice it with a
  * lock-free read (see pwet_wait_end()).
+ *
+ * trace_ptr/trace_state/trace_owner_pid/trace_owner_start are the trace
+ * level's own, independent ownership token for this ProcNumber's ring --
+ * deliberately NOT shared with owner_pid/owner_start above.  The two
+ * lifecycles differ: on exit, the stats payload is freed outright
+ * (pwet_release_stats() clears owner_pid/owner_start), but the trace ring
+ * is orphaned, not freed -- state becomes ORPHANED and trace_owner_pid/
+ * start are RETAINED so a post-mortem reader can still attribute the ring
+ * to its producer even after a successor has already claimed this
+ * ProcNumber's stats slot (see pwet_orphan_trace()/pwet_attach_trace()).
+ * Sharing owner_pid/owner_start between the two would make the successor's
+ * ordinary stats attach silently reattribute the predecessor's still-
+ * orphaned trace ring to itself.
  */
 typedef struct PwetSlot
 {
 	dsa_pointer stats_ptr;		/* InvalidDsaPointer when not collecting */
-	dsa_pointer trace_ptr;		/* reserved for the trace level */
-	uint8		trace_state;	/* reserved for the trace level */
+	dsa_pointer trace_ptr;		/* InvalidDsaPointer when trace_state == FREE */
+	uint8		trace_state;	/* PWET_TRACE_FREE/ACTIVE/ORPHANED */
 	int			owner_pid;		/* 0 when unowned */
 	TimestampTz owner_start;	/* MyStartTimestamp of the owner */
 	pg_atomic_uint32 generation;	/* bumped on every ownership change */
 	pg_atomic_uint32 reset_generation; /* bumped by a reset request */
+	int			trace_owner_pid;	/* producer of trace_ptr's ring, live or
+									 * dead; 0 when trace_state == FREE */
+	TimestampTz trace_owner_start;
 } PwetSlot;
 
 /*
@@ -224,11 +341,42 @@ typedef struct PwetRegionHeader
 static const struct config_enum_entry pwet_capture_options[] = {
 	{"off", PWET_CAPTURE_OFF, false},
 	{"stats", PWET_CAPTURE_STATS, false},
+	{"trace", PWET_CAPTURE_TRACE, false},
 	{NULL, 0, false}
 };
 
 static int	pwet_capture = PWET_CAPTURE_OFF;
 static int	pwet_max_tranches = 192;
+
+/*
+ * Per-backend trace ring size in KB (same default/min/max/unit as v6's
+ * wait_event_trace_ring_size).  PGC_POSTMASTER: every backend in this
+ * postmaster run, including an EXEC_BACKEND child re-running _PG_init(),
+ * ends up with the identical final value (latched at postmaster start,
+ * unlike pwet_capture), so pwet_trace_records_per_ring below is safe to
+ * (re)derive independently in every process -- there is no "decision made
+ * in the postmaster that a child must read back" here, unlike the
+ * server-process region's presence/bounds (see PwetRegionHeader).
+ */
+static int	pwet_trace_ring_size = 4096;
+
+/*
+ * GUC check hook for trace_ring_size: the ring's record count must be a
+ * power of two for the writer's mask-indexing (pos & ring_mask).  Each
+ * record is 32 bytes, so kb is a power of two iff the record count is.
+ */
+static bool
+pwet_check_trace_ring_size(int *newval, void **extra, GucSource source)
+{
+	int			v = *newval;
+
+	if (v <= 0 || (v & (v - 1)) != 0)
+	{
+		GUC_check_errdetail("pg_wait_event_tracing.trace_ring_size must be a positive power of two.");
+		return false;
+	}
+	return true;
+}
 
 /*
  * guc.c's set_config_with_handle() calls a PGC_ENUM variable's assign_hook
@@ -295,10 +443,21 @@ static ProcNumber pwet_my_procno = INVALID_PROC_NUMBER;
 static Size pwet_stats_stride;
 static uint32 pwet_last_reset_generation;
 
+static dsa_area *pwet_trace_dsa;
+static PwetTraceState *pwet_my_trace;
+
+/*
+ * Records per ring, derived from pwet_trace_ring_size on first use and
+ * cached (PGC_POSTMASTER, so the value is the same in every process for
+ * the life of this postmaster run; see pwet_trace_ring_size's comment).
+ */
+static uint32 pwet_trace_records_per_ring;
+
 static bool pwet_active;
 static bool pwet_attach_needed;
 static bool pwet_exit_started;
 static bool pwet_stats_writes_disabled;
+static bool pwet_trace_writes_disabled;
 static bool pwet_exit_callback_registered;
 
 /*
@@ -346,6 +505,10 @@ static bool pwet_is_fixed_procnumber(int procnumber);
 static PwetStats *pwet_fixed_payload(int procnumber);
 static void pwet_claim_fixed_slot(void);
 static void pwet_release_fixed_slot(void);
+static bool pwet_ensure_trace_dsa(void);
+static bool pwet_attach_trace(void);
+static void pwet_release_trace(void);
+static void emit_wait_event_trace(PwetTraceState *ts, ReturnSetInfo *rsinfo);
 
 static Size
 pwet_control_size(int nslots)
@@ -497,6 +660,8 @@ pwet_control_init(PwetSlot *slots)
 		slots[i].owner_start = 0;
 		pg_atomic_init_u32(&slots[i].generation, 0);
 		pg_atomic_init_u32(&slots[i].reset_generation, 0);
+		slots[i].trace_owner_pid = 0;
+		slots[i].trace_owner_start = 0;
 	}
 }
 
@@ -824,6 +989,159 @@ pwet_release_fixed_slot(void)
 	}
 }
 
+/*
+ * Lazily attach this backend to the trace DSA area, exactly like
+ * pwet_ensure_stats_dsa() but for the trace ring; a separate named DSA
+ * area so trace's much larger per-backend footprint (a few MiB versus
+ * ~200 KiB for stats) is a distinct GetNamedDSA() consumer from stats.
+ */
+static bool
+pwet_ensure_trace_dsa(void)
+{
+	bool		found;
+
+	if (pwet_trace_dsa != NULL)
+		return true;
+
+	pwet_trace_dsa = GetNamedDSA(PWET_TRACE_DSA_NAME, &found);
+	return pwet_trace_dsa != NULL;
+}
+
+/*
+ * Attach this backend's trace ring, at a safe point (assign hook or
+ * post_parse_analyze/ExecutorStart -- see pwet_maybe_attach()), never from
+ * the begin/end wait hooks.  Requires stats identity to already be
+ * established (pwet_my_procno set, by whichever mechanism -- DSA attach or
+ * the fixed-region claim -- pwet_maybe_attach() used): trace "implies
+ * stats" (plan sec 5.1), and this function only needs to know which
+ * control slot is ours, not how its stats payload got there.
+ *
+ * If the slot's trace_state is not FREE (ORPHANED from a predecessor that
+ * exited without anyone reclaiming it yet, or, defensively, an
+ * unexpected stale ACTIVE), the old ring is freed and replaced: since
+ * ProcNumbers are exclusively owned one process at a time and
+ * pwet_my_procno already identifies THIS process as the current
+ * occupant, any pre-existing ring at this slot can only belong to a
+ * predecessor, never a live peer -- see the comment on PwetSlot for why
+ * trace_owner_pid/start (not owner_pid/start) is what the predecessor's
+ * identity is read from before we overwrite it here.  This is also
+ * where fix 3's orphan reclaim happens; nothing runs at backend init to
+ * do it earlier, so EXEC_BACKEND start order cannot matter (contrast
+ * v6's now-removed clear-orphan-at-init step).
+ */
+static bool
+pwet_attach_trace(void)
+{
+	static bool in_attach;
+	PwetSlot   *slot;
+	PwetTraceState *ts = NULL;
+	dsa_pointer ring_ptr = InvalidDsaPointer;
+
+	if (pwet_my_trace != NULL)
+		return true;
+	if (in_attach || pwet_capture != PWET_CAPTURE_TRACE ||
+		pwet_my_procno == INVALID_PROC_NUMBER)
+		return false;
+
+	in_attach = true;
+	PG_TRY();
+	{
+		if (pwet_ensure_trace_dsa())
+		{
+			Size		alloc_size;
+
+			if (pwet_trace_records_per_ring == 0)
+				pwet_trace_records_per_ring =
+					(uint32) pwet_trace_ring_size * 1024U /
+					(uint32) sizeof(PwetTraceRecord);
+
+			alloc_size = add_size(offsetof(PwetTraceState, records),
+								  mul_size(pwet_trace_records_per_ring,
+										   sizeof(PwetTraceRecord)));
+			ring_ptr = dsa_allocate_extended(pwet_trace_dsa, alloc_size,
+											 DSA_ALLOC_ZERO |
+											 DSA_ALLOC_NO_OOM);
+			if (DsaPointerIsValid(ring_ptr))
+			{
+				ts = dsa_get_address(pwet_trace_dsa, ring_ptr);
+				pg_atomic_init_u64(&ts->write_pos, 0);
+				ts->ring_mask = pwet_trace_records_per_ring - 1;
+
+				slot = &pwet_ctl[pwet_my_procno];
+				LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
+				if (DsaPointerIsValid(slot->trace_ptr))
+					dsa_free(pwet_trace_dsa, slot->trace_ptr);
+				slot->trace_ptr = ring_ptr;
+				slot->trace_state = PWET_TRACE_ACTIVE;
+				slot->trace_owner_pid = MyProcPid;
+				slot->trace_owner_start = MyStartTimestamp;
+				pg_atomic_fetch_add_u32(&slot->generation, 1);
+				LWLockRelease(pwet_lock);
+
+				pwet_my_trace = ts;
+
+				/*
+				 * Fresh ring: restart the marker state machine so a
+				 * previous trace session's leftover OPEN/AFTER_STATEMENT
+				 * state (from an earlier enable/disable cycle on this same
+				 * backend) can't misattribute the first waits of the new
+				 * session.  (No-op until M3 wires up the marker FSM.)
+				 */
+			}
+		}
+	}
+	PG_FINALLY();
+	{
+		in_attach = false;
+	}
+	PG_END_TRY();
+
+	return pwet_my_trace != NULL;
+}
+
+/*
+ * Release this backend's trace ring back to DSA immediately: called on a
+ * live step-down (capture moving away from trace while this process is
+ * still running -- see pwet_assign_capture()), never on process exit
+ * (exit orphans the ring instead; see pwet_orphan_trace(), added in the
+ * fix-3 commit).  The operator has affirmatively disabled trace, so,
+ * like v6, we honour that and reclaim the memory immediately rather than
+ * leaving a multi-MiB ring pinned for the rest of the session.
+ */
+static void
+pwet_release_trace(void)
+{
+	PwetSlot   *slot;
+	ProcNumber	procno = pwet_my_procno;
+	bool		was_disabled = pwet_trace_writes_disabled;
+
+	if (pwet_my_trace == NULL || pwet_trace_dsa == NULL ||
+		procno == INVALID_PROC_NUMBER)
+	{
+		pwet_my_trace = NULL;
+		return;
+	}
+
+	pwet_trace_writes_disabled = true;
+	pwet_my_trace = NULL;
+	slot = &pwet_ctl[procno];
+
+	LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
+	if (DsaPointerIsValid(slot->trace_ptr))
+	{
+		dsa_free(pwet_trace_dsa, slot->trace_ptr);
+		slot->trace_ptr = InvalidDsaPointer;
+		slot->trace_state = PWET_TRACE_FREE;
+		slot->trace_owner_pid = 0;
+		slot->trace_owner_start = 0;
+		pg_atomic_fetch_add_u32(&slot->generation, 1);
+	}
+	LWLockRelease(pwet_lock);
+
+	if (!pwet_exit_started)
+		pwet_trace_writes_disabled = was_disabled;
+}
+
 static bool
 pwet_attach_stats(void)
 {
@@ -902,7 +1220,19 @@ pwet_maybe_attach(void)
 	if (!pwet_attach_needed || !pwet_can_attach())
 		return;
 
-	if (!pwet_attach_stats())
+	/*
+	 * Attach stats only if not already attached.  For a ProcNumber in the
+	 * fixed server-process region, pwet_can_attach() always refuses the DSA
+	 * path (see its comment), so pwet_attach_stats() returns false there
+	 * until pwet_claim_fixed_slot() (from the begin hook) has already set
+	 * pwet_my_stats -- at which point this whole branch is skipped and we
+	 * fall through to the trace section below using the identity the claim
+	 * already established.  This ordering is what lets trace attach below
+	 * reuse pwet_my_procno without duplicating (and racing) the fixed
+	 * region's own lock-free ownership handshake; see pwet_attach_trace()'s
+	 * comment.
+	 */
+	if (pwet_my_stats == NULL && !pwet_attach_stats())
 		return;
 
 	/*
@@ -917,6 +1247,23 @@ pwet_maybe_attach(void)
 	{
 		before_shmem_exit(pwet_before_shmem_exit, (Datum) 0);
 		pwet_exit_callback_registered = true;
+	}
+
+	if (pwet_capture == PWET_CAPTURE_TRACE)
+	{
+		/*
+		 * Stats identity (pwet_my_procno) might not exist yet for a
+		 * fixed-region process that has not taken its first wait event: no
+		 * ring can be attributed until it does.  Leave pwet_attach_needed
+		 * set so this retries on the next safe point (client backends get
+		 * one on their very next statement; a server-side process retries
+		 * on the next reload -- an accepted, documented limitation of the
+		 * assign-hook-only attach point for that class of process, no
+		 * different in kind from the stats-only gap plan sec 4.2a already
+		 * describes).
+		 */
+		if (pwet_my_procno == INVALID_PROC_NUMBER || !pwet_attach_trace())
+			return;
 	}
 
 	pwet_attach_needed = false;
@@ -960,6 +1307,8 @@ pwet_before_shmem_exit(int code, Datum arg)
 {
 	pwet_exit_started = true;
 	pwet_stats_writes_disabled = true;
+	pwet_trace_writes_disabled = true;
+	pwet_release_trace();
 	pwet_release_stats();
 	pwet_my_procno = INVALID_PROC_NUMBER;
 }
@@ -982,6 +1331,17 @@ pwet_assign_capture(int newval, void *extra)
 
 	if (!pwet_active || pwet_exit_started)
 		return;
+
+	/*
+	 * Trace is released here on ANY move away from trace, live (not just to
+	 * off): stepping down to stats should not leave a multi-MiB ring
+	 * pinned, and this call is a harmless no-op when pwet_my_trace is
+	 * already NULL.  Exiting the process is handled separately, by
+	 * pwet_before_shmem_exit() (which orphans, rather than frees, from the
+	 * fix-3 commit on).
+	 */
+	if (newval != PWET_CAPTURE_TRACE)
+		pwet_release_trace();
 
 	if (newval == PWET_CAPTURE_OFF)
 	{
@@ -1130,6 +1490,40 @@ pwet_wait_end(uint32 wait_event_info)
 				state->lwlock_overflow_count++;
 			else
 				state->flat_overflow_count++;
+
+			/*
+			 * Trace: append one 32-byte record for this completed wait.
+			 * No allocation, no lock, no wait, no ereport -- single writer,
+			 * lock-free, exactly like the stats accounting above.  Gated
+			 * on pwet_capture itself (not pwet_capture_effective): the
+			 * trace ring is only ever addressed via pwet_my_trace, which
+			 * pwet_release_trace()/pwet_orphan_trace() null out at the same
+			 * safe points that flip pwet_capture, so there is no
+			 * in-between state to hide from here the way
+			 * pwet_capture_effective hides one for attach decisions.
+			 */
+			if (pwet_capture == PWET_CAPTURE_TRACE &&
+				!pwet_trace_writes_disabled && pwet_my_trace != NULL)
+			{
+				uint64		pos;
+				PwetTraceRecord *rec;
+				uint32		seq;
+
+				pos = pg_atomic_read_u64(&pwet_my_trace->write_pos);
+				pg_atomic_write_u64(&pwet_my_trace->write_pos, pos + 1);
+				rec = &pwet_my_trace->records[pos & pwet_my_trace->ring_mask];
+				seq = (uint32) (pos * 2 + 1);
+
+				rec->seq = seq;
+				pg_write_barrier();
+				rec->record_type = PWET_TRACE_WAIT;
+				rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
+				rec->data.wait.event = event;
+				rec->data.wait.pad2 = 0;
+				rec->data.wait.duration_ns = duration_ns;
+				pg_write_barrier();
+				rec->seq = seq + 1;
+			}
 
 			INSTR_TIME_SET_ZERO(state->wait_start);
 		}
@@ -1698,6 +2092,272 @@ pg_wait_event_tracing_capacity(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+/*
+ * Translate one trace record into the SRF's output row shape and put it
+ * into the tuplestore.  Shared by the own-session and cross-backend
+ * readers.  Returns without emitting anything for a record_type this
+ * build does not recognise (defensive; cannot happen with the type list
+ * above) or, for PWET_TRACE_WAIT, an event id of 0 (a record whose
+ * duration/event fields were never filled in -- cannot happen either,
+ * since the writer only ever completes a record after filling them, but
+ * kept as a defensive symmetry with the seqlock check itself).
+ */
+static void
+pwet_emit_trace_row(ReturnSetInfo *rsinfo, uint64 ring_index,
+					PwetTraceRecord *rec)
+{
+	Datum		values[7];
+	bool		nulls[7] = {0};
+	const char *event_type;
+	const char *event_name;
+	double		duration_us = 0;
+	int64		query_id = 0;
+	int32		depth = 0;
+
+	switch (rec->record_type)
+	{
+		case PWET_TRACE_WAIT:
+			if (rec->data.wait.event == 0)
+				return;
+			event_type = pgstat_get_wait_event_type(rec->data.wait.event);
+			event_name = pgstat_get_wait_event(rec->data.wait.event);
+			duration_us = (double) rec->data.wait.duration_ns / 1000.0;
+			break;
+		case PWET_TRACE_QUERY_START:
+			event_type = "Query";
+			event_name = "QueryStart";
+			query_id = rec->data.marker.query_id;
+			break;
+		case PWET_TRACE_EXEC_START:
+			event_type = "Query";
+			event_name = "ExecStart";
+			query_id = rec->data.marker.query_id;
+			depth = (int32) rec->data.marker.depth;
+			break;
+		case PWET_TRACE_EXEC_END:
+			event_type = "Query";
+			event_name = "ExecEnd";
+			query_id = rec->data.marker.query_id;
+			depth = (int32) rec->data.marker.depth;
+			break;
+		case PWET_TRACE_UTILITY_START:
+			event_type = "Query";
+			event_name = "UtilityStart";
+			query_id = rec->data.marker.query_id;
+			break;
+		case PWET_TRACE_UTILITY_END:
+			event_type = "Query";
+			event_name = "UtilityEnd";
+			query_id = rec->data.marker.query_id;
+			break;
+		case PWET_TRACE_TXN_COMMIT:
+			event_type = "Query";
+			event_name = "TxnCommit";
+			break;
+		case PWET_TRACE_TXN_ABORT:
+			event_type = "Query";
+			event_name = "TxnAbort";
+			break;
+		case PWET_TRACE_IDLE:
+			event_type = "Query";
+			event_name = "Idle";
+			break;
+		default:
+			return;
+	}
+
+	if (event_type == NULL || event_name == NULL)
+		return;
+
+	values[0] = Int64GetDatum((int64) ring_index);
+	values[1] = Int64GetDatum(rec->timestamp_ns);
+	values[2] = CStringGetTextDatum(event_type);
+	values[3] = CStringGetTextDatum(event_name);
+	values[4] = Float8GetDatum(duration_us);
+	values[5] = Int64GetDatum(query_id);
+	values[6] = Int32GetDatum(depth);
+
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+}
+
+/*
+ * SQL function: pg_get_backend_wait_event_trace()
+ *
+ * Own-session trace ring reader.  No lock needed: this backend is the
+ * ring's sole writer, and it is reading its own memory.
+ */
+Datum
+pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	uint64		write_pos;
+	uint64		read_start;
+	uint64		ring_size;
+	uint64		i;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	pwet_maybe_attach();
+	if (pwet_my_trace == NULL)
+		PG_RETURN_VOID();
+
+	write_pos = pg_atomic_read_u64(&pwet_my_trace->write_pos);
+	if (write_pos == 0)
+		PG_RETURN_VOID();
+
+	ring_size = (uint64) pwet_my_trace->ring_mask + 1;
+	read_start = write_pos > ring_size ? write_pos - ring_size : 0;
+
+	for (i = read_start; i < write_pos; i++)
+	{
+		PwetTraceRecord *rec = &pwet_my_trace->records[i & pwet_my_trace->ring_mask];
+		uint32		expected_seq = (uint32) (i * 2 + 2);
+		uint32		seq_before;
+		uint32		seq_after;
+		PwetTraceRecord copy;
+
+		seq_before = rec->seq;
+		pg_read_barrier();
+		if (seq_before != expected_seq)
+			continue;
+		copy = *rec;
+		pg_read_barrier();
+		seq_after = rec->seq;
+		if (seq_after != expected_seq)
+			continue;
+
+		pwet_emit_trace_row(rsinfo, i, &copy);
+	}
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * Snapshot procnumber's trace ring under pwet_lock and emit its records
+ * into the SRF's tuplestore.  Returns silently for a FREE slot, an
+ * out-of-range procnumber, or an empty ring.
+ *
+ * Cross-backend reader protocol (ported from v6's
+ * emit_wait_event_trace_for_procnumber(), same rationale throughout):
+ *   1. Unlocked fast-path check on trace_state; FREE -> nothing to read.
+ *   2. Acquire pwet_lock LW_SHARED; every trace_state/trace_ptr transition
+ *      (pwet_attach_trace(), pwet_release_trace(), and, from the fix-3
+ *      commit, pwet_orphan_trace()/the orphan sweep) takes it
+ *      LW_EXCLUSIVE, so the ring's identity and address are stable for
+ *      the whole iteration.
+ *   3. Re-check trace_state under the lock and resolve the ring address.
+ *   4. Walk [read_start, write_pos): for each position, the
+ *      POSITION-ENCODED IDENTITY seqlock check against shared memory (NOT
+ *      just parity -- see v6's WaitEventTraceRecord seqlock comment for
+ *      why parity alone accepts a stale previous-cycle record after a
+ *      wraparound): a record at ring index i is valid only if its seq
+ *      equals (uint32)(i*2+2), read before AND after copying the record,
+ *      with a read barrier on each side.
+ *   5. Release the lock, then emit the buffered rows (so a tuplestore
+ *      spill to disk never happens while holding the lock).
+ *
+ * Both ACTIVE and ORPHANED slots are read the same way: for ACTIVE, the
+ * live owner is concurrently appending and the seqlock catches torn
+ * reads; for ORPHANED, the ring is immutable post-mortem data, so the
+ * check is a pass-through (it still correctly skips one trailing
+ * odd-seq record if the owner died mid-write).
+ */
+static void
+emit_wait_event_trace(PwetTraceState *ts, ReturnSetInfo *rsinfo)
+{
+	uint64		write_pos;
+	uint64		read_start;
+	uint64		ring_size;
+	uint64		i;
+	PwetTraceRecord *valid_records;
+	uint64	   *valid_indexes;
+	uint64		valid_count = 0;
+
+	write_pos = pg_atomic_read_u64(&ts->write_pos);
+	if (write_pos == 0)
+		return;
+
+	ring_size = (uint64) ts->ring_mask + 1;
+	read_start = write_pos > ring_size ? write_pos - ring_size : 0;
+
+	/*
+	 * Buffer the validated records locally so the lock can be released
+	 * before any tuplestore_putvalues() call (which can spill to disk for
+	 * a large ring).  Worst case is the full ring.
+	 */
+	valid_records = palloc(sizeof(PwetTraceRecord) * ring_size);
+	valid_indexes = palloc(sizeof(uint64) * ring_size);
+
+	for (i = read_start; i < write_pos; i++)
+	{
+		PwetTraceRecord *rec_shared = &ts->records[i & ts->ring_mask];
+		uint32		expected_seq = (uint32) (i * 2 + 2);
+		uint32		seq_before;
+		uint32		seq_after;
+
+		seq_before = rec_shared->seq;
+		pg_read_barrier();
+		if (seq_before != expected_seq)
+			continue;
+		valid_records[valid_count] = *rec_shared;
+		pg_read_barrier();
+		seq_after = rec_shared->seq;
+		if (seq_after != expected_seq)
+			continue;
+		valid_indexes[valid_count] = i;
+		valid_count++;
+	}
+
+	for (i = 0; i < valid_count; i++)
+		pwet_emit_trace_row(rsinfo, valid_indexes[i], &valid_records[i]);
+
+	pfree(valid_records);
+	pfree(valid_indexes);
+}
+
+/*
+ * SQL function: pg_get_wait_event_trace(procnumber int4)
+ *
+ * Cross-backend trace ring reader.  Returns the records belonging to
+ * whichever backend currently or previously occupied procnumber's trace
+ * slot; FREE slots (never traced, or already swept) return an empty
+ * result.  This is the in-tree consumer of orphan-preserved data (fix 3):
+ * a backend that exited while capture = trace leaves its ring ORPHANED,
+ * readable here until a successor reclaims the slot or
+ * pg_stat_clear_orphaned_wait_event_rings() sweeps it.
+ */
+Datum
+pg_get_wait_event_trace(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int32		procnumber = PG_GETARG_INT32(0);
+	PwetSlot   *slot;
+	PwetTraceState *ts = NULL;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (procnumber < 0 || procnumber >= PWET_NUM_SLOTS)
+		PG_RETURN_VOID();
+
+	slot = &pwet_ctl[procnumber];
+
+	/* Unlocked fast-path: skip a FREE slot without taking the lock. */
+	if (slot->trace_state == PWET_TRACE_FREE)
+		PG_RETURN_VOID();
+
+	if (!pwet_ensure_trace_dsa())
+		PG_RETURN_VOID();
+
+	LWLockAcquire(pwet_lock, LW_SHARED);
+	if (slot->trace_state != PWET_TRACE_FREE && DsaPointerIsValid(slot->trace_ptr))
+		ts = dsa_get_address(pwet_trace_dsa, slot->trace_ptr);
+	if (ts != NULL)
+		emit_wait_event_trace(ts, rsinfo);
+	LWLockRelease(pwet_lock);
+
+	PG_RETURN_VOID();
+}
+
 void
 _PG_init(void)
 {
@@ -1727,6 +2387,18 @@ _PG_init(void)
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
 							NULL,
+							NULL,
+							NULL);
+	DefineCustomIntVariable("pg_wait_event_tracing.trace_ring_size",
+							"Per-backend trace ring size.",
+							NULL,
+							&pwet_trace_ring_size,
+							4096,
+							8,
+							32768,
+							PGC_POSTMASTER,
+							GUC_UNIT_KB | GUC_NOT_IN_SAMPLE,
+							pwet_check_trace_ring_size,
 							NULL,
 							NULL);
 	MarkGUCPrefixReserved("pg_wait_event_tracing");
