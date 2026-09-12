@@ -302,12 +302,28 @@ static bool pwet_stats_writes_disabled;
 static bool pwet_exit_callback_registered;
 
 /*
- * Per-process, computed at most once (see pwet_wait_begin()): does
- * MyProcNumber fall inside the reserved server-process region?  Cached
- * because the answer can't change over a process's lifetime, and the
- * begin/end hooks run on every wait event.
+ * Per-process, computed at most once per process (see pwet_wait_begin()):
+ * does MyProcNumber fall inside the reserved server-process region?
+ * Cached because the answer can't change over a process's lifetime, and
+ * the begin/end hooks run on every wait event.
+ *
+ * Keyed by MyProcPid, not a bare "have we ever checked" bool, because a
+ * bare bool would survive fork() into every child with whatever value it
+ * had in the parent -- and the *postmaster* also calls the begin hook
+ * (its ServerLoop waits through the same WaitEventSetWait() timed pair),
+ * with MyProcNumber == INVALID_PROC_NUMBER, so it would cache
+ * eligible=false once, permanently, for itself; every child forked
+ * afterwards -- checkpointer, background writer, WAL writer, every
+ * ordinary backend -- inherits that exact memory image via fork() and
+ * would see the cache already "checked", never re-deriving its own real
+ * answer from its own MyProcNumber.  (An EXEC_BACKEND child does not
+ * have this problem: it starts from a fresh, zeroed image, not a forked
+ * copy, which is why this bug was invisible on Windows.)  Keying to
+ * MyProcPid makes every process -- forked or exec'd -- recompute on its
+ * own first call, since no live process shares another live process's
+ * pid.
  */
-static bool pwet_fixed_slot_checked;
+static int	pwet_fixed_slot_checked_pid;
 static bool pwet_fixed_slot_eligible;
 
 static wait_event_hook_type prev_wait_event_begin_hook;
@@ -1016,12 +1032,27 @@ pwet_wait_begin(uint32 wait_event_info)
 		 * client backend attaches through those hooks (or the assign
 		 * hook) instead, since pwet_is_fixed_procnumber() is never true
 		 * for a ProcNumber below MaxConnections.  Computed at most once
-		 * per process: the answer cannot change over its lifetime, and
-		 * this hook runs on every wait event.
+		 * per process (see pwet_fixed_slot_checked_pid's comment for why
+		 * this is keyed by pid rather than a bare "already checked"
+		 * flag): the answer cannot change over a process's lifetime once
+		 * it has one, and this hook runs on every wait event.
+		 *
+		 * MyProcNumber can itself still be INVALID_PROC_NUMBER here: the
+		 * postmaster never has one (its own ServerLoop reaches this hook
+		 * too), and any process, right after fork/exec, technically could
+		 * call this before InitProcess()/InitAuxiliaryProcess() has run.
+		 * Neither claims nor caches in that case, so a later call -- once
+		 * (if ever) MyProcNumber becomes valid -- retries; this costs a
+		 * few extra branches per wait in the postmaster for its entire
+		 * lifetime (it never gets a ProcNumber), which is fine since the
+		 * postmaster's own waits are not a hot path.
 		 */
-		if (!pwet_fixed_slot_checked)
+		if (pwet_fixed_slot_checked_pid != MyProcPid)
 		{
-			pwet_fixed_slot_checked = true;
+			if (MyProcNumber == INVALID_PROC_NUMBER)
+				return;
+
+			pwet_fixed_slot_checked_pid = MyProcPid;
 			pwet_fixed_slot_eligible = pwet_is_fixed_procnumber(MyProcNumber);
 		}
 
