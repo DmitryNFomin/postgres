@@ -274,6 +274,21 @@ Options (no core change in A–C):
   hook or marker hook must either never be written while MyProc is NULL, or
   be keyed to MyProcPid so a child recomputes it. A Windows-passes /
   Linux-fails split is the signature of this class of bug.
+- **Two eligibility questions, not one (WP3 review, 2026-09-12).**
+  `pwet_can_attach()` answers "may I take the DSA stats path?", and WP2b made
+  it refuse every ProcNumber in the reserved region. WP3 then gated trace
+  attach behind the same helper, so a process with a reserved slot could
+  never attach a ring at all, contradicting §4.2a/§5.2 ("server-side
+  processes trace from the first reload"). Split it: a safe-point test used
+  by both paths, a DSA-path test on top of it, and a trace test that needs
+  only the safe point plus an established ProcNumber. Register the exit
+  callback before attaching a ring on any path, or a server-side process's
+  ring stays ACTIVE with a dead owner.
+- **Do not emit rows under the control lock (WP3 review).** The trace
+  reader buffered validated records so the lock could be dropped before
+  `tuplestore_putvalues()`, but the caller held LW_SHARED across the whole
+  call: up to 131072 rows per slot, possibly spilling to disk, while
+  attach/release/reset/sweep wait for the exclusive lock.
 - **One pg_sleep() is not one wait.** pg_sleep loops on WaitLatch until its
   own timestamp clock says the time is up; on Windows the latch timeout and
   that clock disagree, so one pg_sleep(0.01) was recorded as 2 waits (CI run
@@ -471,7 +486,7 @@ happens on the fork's CI or on a host the owner provides.
 | WP1 | 0003 test_wait_hook module + regress tests — **DONE 2026-09-11**: branch `wet-v8-wp1` commit 1156a3806cf (after review fix: ring filtered to PgSleep, single-wait helper instead of pg_sleep); fork CI run 34580643617 all green, test executed and passed on Linux Meson, Autoconf, Windows VS | — | 1 |
 | WP2 | 0004 module: port collector under the new name, add v6 features, fixes 1/2/4/5, SQL script, capacity test, regress — **DONE 2026-09-11** (compile-clean; CI pending): `wet-v8-wp2` M1 7e518f5bb94, M2 6311e336b25, M3 8ba6561d410, review fixes f4bf69380b8; CI run 34599726028 failed on every platform only because the regress test lacked CREATE EXTENSION (the preloaded library itself started cleanly on Linux, macOS, MinGW and MSVC); fixed in fd0f427c385; re-run 34605913822 green on 8/9 jobs, macOS failed because its CI job forces `debug_parallel_query = regress`, so pg_sleep ran in a parallel worker and the wait was (correctly) recorded under the worker; test fixed in 02fe98d0f97 (`SET debug_parallel_query = off`); **CI run 34609838704 all green, test executed and passed on macOS, Linux Meson 64, Autoconf, Windows MSVC and MinGW**. WP2b and WP4a branched from f4bf69380b8 and must be rebased onto the WP2 tip at assembly | — | 5 |
 | WP2b | option A: control table to fixed shmem; reserved region + in-hook claim for server-side processes; t/006 — **code done 2026-09-11** (M1 control table to fixed shmem, M2 region + lock-free claim + assign-hook fix via `pwet_capture_effective`, M3 t/006), rebased onto the WP2 tip. Review: claim/read barrier pairing correct; **critical bug** — the startup hook creates the ~10 MB region even when capture was off at start (the range never depends on capture), so the postmaster cannot start with capture off (the default); fix sent: store presence and bounds in an always-allocated shared header set by the postmaster, read by EXEC_BACKEND children. Also t/006 must skip the I/O-worker check unless io_method = worker (CI runs some jobs with io_uring); bump `generation` on claim/release. Bug confirmed by the pre-fix CI run 34638388634: `FATAL: not enough shared memory for data structure "pg_wait_event_tracing server processes" (10633200 bytes requested)` at postmaster start for the capture-off regress node and t/006 node2 (Linux, Windows). **Fix commit aa93d6e5fd4 reviewed and correct** (always-allocated `PwetRegionHeader` written only by the postmaster when it first creates shared memory; every process, EXEC_BACKEND children included, reads presence and bounds from it; t/006 skips the I/O-worker check unless io_method = worker; `generation` bumped on claim/release). A second bug then showed up as a Windows-passes/Linux-fails split: the eligibility cache was inherited from the postmaster across fork (see §4.2b); fixed in 64f135699e0 by keying it to MyProcPid. **DONE 2026-09-12: CI run 34700842756 all green; t/006 passes on every platform (9 checks, 8 where io_method has no workers and that check skips).** | WP2 | 1.5 |
-| WP3 | launched 2026-09-11 on `wet-v8-wp2b` (not wp2), before the WP2b fix lands; will be rebased over it | WP2b | 4 |
+| WP3 | launched 2026-09-11 on `wet-v8-wp2b`. M1 ring/writer/readers a7e709759f5 and M2 orphan lifecycle e36829e9ac5 landed 2026-09-12; M3 (markers, attribution, regress) in progress. Review of M1/M2: seqlock port faithful to v6 (position-encoded identity, barriers both sides), orphan design free of V6-3's ordering trap, ring size forced to a power of two. Three items sent back: (A) reserved-slot processes could never attach a ring, and never registered the exit callback; (B) rows emitted under the shared lock; (C) grants question — the own-session trace function is restricted to pg_read_all_stats while the statistics equivalent is PUBLIC with per-row checks. See §4.2b | WP2b | 4 |
 | WP3 | 0005 trace: ring, reader, orphans (fix 3), markers incl. xact callback (fix 6), SRFs | WP2 skeleton | 4 |
 | WP4a | TAP tests 001-004 (fixes 1, 2, 4, 5) — **DONE 2026-09-11**: `wet-v8-wp4a` (rebased on WP2 tip) 74310b3a69b + 2c140de41c8 + 53888ba66f2 + cbb10ad23dc; after three CI rounds (causes: capture is PGC_SUSET; PGPROC free list is FIFO; BackgroundPsql dies on the first error; one pg_sleep can be several waits on Windows) **CI run 34636885229 all green, every test executed with no skips**: regress 1, 001 7, 002 9, 003 27, 004 2 on Linux 32/64, macOS, MinGW, MSVC | WP2 | 3 (overlaps) |
 | WP4b | TAP tests 005, 010, 011 (trace level) | WP3 | 2 |
