@@ -189,3 +189,93 @@ RETURNS int8
 AS 'MODULE_PATHNAME', 'pg_stat_clear_orphaned_wait_event_rings'
 LANGUAGE C VOLATILE;
 REVOKE EXECUTE ON FUNCTION pg_stat_clear_orphaned_wait_event_rings() FROM PUBLIC;
+
+-- Query-attribution view over a procnumber's trace ring (fix 6), per plan
+-- sec 5.3's rule: a statement's interval runs from its QueryStart (or
+-- UtilityStart) marker to the earliest of the next Idle, the next
+-- QueryStart/UtilityStart at depth 0, or TxnAbort; waits inside are
+-- summed per wait event.  TxnAbort is treated the same as Idle for
+-- bucketing (both open the synthetic '<idle>' bucket): the plan says
+-- TxnAbort ends the current statement's interval but does not name a
+-- bucket for whatever follows before the next real activity, and
+-- treating it as "now idle" avoids inventing an undocumented third
+-- bucket for what is, from an attribution standpoint, the same kind of
+-- gap. Waits before the ring's first marker of any kind are
+-- '<unattributed>'. Depth-0 gating on QueryStart/UtilityStart matters
+-- because post_parse_analyze (and, much more rarely, ProcessUtility) can
+-- itself fire from inside an already-open outer statement (SPI calls
+-- from a SQL/PL function); only a top-level start closes the
+-- previous top-level statement's interval.
+--
+-- Grants match the underlying pg_get_wait_event_trace(): PUBLIC revoked,
+-- pg_read_all_stats granted (this is a read-only view over the same
+-- data, just pre-aggregated).
+CREATE FUNCTION pg_wait_event_trace_by_statement(
+    procnumber int4,
+    OUT bucket text,
+    OUT statement_seq int8,
+    OUT query_id int8,
+    OUT wait_event_type text,
+    OUT wait_event text,
+    OUT calls int8,
+    OUT total_time_us float8)
+RETURNS SETOF record
+LANGUAGE SQL
+VOLATILE
+PARALLEL RESTRICTED
+AS $$
+WITH trace AS (
+    SELECT * FROM pg_get_wait_event_trace(procnumber)
+),
+marked AS (
+    SELECT
+        seq,
+        wait_event_type,
+        wait_event,
+        duration_us,
+        query_id,
+        (wait_event_type = 'Query'
+         AND wait_event IN ('QueryStart', 'UtilityStart')
+         AND depth = 0) AS is_stmt_open,
+        (wait_event_type = 'Query'
+         AND wait_event IN ('Idle', 'TxnAbort')) AS is_idle_open
+    FROM trace
+),
+bucketed AS (
+    SELECT
+        m.*,
+        count(*) FILTER (WHERE is_stmt_open OR is_idle_open)
+            OVER (ORDER BY seq ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+            AS bucket_group
+    FROM marked m
+),
+bucket_labels AS (
+    SELECT
+        bucket_group,
+        CASE WHEN is_stmt_open THEN seq END AS statement_seq,
+        CASE WHEN is_stmt_open THEN query_id END AS bucket_query_id,
+        is_idle_open
+    FROM bucketed
+    WHERE is_stmt_open OR is_idle_open
+)
+SELECT
+    CASE
+        WHEN b.bucket_group = 0 THEN '<unattributed>'
+        WHEN bl.is_idle_open THEN '<idle>'
+        ELSE bl.statement_seq::text
+    END AS bucket,
+    bl.statement_seq,
+    bl.bucket_query_id AS query_id,
+    b.wait_event_type,
+    b.wait_event,
+    count(*) AS calls,
+    sum(b.duration_us) AS total_time_us
+FROM bucketed b
+LEFT JOIN bucket_labels bl USING (bucket_group)
+WHERE b.wait_event_type <> 'Query'
+GROUP BY b.bucket_group, bl.statement_seq, bl.bucket_query_id, bl.is_idle_open,
+         b.wait_event_type, b.wait_event
+ORDER BY min(b.seq), b.wait_event_type, b.wait_event;
+$$;
+REVOKE EXECUTE ON FUNCTION pg_wait_event_trace_by_statement(int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_wait_event_trace_by_statement(int4) TO pg_read_all_stats;

@@ -460,6 +460,29 @@ static bool pwet_exit_started;
 static bool pwet_stats_writes_disabled;
 static bool pwet_trace_writes_disabled;
 static bool pwet_exit_callback_registered;
+static bool pwet_xact_callback_registered;
+
+/*
+ * Query-marker state machine (plan sec 5.3, fix 6), per backend, advanced
+ * only while capture == trace.  Never touched by any hook the postmaster
+ * itself runs (post_parse_analyze/ExecutorStart/ExecutorEnd/
+ * ProcessUtility/the xact callback all fire only in a real backend), so
+ * this cannot be a case of the postmaster/fork trap the coordinator
+ * flagged on WP2b: pwet_marker_state simply never leaves its zero-valued
+ * initial state (PWET_MARKER_IDLE) before any fork(), which is also the
+ * correct starting state for a freshly forked child.  See the comment on
+ * pwet_marker_query_start() and friends, further down, for the
+ * transition rules themselves.
+ */
+typedef enum PwetMarkerState
+{
+	PWET_MARKER_IDLE = 0,
+	PWET_MARKER_OPEN,
+	PWET_MARKER_AFTER_STATEMENT,
+} PwetMarkerState;
+
+static PwetMarkerState pwet_marker_state = PWET_MARKER_IDLE;
+static int	pwet_exec_depth;
 
 /*
  * Per-process, computed at most once per process (see pwet_wait_begin()):
@@ -490,6 +513,8 @@ static wait_event_hook_type prev_wait_event_begin_hook;
 static wait_event_hook_type prev_wait_event_end_hook;
 static post_parse_analyze_hook_type prev_post_parse_analyze_hook;
 static ExecutorStart_hook_type prev_ExecutorStart_hook;
+static ExecutorEnd_hook_type prev_ExecutorEnd_hook;
+static ProcessUtility_hook_type prev_ProcessUtility_hook;
 static shmem_request_hook_type prev_shmem_request_hook;
 static shmem_startup_hook_type prev_shmem_startup_hook;
 
@@ -509,9 +534,9 @@ static void pwet_release_fixed_slot(void);
 static bool pwet_ensure_trace_dsa(void);
 static bool pwet_attach_trace(void);
 static void pwet_release_trace(void);
-static void emit_wait_event_trace(PwetTraceState *ts, int owner_pid,
-								  ReturnSetInfo *rsinfo);
+static void emit_wait_event_trace(int procnumber, ReturnSetInfo *rsinfo);
 static void pwet_orphan_trace(void);
+static void pwet_xact_callback(XactEvent event, void *arg);
 
 static Size
 pwet_control_size(int nslots)
@@ -867,16 +892,41 @@ pwet_fixed_payload(int procnumber)
 						  pwet_server_stride);
 }
 
+/*
+ * Is this process at a point where attaching anything (allocating,
+ * locking, erroring) is safe?  Identity- and mode-related only -- says
+ * nothing about whether capture wants an attach at all, or which of the
+ * two payload paths (DSA vs. the fixed server-process region) applies.
+ * Shared by pwet_can_attach() (the DSA stats path) and
+ * pwet_can_attach_trace(): both need exactly this, plus their own
+ * capture-level and path-specific tests layered on top.
+ */
 static bool
-pwet_can_attach(void)
+pwet_at_safe_point(void)
 {
-	/* See pwet_capture_effective's comment for why this, not pwet_capture. */
-	if (pwet_exit_started || !pwet_active ||
-		pwet_capture_effective == PWET_CAPTURE_OFF)
+	if (pwet_exit_started || !pwet_active)
 		return false;
 	if (MyProc == NULL || MyProcNumber == INVALID_PROC_NUMBER)
 		return false;
 	if (MyProcNumber < 0 || MyProcNumber >= PWET_NUM_SLOTS)
+		return false;
+	if (!IsNormalProcessingMode() || CritSectionCount > 0)
+		return false;
+	if (MyProc->lwWaiting != LW_WS_NOT_WAITING)
+		return false;
+	return true;
+}
+
+/*
+ * May this process take the DSA stats path right now?  See
+ * pwet_capture_effective's comment for why that, not pwet_capture.
+ */
+static bool
+pwet_can_attach(void)
+{
+	if (!pwet_at_safe_point())
+		return false;
+	if (pwet_capture_effective == PWET_CAPTURE_OFF)
 		return false;
 
 	/*
@@ -888,14 +938,37 @@ pwet_can_attach(void)
 	 * pwet_is_fixed_procnumber() call sites), so anything recorded there
 	 * would silently never be shown.  When the region does not exist
 	 * (capture was off at postmaster start), this is unreachable and
-	 * today's DSA-at-next-reload behaviour is unchanged.
+	 * today's DSA-at-next-reload behaviour is unchanged.  This is why
+	 * this test is here, not folded into pwet_at_safe_point(): a
+	 * fixed-region process IS at a safe point (it can still attach
+	 * trace, which never uses this region -- see pwet_can_attach_trace()),
+	 * it just may not use the DSA stats path.
 	 */
 	if (pwet_is_fixed_procnumber(MyProcNumber))
 		return false;
 
-	if (!IsNormalProcessingMode() || CritSectionCount > 0)
+	return true;
+}
+
+/*
+ * May this process attach (or reclaim) a trace ring right now?  Trace
+ * never uses the fixed server-process region (plan sec 4.2a/5.2's own
+ * scope note), so unlike pwet_can_attach() there is no fixed-procnumber
+ * exclusion here -- a fixed-slot process is exactly as eligible for the
+ * (always-DSA) trace path as any client backend, PROVIDED it already has
+ * a ProcNumber identity established (pwet_my_procno), which for such a
+ * process only the begin hook's pwet_claim_fixed_slot() can set (this
+ * function is only ever called from safe points, never the hook itself,
+ * so it cannot establish that identity on its own).
+ */
+static bool
+pwet_can_attach_trace(void)
+{
+	if (!pwet_at_safe_point())
 		return false;
-	if (MyProc->lwWaiting != LW_WS_NOT_WAITING)
+	if (pwet_capture_effective != PWET_CAPTURE_TRACE)
+		return false;
+	if (pwet_my_procno == INVALID_PROC_NUMBER)
 		return false;
 	return true;
 }
@@ -961,6 +1034,27 @@ pwet_claim_fixed_slot(void)
 	pwet_my_stats = payload;
 	pwet_my_procno = MyProcNumber;
 	pwet_last_reset_generation = pg_atomic_read_u32(&slot->reset_generation);
+
+	/*
+	 * Register here too, not only in pwet_maybe_attach(): a fixed-slot
+	 * process's stats "attach" is entirely this function, called from the
+	 * begin hook -- a code path pwet_maybe_attach() (the assign hook or
+	 * post_parse_analyze/ExecutorStart) never drives for such a process,
+	 * so if this is skipped, only a later successful trace attach via
+	 * pwet_maybe_attach() would ever register it, leaving a window in
+	 * which this process's fixed-slot stats have no exit cleanup at all.
+	 * The pwet_exit_callback_registered guard makes registering from both
+	 * places safe (whichever runs first wins; the other is a no-op).
+	 * Safe to call from the begin hook: before_shmem_exit() only writes
+	 * into ipc.c's fixed-size before_shmem_exit_list[] array (MAX_ON_EXITS
+	 * slots) -- no allocation, no lock, no ereport on the non-full path,
+	 * so it obeys the hook's rules.
+	 */
+	if (!pwet_exit_callback_registered)
+	{
+		before_shmem_exit(pwet_before_shmem_exit, (Datum) 0);
+		pwet_exit_callback_registered = true;
+	}
 }
 
 /*
@@ -1042,8 +1136,7 @@ pwet_attach_trace(void)
 
 	if (pwet_my_trace != NULL)
 		return true;
-	if (in_attach || pwet_capture != PWET_CAPTURE_TRACE ||
-		pwet_my_procno == INVALID_PROC_NUMBER)
+	if (in_attach || !pwet_can_attach_trace())
 		return false;
 
 	in_attach = true;
@@ -1088,8 +1181,28 @@ pwet_attach_trace(void)
 				 * previous trace session's leftover OPEN/AFTER_STATEMENT
 				 * state (from an earlier enable/disable cycle on this same
 				 * backend) can't misattribute the first waits of the new
-				 * session.  (No-op until M3 wires up the marker FSM.)
+				 * session.
 				 */
+				pwet_marker_state = PWET_MARKER_IDLE;
+				pwet_exec_depth = 0;
+
+				/*
+				 * Register once per backend, at first trace attach (a safe
+				 * point): xact.c's callback list is a backend-local static
+				 * array untouched by anything else this module does, so
+				 * there is no reentrancy or allocation concern in calling
+				 * this here.  Left registered even across a later
+				 * release/re-attach cycle (pwet_xact_callback() itself
+				 * checks pwet_capture/pwet_my_trace on every call and is a
+				 * cheap no-op otherwise), rather than calling
+				 * UnregisterXactCallback() on release, to avoid growing
+				 * churn in xact.c's list across many enable/disable cycles.
+				 */
+				if (!pwet_xact_callback_registered)
+				{
+					RegisterXactCallback(pwet_xact_callback, NULL);
+					pwet_xact_callback_registered = true;
+				}
 			}
 		}
 	}
@@ -1143,6 +1256,171 @@ pwet_release_trace(void)
 
 	if (!pwet_exit_started)
 		pwet_trace_writes_disabled = was_disabled;
+}
+
+/*
+ * Append one query-attribution marker record.  Same seqlock protocol and
+ * hook-rule compliance as the wait-record writer in pwet_wait_end() (no
+ * allocation, no lock, no wait, no ereport): called from
+ * post_parse_analyze/ExecutorStart/ExecutorEnd/ProcessUtility -- all safe
+ * points already, so this is not strictly hook-restricted code, but the
+ * begin hook's Idle synthesis (see pwet_wait_begin()) reuses the very
+ * same function from inside the hook, so it is held to the hook's rules
+ * throughout for uniformity.
+ *
+ * query_id/depth: depth is meaningful only for EXEC_START/EXEC_END (see
+ * pwet_marker_exec_start()/pwet_marker_exec_end()); every other marker
+ * passes 0.  query_id is whatever the caller has on hand -- 0 for a
+ * utility statement when compute_query_id is off (this module
+ * deliberately never calls EnableQueryId(); see pwet_post_parse_analyze()'s
+ * comment) and always 0 for TxnCommit/TxnAbort/Idle, which are pure
+ * interval boundaries with no statement of their own to name.
+ */
+static void
+pwet_trace_write_marker(uint8 record_type, int64 query_id, int64 depth)
+{
+	uint64		pos;
+	PwetTraceRecord *rec;
+	uint32		seq;
+	instr_time	now;
+
+	if (pwet_capture != PWET_CAPTURE_TRACE || pwet_trace_writes_disabled ||
+		pwet_my_trace == NULL)
+		return;
+
+	pos = pg_atomic_read_u64(&pwet_my_trace->write_pos);
+	pg_atomic_write_u64(&pwet_my_trace->write_pos, pos + 1);
+	rec = &pwet_my_trace->records[pos & pwet_my_trace->ring_mask];
+	seq = (uint32) (pos * 2 + 1);
+
+	rec->seq = seq;
+	pg_write_barrier();
+	INSTR_TIME_SET_CURRENT(now);
+	rec->record_type = record_type;
+	rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
+	rec->data.marker.query_id = query_id;
+	rec->data.marker.depth = depth;
+	pg_write_barrier();
+	rec->seq = seq + 1;
+}
+
+/*
+ * Query-marker state machine (plan sec 5.3):
+ *
+ *   IDLE --(QueryStart|UtilityStart|ExecStart)--> OPEN
+ *   OPEN --(ExecEnd at depth 0|UtilityEnd|TxnCommit|TxnAbort)--> AFTER_STATEMENT
+ *   AFTER_STATEMENT --(first ClientRead wait, in the begin hook)--> IDLE,
+ *       emitting a synthetic Idle marker (see pwet_wait_begin())
+ *   AFTER_STATEMENT --(QueryStart|UtilityStart)--> OPEN, no Idle emitted
+ *       (a pipelined batch, a multi-statement simple-query string, or an
+ *       explicit transaction whose next statement is already buffered --
+ *       there was no idle time to mark)
+ *
+ * The functions below are the only writers of pwet_marker_state; each
+ * always emits its own marker record first (pwet_trace_write_marker() is
+ * itself a no-op outside capture == trace, so the FSM and the ring can
+ * never disagree about whether markers are being recorded at all) and
+ * then applies exactly the transition above -- "OPEN" is entered
+ * unconditionally by all three start-markers (whichever one is called
+ * first out of IDLE or AFTER_STATEMENT is the one that opens the
+ * interval; note EXECUTE of an already-PREPAREd statement can reach
+ * pwet_marker_exec_start() with no preceding QueryStart at all, since
+ * post_parse_analyze does not run again for it).
+ */
+/*
+ * QueryStart's depth is pwet_exec_depth at the moment it fires, not
+ * always 0: post_parse_analyze also runs for a query parsed via SPI
+ * inside an already-executing outer statement (a SQL/PL function calling
+ * a dynamically-built query, for instance), so QueryStart can itself be
+ * nested.  pg_wait_event_trace_by_statement()'s attribution rule keys its
+ * "next start" boundary on depth 0 specifically so a nested QueryStart
+ * does not appear to close the outer statement's interval.
+ */
+static void
+pwet_marker_query_start(int64 query_id)
+{
+	pwet_trace_write_marker(PWET_TRACE_QUERY_START, query_id, pwet_exec_depth);
+	pwet_marker_state = PWET_MARKER_OPEN;
+}
+
+static void
+pwet_marker_exec_start(int64 query_id)
+{
+	pwet_trace_write_marker(PWET_TRACE_EXEC_START, query_id, pwet_exec_depth);
+	pwet_marker_state = PWET_MARKER_OPEN;
+	pwet_exec_depth++;
+}
+
+static void
+pwet_marker_exec_end(int64 query_id)
+{
+	if (pwet_exec_depth > 0)
+		pwet_exec_depth--;
+	pwet_trace_write_marker(PWET_TRACE_EXEC_END, query_id, pwet_exec_depth);
+	if (pwet_exec_depth == 0)
+		pwet_marker_state = PWET_MARKER_AFTER_STATEMENT;
+}
+
+/* See pwet_marker_query_start()'s comment: same nested-depth rationale. */
+static void
+pwet_marker_utility_start(int64 query_id)
+{
+	pwet_trace_write_marker(PWET_TRACE_UTILITY_START, query_id, pwet_exec_depth);
+	pwet_marker_state = PWET_MARKER_OPEN;
+}
+
+static void
+pwet_marker_utility_end(int64 query_id)
+{
+	pwet_trace_write_marker(PWET_TRACE_UTILITY_END, query_id, 0);
+	pwet_marker_state = PWET_MARKER_AFTER_STATEMENT;
+}
+
+static void
+pwet_marker_txn_commit(void)
+{
+	pwet_trace_write_marker(PWET_TRACE_TXN_COMMIT, 0, 0);
+	pwet_marker_state = PWET_MARKER_AFTER_STATEMENT;
+	pwet_exec_depth = 0;		/* defensive: transaction boundary resets it */
+}
+
+static void
+pwet_marker_txn_abort(void)
+{
+	pwet_trace_write_marker(PWET_TRACE_TXN_ABORT, 0, 0);
+	pwet_marker_state = PWET_MARKER_AFTER_STATEMENT;
+	pwet_exec_depth = 0;		/* an error unwinds any nested executor calls */
+}
+
+/*
+ * XactCallback: mark the end of the transaction (fix 6).  The commit
+ * WAL-flush wait (and any other end-of-transaction wait) precedes this
+ * call and so is correctly attributed to the last statement, not to
+ * "after the transaction" -- see the attribution rule on
+ * pg_wait_event_trace_by_statement() in the extension script.
+ * XACT_EVENT_PREPARE (two-phase commit's PREPARE TRANSACTION) is treated
+ * as a commit-like boundary: the local transaction branch is over.
+ */
+static void
+pwet_xact_callback(XactEvent event, void *arg)
+{
+	if (pwet_capture != PWET_CAPTURE_TRACE || pwet_my_trace == NULL)
+		return;
+
+	switch (event)
+	{
+		case XACT_EVENT_COMMIT:
+		case XACT_EVENT_PARALLEL_COMMIT:
+		case XACT_EVENT_PREPARE:
+			pwet_marker_txn_commit();
+			break;
+		case XACT_EVENT_ABORT:
+		case XACT_EVENT_PARALLEL_ABORT:
+			pwet_marker_txn_abort();
+			break;
+		default:
+			break;
+	}
 }
 
 static bool
@@ -1220,31 +1498,38 @@ pwet_attach_stats(void)
 static void
 pwet_maybe_attach(void)
 {
-	if (!pwet_attach_needed || !pwet_can_attach())
-		return;
-
 	/*
-	 * Attach stats only if not already attached.  For a ProcNumber in the
-	 * fixed server-process region, pwet_can_attach() always refuses the DSA
-	 * path (see its comment), so pwet_attach_stats() returns false there
-	 * until pwet_claim_fixed_slot() (from the begin hook) has already set
-	 * pwet_my_stats -- at which point this whole branch is skipped and we
-	 * fall through to the trace section below using the identity the claim
-	 * already established.  This ordering is what lets trace attach below
-	 * reuse pwet_my_procno without duplicating (and racing) the fixed
-	 * region's own lock-free ownership handshake; see pwet_attach_trace()'s
-	 * comment.
+	 * The outer gate is "am I at a safe point at all", not
+	 * pwet_can_attach() (DSA-stats-path eligibility specifically): a
+	 * ProcNumber in the fixed server-process region fails
+	 * pwet_can_attach() unconditionally (see its comment), but it can
+	 * still be eligible to attach a TRACE ring (pwet_can_attach_trace()),
+	 * which never uses that region.  Gating on pwet_can_attach() here
+	 * made the trace branch below permanently unreachable for every
+	 * fixed-slot process -- checkpointer, walwriter, background writer,
+	 * startup, WAL receiver, I/O workers, autovacuum workers, WAL
+	 * senders -- exactly the processes plan sec 4.2a/5.2 say should be
+	 * able to trace after a reload.
 	 */
-	if (pwet_my_stats == NULL && !pwet_attach_stats())
+	if (!pwet_attach_needed || !pwet_at_safe_point())
 		return;
 
 	/*
-	 * Registered lazily, per backend, the first time that backend actually
-	 * attaches: on_exit_reset() (called early in every forked/exec'd
-	 * backend, well before shared_preload_libraries processing happens
-	 * again on EXEC_BACKEND, and inherited as a no-op on fork otherwise)
-	 * would discard a registration made from _PG_init() in the postmaster,
-	 * so this is the only place this can usefully happen.
+	 * Register before attempting to attach anything, on any path,
+	 * including a fixed-slot process: whichever attach below succeeds (or
+	 * a fixed-slot process's own pwet_claim_fixed_slot(), called from the
+	 * begin hook rather than from here) needs pwet_before_shmem_exit() to
+	 * run at process exit, to release the DSA stats payload and orphan a
+	 * trace ring (pwet_orphan_trace()).  Registering only after a
+	 * successful pwet_attach_stats() call, as a previous version of this
+	 * function did, left every fixed-slot process permanently
+	 * unregistered (their stats "attach" never goes through
+	 * pwet_attach_stats() at all), so a fixed-slot process's trace ring
+	 * would stay ACTIVE forever after that process exited, invisible to
+	 * pg_stat_clear_orphaned_wait_event_rings()'s sweep.  Harmless to
+	 * register even when nothing ends up attaching this call: both
+	 * pwet_release_stats() and pwet_orphan_trace() are no-ops when there
+	 * is nothing to release.
 	 */
 	if (!pwet_exit_callback_registered)
 	{
@@ -1252,20 +1537,34 @@ pwet_maybe_attach(void)
 		pwet_exit_callback_registered = true;
 	}
 
+	/*
+	 * Attach stats via DSA only if not already attached and eligible.
+	 * For a ProcNumber in the fixed server-process region,
+	 * pwet_can_attach() is always false, so pwet_my_stats stays NULL
+	 * here until pwet_claim_fixed_slot() (from the begin hook) sets it --
+	 * that is not a failure to retry for, just "nothing for this
+	 * function to do for this process's stats", so fall through to the
+	 * trace section below regardless.
+	 */
+	if (pwet_my_stats == NULL && pwet_can_attach() && !pwet_attach_stats())
+		return;
+
 	if (pwet_capture == PWET_CAPTURE_TRACE)
 	{
 		/*
-		 * Stats identity (pwet_my_procno) might not exist yet for a
-		 * fixed-region process that has not taken its first wait event: no
-		 * ring can be attributed until it does.  Leave pwet_attach_needed
-		 * set so this retries on the next safe point (client backends get
-		 * one on their very next statement; a server-side process retries
-		 * on the next reload -- an accepted, documented limitation of the
+		 * pwet_can_attach_trace() requires pwet_my_procno to already be
+		 * set.  For a fixed-region process that has not yet taken its
+		 * first wait event, that identity does not exist yet (only the
+		 * begin hook's pwet_claim_fixed_slot() can create it), so no ring
+		 * can be attributed yet.  Leave pwet_attach_needed set so this
+		 * retries at the next safe point (client backends get one on
+		 * their very next statement; a server-side process retries on
+		 * the next reload -- an accepted, documented limitation of the
 		 * assign-hook-only attach point for that class of process, no
 		 * different in kind from the stats-only gap plan sec 4.2a already
 		 * describes).
 		 */
-		if (pwet_my_procno == INVALID_PROC_NUMBER || !pwet_attach_trace())
+		if (!pwet_can_attach_trace() || !pwet_attach_trace())
 			return;
 	}
 
@@ -1426,6 +1725,24 @@ pwet_wait_begin(uint32 wait_event_info)
 			return;
 	}
 
+	/*
+	 * Idle marker synthesis (fix 6, plan sec 5.3): the backend is waiting
+	 * for the client with no statement open (AFTER_STATEMENT) -- this is
+	 * the explicit, unambiguous end of the previous statement's interval,
+	 * and it can only be recognised here, at the first ClientRead wait,
+	 * not at any parse/executor/utility/xact hook (none of them fire
+	 * while a backend is simply waiting for its next message).  Obeys the
+	 * hook rules: pwet_trace_write_marker() only appends to an
+	 * already-allocated ring, no allocation/lock/wait/ereport.
+	 */
+	if (pwet_capture == PWET_CAPTURE_TRACE &&
+		pwet_marker_state == PWET_MARKER_AFTER_STATEMENT &&
+		wait_event_info == WAIT_EVENT_CLIENT_READ)
+	{
+		pwet_trace_write_marker(PWET_TRACE_IDLE, 0, 0);
+		pwet_marker_state = PWET_MARKER_IDLE;
+	}
+
 	INSTR_TIME_SET_CURRENT(pwet_my_stats->wait_start);
 	pwet_my_stats->current_event = wait_event_info;
 }
@@ -1536,6 +1853,23 @@ pwet_wait_end(uint32 wait_event_info)
 		prev_wait_event_end_hook(wait_event_info);
 }
 
+/*
+ * post_parse_analyze_hook: QueryStart (fix 6).  Fires once per parsed
+ * statement -- including a utility statement, since parse_analyze()
+ * wraps those in a Query too -- marking "a statement is open" before
+ * either the executor or ProcessUtility has actually started running it
+ * (extended protocol: at Parse, before Bind/Execute).
+ *
+ * Deliberately does NOT call EnableQueryId(): that would force query
+ * jumbling on every server that merely preloads this library, even with
+ * capture off, which is a cluster-wide behavior change no server operator
+ * asked for.  QueryStart is therefore emitted unconditionally (once
+ * capture == trace), carrying whatever query->queryId already is -- 0
+ * unless compute_query_id is on or another loaded module (e.g.
+ * pg_stat_statements) already turned jumbling on for its own reasons.
+ * The docs WP documents this trade-off; a 0 query_id here does not mean
+ * "no statement", it means "no id available for this statement".
+ */
 static void
 pwet_post_parse_analyze(ParseState *pstate, Query *query,
 						const JumbleState *jstate)
@@ -1544,17 +1878,75 @@ pwet_post_parse_analyze(ParseState *pstate, Query *query,
 		prev_post_parse_analyze_hook(pstate, query, jstate);
 
 	pwet_maybe_attach();
+
+	if (pwet_capture == PWET_CAPTURE_TRACE)
+		pwet_marker_query_start(query->queryId);
 }
 
+/*
+ * ExecutorStart_hook / ExecutorEnd_hook: ExecStart/ExecEnd (fix 6), with
+ * the executor nesting depth (0 = top-level, >0 = a nested invocation
+ * from inside a SQL-language function, PL/pgSQL, a trigger, etc.).
+ * Emitted before calling into the standard/chained implementation (and,
+ * for End, after it returns) so a nested invocation's own ExecStart/
+ * ExecEnd pair is correctly bracketed inside the outer one's.
+ */
 static void
 pwet_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	pwet_maybe_attach();
 
+	if (pwet_capture == PWET_CAPTURE_TRACE)
+		pwet_marker_exec_start(queryDesc->plannedstmt->queryId);
+
 	if (prev_ExecutorStart_hook != NULL)
 		prev_ExecutorStart_hook(queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
+}
+
+static void
+pwet_ExecutorEnd(QueryDesc *queryDesc)
+{
+	int64		query_id = queryDesc->plannedstmt->queryId;
+
+	if (prev_ExecutorEnd_hook != NULL)
+		prev_ExecutorEnd_hook(queryDesc);
+	else
+		standard_ExecutorEnd(queryDesc);
+
+	if (pwet_capture == PWET_CAPTURE_TRACE)
+		pwet_marker_exec_end(query_id);
+}
+
+/*
+ * ProcessUtility_hook: UtilityStart/UtilityEnd (fix 6).  No PG_TRY/
+ * PG_FINALLY around the chained call: if the utility statement errors,
+ * UtilityEnd is simply never written, exactly like a regular statement's
+ * ExecEnd on error -- TxnAbort (from the xact callback) closes the open
+ * interval either way, so there is one uniform error rule for every
+ * statement kind rather than a special case for utility statements.
+ */
+static void
+pwet_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
+					bool readOnlyTree, ProcessUtilityContext context,
+					ParamListInfo params, QueryEnvironment *queryEnv,
+					DestReceiver *dest, QueryCompletion *qc)
+{
+	int64		query_id = pstmt->queryId;
+
+	if (pwet_capture == PWET_CAPTURE_TRACE)
+		pwet_marker_utility_start(query_id);
+
+	if (prev_ProcessUtility_hook != NULL)
+		prev_ProcessUtility_hook(pstmt, queryString, readOnlyTree, context,
+								 params, queryEnv, dest, qc);
+	else
+		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+
+	if (pwet_capture == PWET_CAPTURE_TRACE)
+		pwet_marker_utility_end(query_id);
 }
 
 /*
@@ -2135,6 +2527,7 @@ pwet_decode_trace_record(PwetTraceRecord *rec, PwetTraceRowFields *out)
 			out->event_type = "Query";
 			out->event_name = "QueryStart";
 			out->query_id = rec->data.marker.query_id;
+			out->depth = (int32) rec->data.marker.depth;
 			break;
 		case PWET_TRACE_EXEC_START:
 			out->event_type = "Query";
@@ -2152,6 +2545,7 @@ pwet_decode_trace_record(PwetTraceRecord *rec, PwetTraceRowFields *out)
 			out->event_type = "Query";
 			out->event_name = "UtilityStart";
 			out->query_id = rec->data.marker.query_id;
+			out->depth = (int32) rec->data.marker.depth;
 			break;
 		case PWET_TRACE_UTILITY_END:
 			out->event_type = "Query";
@@ -2283,18 +2677,26 @@ pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
 }
 
 /*
- * Snapshot procnumber's trace ring under pwet_lock and emit its records
- * into the SRF's tuplestore.  Returns silently for a FREE slot, an
- * out-of-range procnumber, or an empty ring.
+ * Snapshot procnumber's trace ring and emit its records into the SRF's
+ * tuplestore.  Returns silently for a FREE slot or an empty ring.
  *
  * Cross-backend reader protocol (ported from v6's
- * emit_wait_event_trace_for_procnumber(), same rationale throughout):
- *   1. Unlocked fast-path check on trace_state; FREE -> nothing to read.
+ * emit_wait_event_trace_for_procnumber(), same rationale throughout,
+ * INCLUDING v6's own lock-scope discipline -- an earlier version of this
+ * function held pwet_lock across the tuplestore_putvalues() loop too,
+ * which defeated the whole point of buffering locally first; fixed on
+ * review):
+ *   1. Allocate the worst-case result buffer -- sized from
+ *      pwet_trace_records_per_ring, the cluster-wide ring capacity every
+ *      ring shares, not from this specific ring (not yet resolved) --
+ *      BEFORE taking any lock: a palloc this size can bottom out in a
+ *      glibc mmap() syscall, and doing that while holding pwet_lock would
+ *      serialise every concurrent attach/release/reset/orphan-sweep
+ *      through one VMA-modifying kernel operation.
  *   2. Acquire pwet_lock LW_SHARED; every trace_state/trace_ptr transition
- *      (pwet_attach_trace(), pwet_release_trace(), and, from the fix-3
- *      commit, pwet_orphan_trace()/the orphan sweep) takes it
- *      LW_EXCLUSIVE, so the ring's identity and address are stable for
- *      the whole iteration.
+ *      (pwet_attach_trace(), pwet_release_trace(), pwet_orphan_trace(),
+ *      the orphan sweep) takes it LW_EXCLUSIVE, so the ring's identity and
+ *      address are stable for the whole iteration.
  *   3. Re-check trace_state under the lock and resolve the ring address.
  *   4. Walk [read_start, write_pos): for each position, the
  *      POSITION-ENCODED IDENTITY seqlock check against shared memory (NOT
@@ -2303,8 +2705,11 @@ pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
  *      wraparound): a record at ring index i is valid only if its seq
  *      equals (uint32)(i*2+2), read before AND after copying the record,
  *      with a read barrier on each side.
- *   5. Release the lock, then emit the buffered rows (so a tuplestore
- *      spill to disk never happens while holding the lock).
+ *   5. Release the lock -- BEFORE emitting a single row: a 4 MB default
+ *      ring is up to 131072 rows, and tuplestore_putvalues() can spill to
+ *      disk for a large result, none of which should happen while every
+ *      other backend's attach/release/reset/orphan-sweep is blocked on
+ *      this lock.
  *
  * Both ACTIVE and ORPHANED slots are read the same way: for ACTIVE, the
  * live owner is concurrently appending and the seqlock catches torn
@@ -2313,8 +2718,10 @@ pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
  * odd-seq record if the owner died mid-write).
  */
 static void
-emit_wait_event_trace(PwetTraceState *ts, int owner_pid, ReturnSetInfo *rsinfo)
+emit_wait_event_trace(int procnumber, ReturnSetInfo *rsinfo)
 {
+	PwetSlot   *slot = &pwet_ctl[procnumber];
+	PwetTraceState *ts;
 	uint64		write_pos;
 	uint64		read_start;
 	uint64		ring_size;
@@ -2322,21 +2729,41 @@ emit_wait_event_trace(PwetTraceState *ts, int owner_pid, ReturnSetInfo *rsinfo)
 	PwetTraceRecord *valid_records;
 	uint64	   *valid_indexes;
 	uint64		valid_count = 0;
+	int			owner_pid = 0;
+
+	if (pwet_trace_records_per_ring == 0)
+		pwet_trace_records_per_ring =
+			(uint32) pwet_trace_ring_size * 1024U /
+			(uint32) sizeof(PwetTraceRecord);
+
+	/* See point 1 above: sized from the cluster-wide capacity, no lock yet. */
+	valid_records = palloc(sizeof(PwetTraceRecord) * pwet_trace_records_per_ring);
+	valid_indexes = palloc(sizeof(uint64) * pwet_trace_records_per_ring);
+
+	LWLockAcquire(pwet_lock, LW_SHARED);
+
+	if (slot->trace_state == PWET_TRACE_FREE || !DsaPointerIsValid(slot->trace_ptr))
+	{
+		LWLockRelease(pwet_lock);
+		pfree(valid_records);
+		pfree(valid_indexes);
+		return;
+	}
+
+	ts = dsa_get_address(pwet_trace_dsa, slot->trace_ptr);
+	owner_pid = slot->trace_owner_pid;
 
 	write_pos = pg_atomic_read_u64(&ts->write_pos);
 	if (write_pos == 0)
+	{
+		LWLockRelease(pwet_lock);
+		pfree(valid_records);
+		pfree(valid_indexes);
 		return;
+	}
 
 	ring_size = (uint64) ts->ring_mask + 1;
 	read_start = write_pos > ring_size ? write_pos - ring_size : 0;
-
-	/*
-	 * Buffer the validated records locally so the lock can be released
-	 * before any tuplestore_putvalues() call (which can spill to disk for
-	 * a large ring).  Worst case is the full ring.
-	 */
-	valid_records = palloc(sizeof(PwetTraceRecord) * ring_size);
-	valid_indexes = palloc(sizeof(uint64) * ring_size);
 
 	for (i = read_start; i < write_pos; i++)
 	{
@@ -2358,6 +2785,9 @@ emit_wait_event_trace(PwetTraceState *ts, int owner_pid, ReturnSetInfo *rsinfo)
 		valid_count++;
 	}
 
+	LWLockRelease(pwet_lock);
+
+	/* No shared-memory access below: safe to run unlocked, even a spill. */
 	for (i = 0; i < valid_count; i++)
 		pwet_emit_trace_row_for_procnumber(rsinfo, owner_pid,
 										   valid_indexes[i], &valid_records[i]);
@@ -2384,33 +2814,20 @@ pg_get_wait_event_trace(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	int32		procnumber = PG_GETARG_INT32(0);
-	PwetSlot   *slot;
-	PwetTraceState *ts = NULL;
-	int			owner_pid = 0;
 
 	InitMaterializedSRF(fcinfo, 0);
 
 	if (procnumber < 0 || procnumber >= PWET_NUM_SLOTS)
 		PG_RETURN_VOID();
 
-	slot = &pwet_ctl[procnumber];
-
 	/* Unlocked fast-path: skip a FREE slot without taking the lock. */
-	if (slot->trace_state == PWET_TRACE_FREE)
+	if (pwet_ctl[procnumber].trace_state == PWET_TRACE_FREE)
 		PG_RETURN_VOID();
 
 	if (!pwet_ensure_trace_dsa())
 		PG_RETURN_VOID();
 
-	LWLockAcquire(pwet_lock, LW_SHARED);
-	if (slot->trace_state != PWET_TRACE_FREE && DsaPointerIsValid(slot->trace_ptr))
-	{
-		ts = dsa_get_address(pwet_trace_dsa, slot->trace_ptr);
-		owner_pid = slot->trace_owner_pid;
-	}
-	if (ts != NULL)
-		emit_wait_event_trace(ts, owner_pid, rsinfo);
-	LWLockRelease(pwet_lock);
+	emit_wait_event_trace(procnumber, rsinfo);
 
 	PG_RETURN_VOID();
 }
@@ -2578,6 +2995,10 @@ _PG_init(void)
 	post_parse_analyze_hook = pwet_post_parse_analyze;
 	prev_ExecutorStart_hook = ExecutorStart_hook;
 	ExecutorStart_hook = pwet_ExecutorStart;
+	prev_ExecutorEnd_hook = ExecutorEnd_hook;
+	ExecutorEnd_hook = pwet_ExecutorEnd;
+	prev_ProcessUtility_hook = ProcessUtility_hook;
+	ProcessUtility_hook = pwet_ProcessUtility;
 
 	pwet_active = true;
 	pwet_attach_needed = (pwet_capture != PWET_CAPTURE_OFF);
