@@ -318,6 +318,15 @@ Options (no core change in A–C):
   exists for it. (c) a one-line SQL function is inlined by
   `inline_function()`, so it produces no nested executor run; covering
   nesting needs a function inlining refuses (e.g. PL/pgSQL).
+- **An extension script runs top to bottom: grant only what already
+  exists (my own error, CI run 34764215719).** Two GRANTs added for the
+  histogram-bucket view and the capacity function were inserted at line
+  ~115, before the function is created at line 121, so `CREATE EXTENSION`
+  failed on the first of them, nothing in the extension was created, and
+  every statement of both regress files failed on every platform. Fixed by
+  moving both grants to the end of the script (82cc5367b57). Lesson beyond
+  the ordering: a change made directly by the reviewer still needs the
+  tests re-derived and a CI round before it is treated as done.
 - **One pg_sleep() is not one wait.** pg_sleep loops on WaitLatch until its
   own timestamp clock says the time is up; on Windows the latch timeout and
   that clock disagree, so one pg_sleep(0.01) was recorded as 2 waits (CI run
