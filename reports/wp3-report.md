@@ -15,20 +15,64 @@ starting. My branch's tip (`f2079090fe2`) was a direct ancestor of the new
 `wet-v8-wp2b` tip, so `git rebase wet-v8-wp2b` was a pure fast-forward, no
 conflicts, done before any WP3 edits existed.
 
-Four commits on `wet-v8-wp3` (M1, M2, M3, where M3 also folds in three
+Five commits on `wet-v8-wp3` (M1, M2, M3, where M3 also folds in three
 coordinator review-fixes per their explicit instruction "fold into M3 or a
-follow-up commit"):
+follow-up commit"; plus a second follow-up fix commit after a CI run):
 
 | # | Commit | Subject |
 |---|---|---|
-| M1 | `a7e709759f5` | pg_wait_event_tracing: add the trace ring, writer, and readers |
-| M2 | `e36829e9ac5` | pg_wait_event_tracing: orphan the trace ring on exit instead of freeing it (fix 3) |
-| M3 | `dd2f1ba4eb8` | pg_wait_event_tracing: add query-attribution markers and by-statement view (fix 6) |
+| M1 | `8e054df5edd` | pg_wait_event_tracing: add the trace ring, writer, and readers |
+| M2 | `c1948044da4` | pg_wait_event_tracing: orphan the trace ring on exit instead of freeing it (fix 3) |
+| M3 | `54f823c0631` | pg_wait_event_tracing: add query-attribution markers and by-statement view (fix 6) |
+| fix | `8412db0ac0a` | pg_wait_event_tracing: fix CI-found attach bug and two flaky tests |
 
-All three: author `Dmitry Fomin <fomin.list@gmail.com>`, trailer
+**Note on hashes:** the branch was rebased onto an updated `wet-v8-wp2b`
+partway through (see "Mid-task rebase" below and the second rebase note
+after M3), so M1/M2/M3 carry different hashes than the ones reported when
+each milestone first landed (`a7e709759f5`/`e36829e9ac5`/`dd2f1ba4eb8`) --
+content is otherwise identical to what those originally described. All five
+commits: author `Dmitry Fomin <fomin.list@gmail.com>`, trailer
 `Discussion: https://postgr.es/m/CAPHG-0mAOn05ae6Kqx1wHXxzOk4E5W7ajjd=QBhgkR7a0uyQmw@mail.gmail.com`.
 `git diff --stat wet-v8-wp2b..HEAD -- contrib/` touches only
-`contrib/pg_wait_event_tracing/**` (6 files, 1831 insertions, 74 deletions).
+`contrib/pg_wait_event_tracing/**`.
+
+## Second rebase + CI-found fixes (after M3 first landed)
+
+While M3 was in progress, `wet-v8-wp2b` gained another commit,
+`64f135699e0` ("do not inherit the fixed-slot eligibility cache across
+fork" -- the postmaster/fork trap fix for WP2b's own code). By the time I
+checked, `wet-v8-wp3` was already rebased onto it (fast-forward: my tip was
+a descendant of the new `wet-v8-wp2b` tip), which is why M1/M2/M3 above have
+new hashes.
+
+The coordinator then ran CI (34703751075) on that rebased branch and found
+one real bug and two flaky tests, all fixed in `8412db0ac0a` (full detail in
+that commit message): (a) `pwet_maybe_attach()`'s trace-attach branch tested
+the stored `pwet_capture` instead of `pwet_capture_effective`, so a
+client backend's own `SET ... = trace` never actually attached a ring and
+then latched `pwet_attach_needed` off for the rest of the session --
+confirmed the CI symptom exactly (every case's ring was empty, nothing else
+wrong); audited every other `pwet_capture`/`pwet_capture_effective`
+comparison in the file against the now-documented rule and found no other
+instance. (b) The trace regress file's `CREATE EXTENSION IF NOT EXISTS`
+emits a NOTICE (both regress files share one database; the stats-level file
+runs first and already created the extension) -- added the NOTICE line to
+`expected/pg_wait_event_tracing_trace.out`, and, while recalibrating that
+file's blank-line rule against real core/contrib examples, found and fixed
+a second, related mistake: a bare `ERROR` (case 5) gets no trailing blank
+line either, contradicting what I'd assumed when first writing the file.
+(c) `Idle`'s appearance is not deterministic (depends on whether the
+backend actually blocks in `ClientRead`, not on protocol structure), so
+cases 2/3's Idle-presence assertions were flaky in opposite directions;
+filtered `Idle` out of every case's comparison and deferred it to a future
+TAP test (WP4b). Also in the same commit, unrelated to the attach bug:
+`t/006_server_processes.pl` (WP2b's TAP test, not mine, but in this
+worktree) failed on both Windows CI jobs from the same run, timing out on
+one of checkpointer/walwriter/background writer each time (a different one
+per job) while the other two and both region checks passed immediately
+after -- fixed per the coordinator's instruction by polling for the
+disjunction of the three as the primary assertion, then checking each
+individually without polling (skip, not fail, on absence).
 
 ## Postmaster/fork trap (coordinator's mid-task note)
 
@@ -61,7 +105,7 @@ DSA's creation/attach mechanism) already solves the "created once, attached
 everywhere including EXEC_BACKEND children" problem generically, the same way
 the stats DSA already relies on it.
 
-## M1 -- ring, writer, readers (`a7e709759f5`)
+## M1 -- ring, writer, readers (`8e054df5edd`, originally `a7e709759f5` before the rebase)
 
 `pg_wait_event_tracing.capture` gains `trace` (implies stats, as `pwet_wait_begin`/
 `pwet_wait_end`/`pwet_can_attach` already gate on `!= OFF`). New GUC
@@ -86,7 +130,7 @@ signature change): `pg_get_backend_wait_event_trace()`,
 `pg_get_wait_event_trace(procnumber)`, view `pg_backend_wait_event_trace`.
 v6's position-encoded identity seqlock check ported verbatim.
 
-## M2 -- orphan lifecycle and sweep, fix 3 (`e36829e9ac5`)
+## M2 -- orphan lifecycle and sweep, fix 3 (`c1948044da4`, originally `e36829e9ac5` before the rebase)
 
 `pwet_orphan_trace()`: on exit, `trace_state` -> `ORPHANED`, `trace_ptr` and
 `trace_owner_pid`/`start` retained (not freed, not cleared) -- called from
@@ -109,7 +153,7 @@ has none) so a post-mortem reader can identify an orphan's producer without a
 second lookup that would fail anyway (the producer's `PgBackendStatus` entry
 is gone).
 
-## M3 -- query markers, fix 6, and review fixes (`dd2f1ba4eb8`)
+## M3 -- query markers, fix 6, and review fixes (`54f823c0631`, originally `dd2f1ba4eb8` before the rebase)
 
 ### Marker sources (function names) and record types
 
