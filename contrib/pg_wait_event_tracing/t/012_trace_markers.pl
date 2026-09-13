@@ -15,9 +15,21 @@
 #       test filters Idle out of every case entirely and documents this
 #       exact deferral.  A TAP test controls the client side directly: a
 #       real pause between two statements must produce an Idle marker
-#       between them, and two statements sent as one simple-query protocol
-#       message (guaranteed to never make the backend attempt a read in
-#       between) must not.
+#       between them.
+#
+#       The opposite check -- two statements that share ONE simple-query
+#       protocol message never see an Idle between them -- needs an
+#       actual single message, not just two statements on one input
+#       line: CI showed that psql, reading a script from a file (or
+#       $node->safe_psql's string), sends each ;-terminated statement as
+#       its own message regardless of shared line placement, so "two
+#       statements, one line" was exactly as timing-dependent as the
+#       thing being tested, and failed on Windows/macOS while passing on
+#       Linux. `psql -c 'SELECT 1; SELECT 2;'` does send the whole
+#       string as one message, so that is what this case uses; see its
+#       own comment below for how the read-back is made independent of
+#       that mechanism's other, unavoidable message boundaries (the
+#       preceding SET and the session's own exit).
 #
 #   (b) pwet_marker_txn_abort()'s defensive pwet_exec_depth reset.  The
 #       regress test's own error case (SELECT 1/0) raises at PLANNING
@@ -83,24 +95,59 @@ like($markers_a, qr/(^|,)Idle(,|$)/,
 
 $psql->quit;
 
-# Two statements on the SAME input line are sent as one simple-query
-# protocol message (the module's own regress test relies on the same
-# behaviour for its case 3, and calls it out as the one assumption in
-# that file needing a real CI run to fully trust; this case shares it),
-# so the backend never attempts to read again between them: no
-# ClientRead wait is even attempted, so no Idle marker either.
+# psql's -c switch sends its whole argument as ONE simple-query protocol
+# message, so "SELECT 1; SELECT 2;" below genuinely cannot see a
+# ClientRead wait -- and so no Idle -- in between: the backend does not
+# attempt to read again until it has processed the entire message.  The
+# pid/procnumber lookups run BEFORE capture is enabled, so they add no
+# markers to this session's ring at all (pwet_trace_write_marker() is a
+# no-op outside capture = trace) -- which makes the very first
+# 'QueryStart' this ring ever records unambiguously the -c action's own
+# (the SET action right before it only ever produces UtilityEnd/
+# TxnCommit, never QueryStart).  That "first QueryStart" anchor is what
+# makes the read-back immune to the OTHER, unavoidable message
+# boundaries this design still has: a real ClientRead wait (and an Idle
+# marker) between the SET action and the -c action lands strictly
+# BEFORE the anchor, and one between the -c action and the session's own
+# exit lands strictly AFTER the fixed eight-marker window read from that
+# anchor, so neither can be mistaken for something between the two
+# target statements.  The session exits after the -c action, orphaning
+# its ring (same mechanism as t/005_orphan_reuse.pl), which is read back
+# cross-backend once the backend is confirmed gone.
+my $setup_sql = "SELECT pg_backend_pid();\n"
+  . "SELECT id FROM pg_stat_get_backend_idset() AS id "
+  . "WHERE pg_stat_get_backend_pid(id) = pg_backend_pid();\n"
+  . "SET pg_wait_event_tracing.capture = trace;\n";
+my (undef, $case2_out, undef) = $node->psql(
+	'postgres', $setup_sql,
+	on_error_die => 1,
+	extra_params => [ '-c', 'SELECT 1; SELECT 2;' ]);
+my ($case2_pid, $case2_procnumber) = split /\n/, $case2_out;
+
+$node->poll_query_until(
+	'postgres',
+	"SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $case2_pid);"
+) or die "backend $case2_pid did not disappear from pg_stat_activity";
+
 my $markers_b = $node->safe_psql(
-	'postgres', q(
-SET pg_wait_event_tracing.capture = trace;
-SELECT coalesce(max(seq), -1) AS markb FROM pg_backend_wait_event_trace \gset
-SELECT 1; SELECT 2;
-SELECT string_agg(wait_event, ',' ORDER BY seq)
-FROM pg_backend_wait_event_trace
-WHERE wait_event_type = 'Query' AND seq > :markb;
+	'postgres', qq(
+	WITH m AS (
+	    SELECT seq, wait_event,
+	           row_number() OVER (ORDER BY seq) AS rn
+	    FROM pg_get_wait_event_trace($case2_procnumber)
+	    WHERE wait_event_type = 'Query'
+	),
+	anchor AS (
+	    SELECT min(rn) AS start_rn FROM m WHERE wait_event = 'QueryStart'
+	)
+	SELECT string_agg(m.wait_event, ',' ORDER BY m.seq)
+	FROM m, anchor
+	WHERE m.rn >= anchor.start_rn AND m.rn < anchor.start_rn + 8;
 ));
-unlike($markers_b, qr/Idle/,
-	'two statements sent as one simple-query message produce no Idle between them'
-);
+is( $markers_b,
+	'QueryStart,ExecStart,ExecEnd,TxnCommit,QueryStart,ExecStart,ExecEnd,TxnCommit',
+	'two statements sent as one simple-query message produce exactly '
+	  . 'their own eight markers, with no Idle between them');
 
 # ---------------------------------------------------------------------
 # (b) pwet_marker_txn_abort()'s defensive pwet_exec_depth reset, after an

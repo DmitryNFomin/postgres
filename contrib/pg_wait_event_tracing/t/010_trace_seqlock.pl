@@ -40,7 +40,7 @@ use PostgreSQL::Test::Utils;
 use Test::More;
 
 plan skip_all => 'Injection points not supported by this build'
-  unless $ENV{enable_injection_points} eq 'yes';
+  unless ($ENV{enable_injection_points} // '') eq 'yes';
 
 my $ring_records = 256;			# 8kB ring / 32-byte records
 
