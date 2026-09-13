@@ -25,6 +25,7 @@ follow-up commit"; plus a second follow-up fix commit after a CI run):
 | M2 | `c1948044da4` | pg_wait_event_tracing: orphan the trace ring on exit instead of freeing it (fix 3) |
 | M3 | `54f823c0631` | pg_wait_event_tracing: add query-attribution markers and by-statement view (fix 6) |
 | fix | `8412db0ac0a` | pg_wait_event_tracing: fix CI-found attach bug and two flaky tests |
+| fix2 | `20bc081dbd2` | pg_wait_event_tracing: fix three wrong expectations in the trace regress test |
 
 **Note on hashes:** the branch was rebased onto an updated `wet-v8-wp2b`
 partway through (see "Mid-task rebase" below and the second rebase note
@@ -73,6 +74,48 @@ per job) while the other two and both region checks passed immediately
 after -- fixed per the coordinator's instruction by polling for the
 disjunction of the three as the primary assertion, then checking each
 individually without polling (skip, not fail, on absence).
+
+## Third round: CI confirmed the fixes, found three wrong test expectations
+
+CI run 34706732942 on `8412db0ac0a` confirmed both fixes: `t/006_server_
+processes.pl` green on every platform including both Windows toolchains,
+and the trace ring recording correctly (attach bug fixed). The trace
+regress test's three remaining failures were all wrong expectations in the
+test file, not module bugs -- the coordinator checked each against core
+source before asking for a test-only fix, fixed in `20bc081dbd2`, no C code
+touched:
+
+1. **Case 2 (COMMIT ordering).** My comment wrongly claimed an explicit
+   COMMIT fires `TxnCommit` *during* `ProcessUtility`, before `UtilityEnd`
+   (contrasting it with case 4). Actual: `EndTransactionBlock()` only marks
+   `TBLOCK_END` inside the utility statement; `CommitTransaction()` (which
+   fires the xact callback) runs in `finish_xact_command()`, called by
+   `exec_simple_query()` (postgres.c) *after* `ProcessUtility` returns --
+   the same point any ordinary statement's implicit commit happens.
+   `TxnCommit` follows `UtilityEnd` in both cases; fixed the expected array
+   and both cases' comments (no more invented contrast).
+2. **Case 5 (error during a statement).** `SELECT 1/0` is a constant
+   expression, folded (and erroring) at planning time in
+   `eval_const_expressions()`/`evaluate_expr()` (clauses.c) -- before
+   `ExecutorStart` is ever reached, so there is no `ExecStart` at all.
+   Fixed the expected array from `{QueryStart, ExecStart, TxnAbort}` to
+   `{QueryStart, TxnAbort}`; documented that this case no longer covers
+   `pwet_marker_txn_abort()`'s defensive depth reset (per the coordinator's
+   offered option (a), rather than constructing a genuinely mid-execution
+   error whose partial-row-before-error output shape I could not verify by
+   reasoning with confidence).
+3. **Case 6 (nested function).** A `LANGUAGE SQL` function with a single
+   simple `SELECT` body gets inlined by `inline_function()` (clauses.c)
+   directly into the caller -- no nested executor invocation ever happens.
+   Switched to `LANGUAGE plpgsql` (installed by default, no extra `CREATE
+   EXTENSION`) with `PERFORM 1; RETURN 1;`: `PERFORM` always goes through
+   SPI's full execute path (unlike a bare `RETURN`/assignment expression,
+   which plpgsql evaluates directly without SPI when simple enough), so it
+   reliably produces a real nested `ExecStart`/`ExecEnd` pair. Re-derived
+   markers `{QueryStart,ExecStart,ExecStart,ExecEnd,ExecEnd,TxnCommit}` and
+   depths `{0,0,1,1,0,0}` -- same content the case originally (wrongly)
+   expected, since the nesting mechanics are identical once a real nested
+   call actually happens.
 
 ## Postmaster/fork trap (coordinator's mid-task note)
 
