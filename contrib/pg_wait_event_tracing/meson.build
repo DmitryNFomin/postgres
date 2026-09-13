@@ -38,7 +38,11 @@ tests += {
   },
   'tap': {
     'tests': [
+      't/005_orphan_reuse.pl',
       't/006_server_processes.pl',
+      't/010_trace_seqlock.pl',
+      't/011_trace_wrap.pl',
+      't/012_trace_markers.pl',
     ],
   },
 }
