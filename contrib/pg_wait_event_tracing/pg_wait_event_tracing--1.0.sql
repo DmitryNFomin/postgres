@@ -114,12 +114,6 @@ AS 'MODULE_PATHNAME', 'pg_stat_reset_wait_event_timing_all'
 LANGUAGE C VOLATILE;
 REVOKE EXECUTE ON FUNCTION pg_stat_reset_wait_event_timing_all() FROM PUBLIC;
 
--- The histogram bucket boundaries are a constant lookup table, and the
--- per-class capacities are compile-time limits of this module; neither
--- says anything about any session, so both stay readable by everyone,
--- as the equivalent view was before this module existed.
-GRANT SELECT ON pg_wait_event_timing_histogram_buckets TO PUBLIC;
-GRANT EXECUTE ON FUNCTION pg_wait_event_tracing_capacity() TO PUBLIC;
 
 -- Per-class capacity of the dense timing table, for comparison against
 -- "SELECT type, count(*) FROM pg_wait_events GROUP BY type" (see the
@@ -286,3 +280,10 @@ ORDER BY min(b.seq), b.wait_event_type, b.wait_event;
 $$;
 REVOKE EXECUTE ON FUNCTION pg_wait_event_trace_by_statement(int4) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pg_wait_event_trace_by_statement(int4) TO pg_read_all_stats;
+
+-- The histogram bucket boundaries are a constant lookup table, and the
+-- per-class capacities are compile-time limits of this module; neither
+-- says anything about any session, so both stay readable by everyone,
+-- as the equivalent view was before this module existed.
+GRANT SELECT ON pg_wait_event_timing_histogram_buckets TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_wait_event_tracing_capacity() TO PUBLIC;
