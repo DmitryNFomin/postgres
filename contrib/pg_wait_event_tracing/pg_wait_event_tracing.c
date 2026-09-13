@@ -1874,6 +1874,34 @@ pwet_wait_end(uint32 wait_event_info)
 				rec = &pwet_my_trace->records[pos & pwet_my_trace->ring_mask];
 				seq = (uint32) (pos * 2 + 1);
 
+				/*
+				 * Test hazard window for t/010_trace_seqlock.pl (the
+				 * position-encoded identity seqlock, ported from v6): at
+				 * this instant, write_pos has already advanced past this
+				 * position, but rec->seq has not been touched yet -- it
+				 * still holds whatever a PREVIOUS cycle at this same ring
+				 * slot last completed it to (an even value, but the wrong
+				 * one for THIS position).  A cross-backend reader that
+				 * reads write_pos right now and walks back exactly one
+				 * ring's worth of positions lands on this slot and, without
+				 * an identity check (the expected seq for this exact
+				 * position, not just parity), would emit that stale
+				 * prior-cycle record as if it belonged to the new cycle.
+				 * INJECTION_POINT() compiles to nothing unless this build
+				 * was configured with injection points (see
+				 * utils/injection_point.h), and even then is a cheap no-op
+				 * unless a test has explicitly attached an action to this
+				 * exact point name from another session -- which is the
+				 * only reason an INJECTION_POINT() call is acceptable here,
+				 * inside a hook that must otherwise never allocate, lock,
+				 * wait, or ereport.  pwet_trace_write_marker() stamps a
+				 * marker record's seq with the same two-store bracketing
+				 * pattern as below, but is not separately instrumented:
+				 * one hazard-window test is enough to cover the shared
+				 * protocol.
+				 */
+				INJECTION_POINT("pg-wait-event-tracing-trace-after-write-pos", NULL);
+
 				rec->seq = seq;
 				pg_write_barrier();
 				rec->record_type = PWET_TRACE_WAIT;
