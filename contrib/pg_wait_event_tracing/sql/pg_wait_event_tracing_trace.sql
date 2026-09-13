@@ -67,10 +67,14 @@ WHERE wait_event_type = 'Query' AND wait_event <> 'Idle' AND seq > :mark1;
 --
 -- Case 2: an explicit transaction with two statements, each on its own
 -- line.  The transaction stays open the whole time (no TxnCommit/TxnAbort
--- until the final COMMIT, which itself fires TxnCommit *during*
--- ProcessUtility, before UtilityEnd -- contrast case 4's plain utility
--- statement, where the implicit per-statement commit only happens after
--- ProcessUtility_hook returns).
+-- until the final COMMIT).  TxnCommit follows UtilityEnd here, the same
+-- as case 4's plain utility statement, not during ProcessUtility: an
+-- explicit COMMIT's EndTransactionBlock() only marks the transaction
+-- block TBLOCK_END while still inside the utility statement: the actual
+-- commit (CommitTransaction(), which fires the xact callback) happens in
+-- finish_xact_command(), called by exec_simple_query() (postgres.c)
+-- *after* ProcessUtility returns -- the same command-loop point an
+-- ordinary autocommit statement's implicit commit happens at.
 --
 SELECT coalesce(max(seq), -1) AS mark2 FROM pg_backend_wait_event_trace \gset
 BEGIN;
@@ -96,10 +100,10 @@ WHERE wait_event_type = 'Query' AND wait_event <> 'Idle' AND seq > :mark3;
 
 --
 -- Case 4: a utility statement (no executor involvement): UtilityStart/
--- UtilityEnd only, no ExecStart/ExecEnd.  TxnCommit fires after
--- UtilityEnd here (the implicit per-statement commit happens in the
--- command loop, after ProcessUtility_hook returns) -- contrast case 2's
--- COMMIT above.
+-- UtilityEnd only, no ExecStart/ExecEnd, TxnCommit after UtilityEnd --
+-- same shape and same reason as case 2's COMMIT above (the implicit
+-- per-statement commit happens in the command loop, after
+-- ProcessUtility_hook returns).
 --
 SELECT coalesce(max(seq), -1) AS mark4 FROM pg_backend_wait_event_trace \gset
 CREATE TABLE pwet_trace_test_t (a int);
@@ -109,12 +113,17 @@ WHERE wait_event_type = 'Query' AND wait_event <> 'Idle' AND seq > :mark4;
 DROP TABLE pwet_trace_test_t;
 
 --
--- Case 5: an error partway through a statement's execution.  ExecStart
--- has no matching ExecEnd (the executor never returns normally), and
--- TxnAbort -- not TxnCommit -- closes the open interval.  Also exercises
--- pwet_marker_txn_abort()'s defensive pwet_exec_depth reset: without it,
--- the unmatched ExecStart above would leave depth permanently off by one
--- for every later statement in the session.
+-- Case 5: an error raised during PLANNING, not execution: 1/0 is a
+-- constant expression, and the planner's eval_const_expressions() folds
+-- it by calling evaluate_expr() (clauses.c), which builds a throwaway
+-- executor state and evaluates the expression right there -- raising the
+-- division-by-zero before ExecutorStart is ever reached.  So there is no
+-- ExecStart/ExecEnd pair to leave unmatched here: QueryStart opens the
+-- statement's interval, and TxnAbort -- not TxnCommit -- closes it
+-- directly.  This no longer exercises pwet_marker_txn_abort()'s
+-- defensive pwet_exec_depth reset (needed for a genuinely mid-execution
+-- error, which this simple, always-planning-time-erroring form cannot
+-- produce); that reset stays uncovered by this regression file.
 --
 SELECT coalesce(max(seq), -1) AS mark5 FROM pg_backend_wait_event_trace \gset
 SELECT 1/0;
@@ -123,15 +132,27 @@ FROM pg_backend_wait_event_trace
 WHERE wait_event_type = 'Query' AND wait_event <> 'Idle' AND seq > :mark5;
 
 --
--- Case 6: a nested SQL function call (depth 1 inside depth 0).  The
--- function is called once first, outside the measured window, so its
--- body query is already parsed and cached by the time of the measured
--- call -- keeping this case about the ExecStart/ExecEnd depth nesting
--- specifically, not about whether a cached call also re-parses (it does
--- not, so no QueryStart happens at nested depth in the measured call).
+-- Case 6: a nested query call (depth 1 inside depth 0).  LANGUAGE SQL
+-- will not do here: inline_function() (clauses.c) inlines a SQL-language
+-- function whose body is a single simple SELECT directly into the
+-- calling query, so it never runs its own separate, nested executor
+-- invocation at all.  PL/pgSQL is not inlined, and a PERFORM statement
+-- in its body always goes through SPI's normal execute path (unlike a
+-- bare RETURN/assignment expression, which plpgsql evaluates directly
+-- without SPI when it is "simple enough"), so it reliably produces a
+-- real nested ExecStart/ExecEnd pair.  plpgsql is installed in every
+-- database by default, so this needs no extra CREATE EXTENSION.
+--
+-- The function is called once first, outside the measured window, so
+-- its PERFORM statement's query is already parsed and its plan cached
+-- (plpgsql caches each statement's plan across calls in the same
+-- session) by the time of the measured call -- keeping this case about
+-- the ExecStart/ExecEnd depth nesting specifically, not about whether a
+-- cached call also re-parses (it does not, so no QueryStart happens at
+-- nested depth in the measured call).
 --
 CREATE FUNCTION pwet_trace_test_nested() RETURNS int
-LANGUAGE SQL AS $$ SELECT 1; $$;
+LANGUAGE plpgsql AS $$ BEGIN PERFORM 1; RETURN 1; END $$;
 SELECT pwet_trace_test_nested();
 
 SELECT coalesce(max(seq), -1) AS mark6 FROM pg_backend_wait_event_trace \gset
