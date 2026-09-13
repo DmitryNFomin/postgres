@@ -327,6 +327,16 @@ Options (no core change in A–C):
   moving both grants to the end of the script (82cc5367b57). Lesson beyond
   the ordering: a change made directly by the reviewer still needs the
   tests re-derived and a CI round before it is treated as done.
+- **psql sends one message per `;`-terminated statement, and `-c` ignores
+  piped input (WP4b CI, run 34765154176 and review).** Two consequences for
+  tests: (a) "two statements on one input line" is NOT one protocol message —
+  the backend attempts a read between them, so whether it blocks (and an
+  Idle marker appears) is timing; that assumption failed on Windows and
+  macOS while passing on Linux. (b) `psql -c '...'` does send its whole
+  argument as one message, but startup.c only adds the read-stdin action
+  when no `-c`/`-f` is given, and psql-ref.sgml says so outright, so a
+  setup script piped alongside `-c` never runs. Anything that must share
+  one message has to be inside the single `-c` string.
 - **One pg_sleep() is not one wait.** pg_sleep loops on WaitLatch until its
   own timestamp clock says the time is up; on Windows the latch timeout and
   that clock disagree, so one pg_sleep(0.01) was recorded as 2 waits (CI run
