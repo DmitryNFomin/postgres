@@ -4,8 +4,8 @@ For the person or agent running this. You do not need to know the patch.
 Follow the steps; send back one archive. Everything is read-only except the
 temporary data directories the scripts create.
 
-**Status: DRAFT — the commit hash and the prepared branch name are filled in
-when the series is assembled. Do not start before you get the final version.**
+**Status: READY.** The code under test is fixed at the commits listed in
+section 3. Nothing here needs editing before you start.
 
 ## 1. What this measures and why it matters
 
@@ -26,10 +26,10 @@ real module, so the published numbers describe the code that will ship.
 - **Dedicated bare metal, otherwise idle.** No other tenants, no builds, no
   backups running. A noisy host invalidates the whole run.
 - Linux, 8+ physical cores, 16+ GB RAM, ~30 GB free disk.
-- Build tools: gcc, meson, ninja, perl, bison, flex, readline and zlib
-  development packages, git.
+- Build tools: gcc, meson, ninja, **python3**, perl, bison, flex, readline
+  and zlib development packages, git.
 - No root needed. Everything runs as an ordinary user under one directory.
-- Nothing else may use the machine for the duration, about 3 hours.
+- Nothing else may use the machine for the duration, about 3 to 4 hours.
 
 Record these before starting (the scripts also capture them):
 CPU model, core count, kernel version, CPU frequency governor, and whether
@@ -37,15 +37,27 @@ turbo/boost is enabled. Do not change them; just record them.
 
 ## 3. What you will run
 
-Five configurations of the same PostgreSQL commit:
+Everything is built from one repository,
+`https://github.com/DmitryNFomin/postgres.git`, at two fixed commits:
 
-| # | Name | What it is |
+| Build | Branch | Commit |
 |---|---|---|
-| 1 | `master` | unmodified PostgreSQL, the baseline |
-| 2 | `hook-null` | the patch's core hook present, no collector loaded |
-| 3 | `module-off` | collector loaded, capture disabled |
-| 4 | `stats` | capture at statistics level |
-| 5 | `trace` | capture at trace level |
+| `baseline` | `bench-v8-baseline` | `765efece39ba3fb04fdf20b1dadcd9ecea76fbc9` |
+| `patched` | `bench-v8-patched` | `d7b4584a901241258604eef1f03dfd6b3f1fa926` |
+
+Both carry the same benchmark helper extension, byte for byte. The only
+difference between them is the patch series itself.
+
+There are **two builds but five run configurations** — configurations 2 to 5
+share the `patched` binary and differ only in `postgresql.conf`:
+
+| # | Name | Build | What it is |
+|---|---|---|---|
+| 1 | `master` | baseline | unmodified PostgreSQL, the baseline |
+| 2 | `hook-null` | patched | patch present, collector not loaded |
+| 3 | `module-off` | patched | collector loaded, capture disabled |
+| 4 | `stats` | patched | capture at statistics level |
+| 5 | `trace` | patched | capture at trace level |
 
 Four workloads:
 
@@ -56,31 +68,46 @@ Four workloads:
 | W4 | pgbench read-only, 16 clients, 4 GB shared buffers | ordinary read workload |
 | W6c | pgbench read-only, 32 clients, 32 MB shared buffers | eviction pressure |
 
-Each cell is repeated 12 times, in randomized order, with a fresh server per
-run. That is what makes the comparison trustworthy: every configuration meets
-the same machine conditions.
+Each cell is repeated 12 times — 240 runs — in one randomized order, with a
+fresh server per run. That is what makes the comparison trustworthy: every
+configuration meets the same machine conditions.
+
+The scripts check their own work as they go. Each run proves the feature is
+in the state it claims (module loaded or absent, capture at the expected
+level) and, where capture is on, that it is genuinely recording. A run that
+cannot prove this stops with an error rather than quietly producing a
+meaningless number.
 
 ## 4. Steps
 
 ```
-# 1. Get the kit (one archive, provided with the final runbook)
+# 1. Get the kit (one archive, provided with this runbook)
 tar xzf wet-v8-bench-kit.tar.gz && cd wet-v8-bench-kit
 
 # 2. Check the host looks sane; prints CPU, governor, memory, disk
 ./00-check-host.sh
 
-# 3. Build all five configurations from the fixed commit (~25 min)
+# 3. Build both configurations from the fixed commits (~12 min)
 ./01-build-all.sh
 
-# 4. Run the matrix (~2.5 h, unattended; safe to run under tmux/screen)
+# 4. Run the matrix (2.5-3.5 h, unattended; safe under tmux/screen)
 ./02-run-matrix.sh
 
 # 5. Package the results
 ./03-collect.sh      # writes results-<hostname>-<date>.tar.gz
 ```
 
+Put the kit somewhere with a **short path** — directly under your home
+directory is ideal. Unix sockets have a hard path-length limit and the
+script will refuse to start if the path is too long.
+
 If a step fails, stop and send the output. Do not re-run a partial matrix on
 top of an existing results directory; the scripts refuse it anyway.
+
+**CPU pinning (optional, off by default).** The kit can pin the server and
+the benchmark client to separate CPU ranges via the `SERVER_CPUS` and
+`PGBENCH_CPUS` environment variables. Leave them unset unless you have been
+given specific values for this machine. Do not invent ranges.
 
 ## 5. Rules while it runs
 
@@ -95,7 +122,8 @@ top of an existing results directory; the scripts refuse it anyway.
 
 One file: `results-<hostname>-<date>.tar.gz`, produced by step 5. It contains
 the raw per-run numbers, the server logs, the build manifest with compiler
-version and binary hashes, and the host telemetry.
+version and binary hashes, the randomization seed and run order, and the host
+telemetry.
 
 Do not edit, filter or summarize it. The analysis is done here, and the raw
 rows are what make the published numbers checkable by reviewers.
@@ -109,12 +137,16 @@ before anything is published.
 | Step | Time |
 |---|---|
 | host check | seconds |
-| build five configurations | 20 to 30 minutes |
-| run the matrix | 2 to 2.5 hours |
+| build both configurations | 10 to 15 minutes |
+| run the matrix | 2.5 to 3.5 hours |
 | collect | a minute |
+
+The matrix is dominated by creating a fresh database for each of the 240
+runs. That cost is deliberate: it is what keeps the runs independent.
 
 ## 8. If something looks wrong
 
 Send the output rather than fixing it. Useful signals to mention: the host
 check reporting a non-performance governor, any build failure, any server
-that fails to start, or a run that takes dramatically longer than its peers.
+that fails to start, a run that takes dramatically longer than its peers, or
+any error mentioning that capture was not active.
