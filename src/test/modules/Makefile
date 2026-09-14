@@ -55,6 +55,7 @@ SUBDIRS = \
 		  test_slru \
 		  test_tidstore \
 		  test_wait_lsn \
+		  test_wait_primitive \
 		  unsafe_tests \
 		  worker_spi \
 		  xid_wraparound

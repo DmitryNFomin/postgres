@@ -1,0 +1,4 @@
+comment = 'Wait primitive microbenchmarks'
+default_version = '1.0'
+module_pathname = '$libdir/test_wait_primitive'
+relocatable = true
