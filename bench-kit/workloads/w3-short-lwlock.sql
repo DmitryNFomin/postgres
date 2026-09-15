@@ -1,0 +1,1 @@
+SELECT test_wait_primitive_lwlock_contention(100);

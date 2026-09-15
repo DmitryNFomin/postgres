@@ -1,0 +1,166 @@
+# Bare-metal measurement runbook, wait-event tracing v9
+
+No SSH access or remote automation is required. Copy the two delivered files
+to the executor account on one otherwise-idle Linux bare-metal
+host:
+
+- `wet-v9-baremetal-r1.tar.gz`
+- `wet-v9-baremetal-r1.tar.gz.sha256`
+
+Put them directly under the executor account's home directory. Then verify,
+extract, and start the complete run:
+
+```sh
+sha256sum -c wet-v9-baremetal-r1.tar.gz.sha256
+tar -xzf wet-v9-baremetal-r1.tar.gz
+cd wet-v9-baremetal-r1
+./run-benchmark.sh
+```
+
+Run the final command inside `tmux` or `screen`. It is the only benchmark
+command you need to start. Do not run it as root. Leave the host idle.
+
+## What the launcher does
+
+The launcher is fail-closed and runs these phases in order:
+
+1. Verify every packaged script, workload, document, and source archive.
+2. Run a sub-minute synthetic verifier and shell/awk portability self-test.
+3. Wait for one idle minute, then check the Linux host and prerequisites.
+4. Build two independent baselines and the patched source with PostgreSQL's
+   bundled `configure` script and GNU Make.
+5. Run a short 24-cell smoke matrix covering all configurations/workloads.
+6. Verify the smoke evidence.
+7. Wait automatically for one idle minute, then repeat the host check.
+8. Run the fixed 288-cell measurement matrix.
+9. Package and checksum the raw evidence without final analysis.
+
+The package contains checksummed source snapshots for the two pinned commits,
+plus the standalone v9 optimization patch, so the executor does not depend on
+GitHub availability during the run.
+
+The launcher unsets `SERVER_CPUS` and `PGBENCH_CPUS`. It never invents CPU
+ranges. It also unsets protocol override variables, so the full run is always
+12 repetitions, 288 cells, 30 measured seconds, and the declared margins.
+
+## Early failure and observability
+
+The launcher prints timestamped phase transitions and a heartbeat every
+30 seconds. All output is copied verbatim to:
+
+```text
+run-logs/benchmark-<UTC timestamp>.log
+```
+
+At any time, a read-only status view is available:
+
+```sh
+./run-benchmark.sh --status
+```
+
+The status is also stored in `status.json`. During matrix execution,
+`results/progress.json` (or `smoke-results/progress.json`) reports the active
+cell, completed cell count, elapsed time, and ETA.
+
+The run stops immediately and prints diagnostics when any of these fail:
+
+- package checksum or synthetic verifier self-test;
+- bare-metal, idle-host, tool, RAM, disk, or governor checks;
+- either baseline reproducibility comparison;
+- any server start or clean shutdown;
+- capture mode, SQL extension, client-PID recording, or trace-ring proof;
+- W3 rate, histogram, target-event, or I/O qualification;
+- pgbench parsing, failed transactions, or client-driver saturation;
+- early baseline A/A noise gates after repetitions 1, 3, 6, and 9;
+- post-smoke idle/cooldown and final host checks;
+- final evidence integrity or raw-archive verification.
+
+Partial output and logs are preserved for diagnosis. The launcher never merges
+or silently resumes a partial matrix. If it fails, return `status.json` and the
+unedited `run-logs/benchmark-*.log` before deleting anything.
+
+To check only package integrity, the synthetic verifier, and host readiness:
+
+```sh
+./run-benchmark.sh --preflight-only
+```
+
+The default run already performs this preflight automatically.
+
+## Host requirements
+
+- Linux bare metal, at least 8 physical cores and 16 GB RAM.
+- At least 30 GB free under the extracted kit.
+- GCC, Python 3.9 or newer, Perl, Bison, Flex, GNU Make, `ar`, `ranlib`,
+  and tar. Meson, Ninja, ICU, readline headers, and zlib headers are not
+  needed.
+- CPU frequency governor set to `performance`.
+- No active build, backup, or interactive workload. Existing low-activity
+  PostgreSQL clusters are recorded as co-resident provenance and do not block.
+- Extract directly under the executor account's home to keep Unix socket
+  paths short.
+
+The checker is read-only. It never changes governor, turbo, SMT, affinity, or
+other host settings. Any warning blocks the run before compilation.
+
+## Pinned sources and matrix
+
+| Build | Commit |
+|---|---|
+| baseline A and B | `765efece39ba3fb04fdf20b1dadcd9ecea76fbc9` |
+| patched, optimized null-hook path | `40bffed8a92291c27a5d1956a5cd18dd3609f397` |
+
+Compared with v8, the patched source snapshots the begin/end hook pointers
+once per timed report. The end path reads the volatile wait-event value only
+when an end hook will consume it. The recursion guard is restored with direct
+assignments, avoiding post-callback reload/arithmetic. There is deliberately
+no `likely()` or `unlikely()` hint, so compiler layout is not explicitly
+biased against enabled collection. Hook ordering, chaining, recursion
+protection, stats, and trace behavior are unchanged.
+
+Six configurations (`master`, `master-aa`, `hook-null`, `module-off`, `stats`,
+`trace`) run W1, W3, W4, and W6c 12 times each. Each workload/repetition is a
+complete randomized six-configuration block. Every cell gets a fresh cluster.
+Dataset creation uses neutral baseline binaries before treatment startup.
+
+The analysis uses repetition-paired 95% Student t intervals. The predeclared
+equivalence margins are ±2 ns/iteration for W1 and ±2% for pgbench. A final
+archive is produced only if all baseline A/A stability gates pass.
+Co-resident PostgreSQL processes are reported as a suitability caveat even
+when those gates pass.
+
+Expected duration:
+
+| Phase | Approximate time |
+|---|---:|
+| integrity, idle gate, self-test, host check | 2 to 21 minutes |
+| three controlled builds | 15 to 25 minutes |
+| 24-cell smoke matrix | 5 to 15 minutes |
+| 288-cell full matrix | 4 to 5.5 hours |
+| raw collection | a few minutes |
+
+## Successful output
+
+On success, return these two files without editing or filtering them:
+
+1. `results-<hostname>-<date>.tar.gz`
+2. `results-<hostname>-<date>.tar.gz.sha256`
+
+The sidecar uses standard `sha256sum -c` format. The archive contains raw
+rows, schedule, logs, recording proofs, W3 evidence, host data, bound build
+provenance, exact verifier code, and checksums. It is integrity-verified before
+the launcher reports success.
+
+Copy both result files back beside the extracted r1 kit, then run locally:
+
+```sh
+./analyze-raw-archive.sh results-<hostname>-<date>.tar.gz
+```
+
+This verifies, extracts, and analyzes the archive locally. It writes
+`analysis.json` and `analysis.md` under a new `*-local-analysis` directory.
+Final A/A suitability is enforced there; raw evidence is retained even when
+the suitability result fails.
+
+The archive records host name, OS user, and working paths. Scrub those only
+after independent verification and before publication.

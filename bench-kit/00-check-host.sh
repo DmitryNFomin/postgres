@@ -4,8 +4,8 @@
 # Read-only sanity check of this machine before the wait-event-tracing
 # benchmark kit runs on it. This script NEVER changes any setting. It only
 # looks at things and tells you what it saw. If something looks wrong for a
-# clean performance measurement, it prints a loud WARNING but still exits
-# successfully -- you decide whether to fix the machine or proceed anyway.
+# clean performance measurement, it prints a loud WARNING and exits nonzero
+# before any build or multi-hour measurement can start.
 #
 # What "wait-event-tracing" is, in one line: a PostgreSQL patch that times
 # how long the server spends waiting on locks, I/O, and similar events. This
@@ -33,6 +33,33 @@ log "Hostname: $(hostname)"
 log ""
 log "This is a read-only report. Nothing on this machine is changed."
 
+if [[ "$(uname -s)" != Linux ]]; then
+  warn "this benchmark requires Linux"
+  log "Host check stopped before Linux-specific /proc and /sys checks."
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+section "Required tools"
+REQUIRED_TOOLS=(
+  python3 perl bison flex make cc ar ranlib sha256sum tar
+  awk sed grep find ps pgrep df hostname systemd-detect-virt
+  sort wc tr paste
+)
+for tool in "${REQUIRED_TOOLS[@]}"; do
+  if command -v "$tool" >/dev/null 2>&1; then
+    log "$tool: $(command -v "$tool")"
+  else
+    warn "required tool is not installed: $tool"
+  fi
+done
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON_VERSION=$(python3 -c \
+    'import sys; print(".".join(map(str, sys.version_info[:3])))')
+  log "python3 version: $PYTHON_VERSION"
+  python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 9))' ||
+    warn "Python 3.9 or newer is required"
+fi
 # ---------------------------------------------------------------------------
 section "CPU"
 CPU_MODEL="unknown"
@@ -168,11 +195,48 @@ fi
 
 log ""
 log "Top processes by CPU (a busy host here means the run will be noisy):"
-{ ps -eo pid,ppid,pcpu,pmem,comm --sort=-pcpu | head -n 8; } | tee -a "$OUT_TXT" >/dev/null
-ps -eo pid,ppid,pcpu,pmem,comm --sort=-pcpu | head -n 8 >>"$OUT_TXT"
+ps -eo pid,ppid,pcpu,pmem,comm --sort=-pcpu |
+  sed -n '1,8p' |
+  tee -a "$OUT_TXT"
 
-if pgrep -x postgres >/dev/null 2>&1 || pgrep -x postmaster >/dev/null 2>&1; then
-  warn "a postgres/postmaster process is already running on this host -- stop it before starting the matrix, or the benchmark's own servers may fail to bind their port/socket"
+if [[ -r /proc/pressure/cpu ]]; then
+  log ""
+  log "CPU pressure:"
+  cat /proc/pressure/cpu | tee -a "$OUT_TXT"
+fi
+
+VIRTUALIZATION="unknown"
+if command -v systemd-detect-virt >/dev/null 2>&1; then
+  VIRTUALIZATION=$(systemd-detect-virt 2>/dev/null || true)
+  [[ -n "$VIRTUALIZATION" ]] || VIRTUALIZATION=none
+fi
+log "Virtualization: $VIRTUALIZATION"
+if [[ "$VIRTUALIZATION" == unknown ]]; then
+  warn "virtualization could not be detected; dedicated bare metal is unproven"
+elif [[ "$VIRTUALIZATION" != none ]]; then
+  warn "virtualization was detected ($VIRTUALIZATION), but the runbook requires dedicated bare metal"
+fi
+
+POSTGRES_PIDS=$(
+  {
+    pgrep -x postgres 2>/dev/null || true
+    pgrep -x postmaster 2>/dev/null || true
+  } | sort -nu
+)
+if [[ -n "$POSTGRES_PIDS" ]]; then
+  POSTGRES_PROCESS_COUNT=$(printf '%s\n' "$POSTGRES_PIDS" | wc -l | tr -d ' ')
+  POSTGRES_PID_CSV=$(printf '%s\n' "$POSTGRES_PIDS" | paste -sd, -)
+  log ""
+  log "Co-resident PostgreSQL processes: $POSTGRES_PROCESS_COUNT"
+  log "These are recorded but do not block an otherwise-idle host."
+  if ! ps -ww -p "$POSTGRES_PID_CSV" \
+      -o user=,pid=,ppid=,stat=,etimes=,pcpu=,pmem=,comm=,args= |
+      tee -a "$OUT_TXT"; then
+    log "Process inventory changed while it was being captured."
+  fi
+else
+  POSTGRES_PROCESS_COUNT=0
+  log "Co-resident PostgreSQL processes: none"
 fi
 
 # ---------------------------------------------------------------------------
@@ -182,14 +246,15 @@ log "Report written to: $OUT_TXT"
 
 # ---------------------------------------------------------------------------
 # Machine-readable copy, best-effort. python3 is required later by the build
-# and matrix scripts anyway (meson itself needs it), so it is safe to use
+# and matrix scripts anyway, so it is safe to use
 # here too.
 if command -v python3 >/dev/null 2>&1; then
   python3 - "$OUT_JSON" "$CPU_MODEL" "$SOCKETS" "$CORES_PER_SOCKET" \
     "$THREADS_PER_CORE" "$PHYSICAL_CORES" "$LOGICAL_CPUS" "$SMT_ACTIVE" \
     "$TURBO_STATE" "$MEM_TOTAL_KB" "$MEM_AVAIL_KB" "$SWAP_TOTAL_KB" \
     "$FREE_DISK_MB" "$LOAD1" "$LOAD5" "$LOAD15" "$WARNINGS" \
-    "$(hostname)" "$(uname -a)" <<'PY'
+    "$(hostname)" "$(uname -a)" "$VIRTUALIZATION" \
+    "$POSTGRES_PROCESS_COUNT" <<'PY'
 import datetime
 import glob
 import json
@@ -198,7 +263,8 @@ import sys
 (out, cpu_model, sockets, cores_per_socket, threads_per_core,
  physical_cores, logical_cpus, smt_active, turbo_state, mem_total_kb,
  mem_avail_kb, swap_total_kb, free_disk_mb, load1, load5, load15,
- warnings, hostname, kernel) = sys.argv[1:]
+ warnings, hostname, kernel, virtualization,
+ postgres_process_count) = sys.argv[1:]
 
 governors = []
 for path in sorted(glob.glob(
@@ -212,6 +278,7 @@ data = {
     "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "hostname": hostname,
     "kernel": kernel,
+    "virtualization": virtualization,
     "cpu_model": cpu_model,
     "sockets": int(sockets),
     "cores_per_socket": int(cores_per_socket),
@@ -227,6 +294,12 @@ data = {
     "free_disk_mb_kit_dir": int(free_disk_mb),
     "load_average_1_5_15": [float(load1), float(load5), float(load15)],
     "warning_count": int(warnings),
+    "co_resident_postgres_process_count": int(postgres_process_count),
+    "host_isolation": (
+        "co-resident"
+        if int(postgres_process_count) > 0
+        else "dedicated"
+    ),
 }
 with open(out, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2, sort_keys=True)
@@ -237,8 +310,9 @@ fi
 
 if [[ "$WARNINGS" -gt 0 ]]; then
   log ""
-  log "$WARNINGS warning(s) above. This script does not abort on warnings --"
-  log "review them and decide whether to proceed."
+  log "$WARNINGS warning(s) above. The benchmark is blocked before any build."
+  log "Fix or explain every warning, then rerun this check."
+  exit 1
 fi
 
 exit 0

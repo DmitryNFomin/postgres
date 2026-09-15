@@ -1,0 +1,95 @@
+diff --git a/src/include/utils/wait_event.h b/src/include/utils/wait_event.h
+index ef8b68f..04e09ba 100644
+--- a/src/include/utils/wait_event.h
++++ b/src/include/utils/wait_event.h
+@@ -39,29 +39,6 @@ extern PGDLLIMPORT wait_event_hook_type wait_event_begin_hook;
+ extern PGDLLIMPORT wait_event_hook_type wait_event_end_hook;
+ extern PGDLLIMPORT int wait_event_hook_depth;
+ 
+-static inline void
+-pgstat_wait_event_hook_begin(uint32 wait_event_info)
+-{
+-	if (wait_event_begin_hook != NULL && wait_event_hook_depth == 0)
+-	{
+-		wait_event_hook_depth++;
+-		wait_event_begin_hook(wait_event_info);
+-		wait_event_hook_depth--;
+-	}
+-}
+-
+-static inline void
+-pgstat_wait_event_hook_end(uint32 wait_event_info)
+-{
+-	if (wait_event_end_hook != NULL && wait_event_hook_depth == 0)
+-	{
+-		wait_event_hook_depth++;
+-		wait_event_end_hook(wait_event_info);
+-		wait_event_hook_depth--;
+-	}
+-}
+-
+-
+ /*
+  * Wait Events - Extension, InjectionPoint
+  *
+@@ -132,16 +109,42 @@ pgstat_report_wait_end(void)
+ static inline void
+ pgstat_report_wait_start_timed(uint32 wait_event_info)
+ {
++	wait_event_hook_type hook;
++
+ 	*(volatile uint32 *) my_wait_event_info = wait_event_info;
+-	pgstat_wait_event_hook_begin(wait_event_info);
++
++	/*
++	 * Fetch the hook once so that the null-hook path needs only a pointer
++	 * test after ordinary wait-event reporting.
++	 */
++	hook = wait_event_begin_hook;
++	if (hook != NULL && wait_event_hook_depth == 0)
++	{
++		wait_event_hook_depth = 1;
++		hook(wait_event_info);
++		wait_event_hook_depth = 0;
++	}
+ }
+ 
+ static inline void
+ pgstat_report_wait_end_timed(void)
+ {
+-	uint32		wait_event_info = *(volatile uint32 *) my_wait_event_info;
++	wait_event_hook_type hook = wait_event_end_hook;
++
++	/*
++	 * In particular, do not fetch the volatile wait-event value unless a
++	 * hook will consume it.  This keeps the null-hook path close to the
++	 * ordinary wait-end path without biasing either branch with likely().
++	 */
++	if (hook != NULL && wait_event_hook_depth == 0)
++	{
++		uint32		wait_event_info;
+ 
+-	pgstat_wait_event_hook_end(wait_event_info);
++		wait_event_info = *(volatile uint32 *) my_wait_event_info;
++		wait_event_hook_depth = 1;
++		hook(wait_event_info);
++		wait_event_hook_depth = 0;
++	}
+ 	*(volatile uint32 *) my_wait_event_info = 0;
+ }
+ 
+diff --git a/src/test/modules/test_wait_hook/test_wait_hook.c b/src/test/modules/test_wait_hook/test_wait_hook.c
+index 3a4033c..77d6903 100644
+--- a/src/test/modules/test_wait_hook/test_wait_hook.c
++++ b/src/test/modules/test_wait_hook/test_wait_hook.c
+@@ -138,8 +138,8 @@ consumerA_begin(uint32 wait_event_info)
+ 		 * Deliberately violate the "no waits inside a hook" rule to prove
+ 		 * that the depth guard in wait_event.h suppresses the resulting
+ 		 * nested begin/end pair: wait_event_hook_depth is already 1 here,
+-		 * so pgstat_wait_event_hook_begin()/_end() below will not call
+-		 * back into any installed hook.  What is not suppressed is that
++		 * so the timed reporting functions will not call back into any
++		 * installed hook.  What is not suppressed is that
+ 		 * pgstat_report_wait_end_timed() unconditionally clears
+ 		 * my_wait_event_info once this nested wait finishes; that is why
+ 		 * the outer wait's own end call arrives here with
