@@ -138,8 +138,8 @@ consumerA_begin(uint32 wait_event_info)
 		 * Deliberately violate the "no waits inside a hook" rule to prove
 		 * that the depth guard in wait_event.h suppresses the resulting
 		 * nested begin/end pair: wait_event_hook_depth is already 1 here,
-		 * so pgstat_wait_event_hook_begin()/_end() below will not call
-		 * back into any installed hook.  What is not suppressed is that
+		 * so the timed reporting functions will not call back into any
+		 * installed hook.  What is not suppressed is that
 		 * pgstat_report_wait_end_timed() unconditionally clears
 		 * my_wait_event_info once this nested wait finishes; that is why
 		 * the outer wait's own end call arrives here with
