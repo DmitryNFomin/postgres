@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from cpu_affinity import CPU_PINNING, PGBENCH_CPUS, SERVER_CPUS
 from w3_qualification import THRESHOLDS
 
 
@@ -66,6 +67,7 @@ BOUND_KIT_FILES = (
     "wait-for-idle.sh",
     "analyze-results.py",
     "benchmark_protocol.py",
+    "cpu_affinity.py",
     "w3_qualification.py",
     "patches/0006-optimize-null-wait-event-hook-path.patch",
     "patches/0007-inline-attachment-needed-guard.patch",

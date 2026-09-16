@@ -9,11 +9,15 @@ and the v10 attachment-needed guard.
 - v9 patch: `patches-v9/0006-optimize-null-wait-event-hook-path.patch`
 - v10 patch: `patches-v10/0007-inline-attachment-needed-guard.patch`
 - Executor runbook: `BAREMETAL-RUNBOOK-v10.md`
-- Package output: `dist/wet-v10-baremetal-r2.tar.gz`
+- Package output: `dist/wet-v10-baremetal-r3.tar.gz`
 
 The v10 source adds one always-inline `pwet_attach_needed` test around the
 unchanged attachment implementation. The package measures v9 and v10 in
 matching hook-null, module-off, stats, and trace modes.
+
+R3 is built for the target host's verified two-socket CPU map. It fixes
+PostgreSQL to socket/NUMA node 1 and pgbench to eight CPUs on socket/NUMA
+node 0, while preserving all r2 A/A rejection thresholds.
 
 The `briefs`, `reports`, `patches-v8`, `README-v8.md`, and
 `IMPLEMENTATION-PLAN-v8.md` files are retained as historical v8 design

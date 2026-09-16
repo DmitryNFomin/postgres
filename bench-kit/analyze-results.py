@@ -13,14 +13,18 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+from cpu_affinity import validate_host_report
 from benchmark_protocol import (
     ACTIVE_CONFIGS,
     BOUND_KIT_FILES,
     CONFIGS,
+    CPU_PINNING,
     FULL_PROFILE,
+    PGBENCH_CPUS,
     PGBENCH_WORKLOADS,
     RESULT_FIELDS,
     SMOKE_PROFILE,
+    SERVER_CPUS,
     TRACE_CONFIGS,
     V10_V9_PAIRS,
     W3_PROTOCOL,
@@ -450,7 +454,7 @@ def verify_manifest(build_dir: Path) -> dict:
 
 
 def verify_protocol(protocol: dict) -> None:
-    require(protocol.get("schema_version") == 5,
+    require(protocol.get("schema_version") == 6,
             "unsupported protocol schema")
     require(
         protocol.get("benchmark_series") == "wet-v10"
@@ -482,10 +486,10 @@ def verify_protocol(protocol: dict) -> None:
         "protocol trace-ring GUC differs",
     )
     require(
-        protocol.get("server_cpus") is None
-        and protocol.get("pgbench_cpus") is None
-        and protocol.get("cpu_pinning") == "unpinned (default)",
-        "CPU pinning must remain disabled",
+        protocol.get("server_cpus") == SERVER_CPUS
+        and protocol.get("pgbench_cpus") == PGBENCH_CPUS
+        and protocol.get("cpu_pinning") == CPU_PINNING,
+        "CPU affinity differs from the fixed protocol",
     )
     analysis = protocol.get("analysis", {})
     require(
@@ -541,8 +545,10 @@ def verify_host(root: Path, protocol: dict, manifest: dict) -> dict:
                 f"missing regular host report: {name}")
         require(sha256(path) == expected, f"host report hash mismatch: {name}")
     report = json.loads((root / "host-check.json").read_text(encoding="utf-8"))
-    require(report.get("warning_count") == 0,
-            "host check contains warnings")
+    try:
+        validate_host_report(report)
+    except ValueError as error:
+        raise InvalidResults(str(error)) from error
     require(report.get("hostname") == manifest.get("build_host"),
             "host check and build manifest are from different hosts")
     process_count = report.get("co_resident_postgres_process_count")
@@ -686,8 +692,11 @@ def verify_rows(rows: list[dict[str, str]], protocol: dict) -> None:
                 f"{label}: build/config mismatch")
         require(row["shared_buffers"] == shared_buffers_for[row["workload"]],
                 f"{label}: shared_buffers mismatch")
-        require(row["server_cpus"] == "" and row["pgbench_cpus"] == "",
-                f"{label}: unexpected CPU pinning")
+        require(
+            row["server_cpus"] == SERVER_CPUS
+            and row["pgbench_cpus"] == PGBENCH_CPUS,
+            f"{label}: CPU affinity differs from the fixed protocol",
+        )
         log_path = Path(row["server_log"])
         require(not log_path.is_absolute() and ".." not in log_path.parts,
                 f"{label}: unsafe server-log path")

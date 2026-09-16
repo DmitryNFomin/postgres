@@ -90,6 +90,7 @@ for name in \
   wait-for-idle.sh \
   analyze-results.py \
   benchmark_protocol.py \
+  cpu_affinity.py \
   w3_qualification.py \
   self-test.py \
   run-benchmark.sh \

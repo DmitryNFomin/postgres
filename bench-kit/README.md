@@ -2,7 +2,8 @@
 
 This is a one-command, fail-closed benchmark for an idle Linux bare-metal
 host. It directly compares the pinned v9 reference and v10 attachment-guard
-treatment in one randomized run.
+treatment in one randomized run. This r3 kit is topology-specific: it requires
+the verified two-socket, 64-core CPU map described in the runbook.
 
 The build uses PostgreSQL's bundled `configure` script and GNU Make with ICU,
 readline, and zlib disabled because the benchmark does not use those features.
@@ -59,7 +60,9 @@ or resume a partial matrix.
 - Compiler caches disabled and byte-identical baseline binaries required.
 - Identical compile paths and equal-length runtime prefixes.
 - Fixed 12 repetitions and 480 cells, not environment-tunable.
-- CPU pinning deliberately unset by the launcher.
+- PostgreSQL fixed to CPUs `1-63:2` on socket/NUMA node 1.
+- Pgbench fixed to CPUs `0-14:2` on socket/NUMA node 0.
+- Fail-closed sysfs, `lscpu`, `taskset`, and runtime process-affinity proofs.
 - Fresh cluster and neutral baseline dataset setup for every cell.
 - Randomized complete configuration blocks.
 - Required clean shutdown before data deletion.

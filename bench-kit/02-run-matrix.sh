@@ -52,6 +52,7 @@ case "$MODE" in
 esac
 MANIFEST="$WORK/manifest.json"
 HOST_CHECK="$SCRIPT_DIR/host-check.json"
+AFFINITY_HELPER="$SCRIPT_DIR/cpu_affinity.py"
 MATRIX_START_EPOCH=0
 CELLS_COMPLETED=0
 
@@ -94,6 +95,12 @@ run_pgbench_from_prefix() {
     LD_LIBRARY_PATH="$prefix/lib:${LD_LIBRARY_PATH:-}" \
     PGAPPNAME="$appname" PGHOST="$SOCKET_DIR" PGPORT="$PORT" \
     PGUSER="$DBUSER" "$@"
+}
+
+assert_process_affinity() {
+  local pid=$1 expected=$2 role=$3
+  python3 "$AFFINITY_HELPER" verify-pid "$pid" "$expected" ||
+    die "$role process does not have the required CPU affinity"
 }
 
 stop_client() {
@@ -153,23 +160,29 @@ meet the same machine conditions for the comparison to mean anything. Move
 $RESULTS aside (or remove it) if you want to start over, or run
 ./03-collect.sh first if it holds a finished run you want to keep."
 
-for tool in python3 sha256sum awk ps; do
+# Fixed for ai211369's two-socket topology. taskset's stride syntax avoids
+# commas so these values remain safe fields in the evidence CSV.
+[[ -f "$AFFINITY_HELPER" && ! -L "$AFFINITY_HELPER" ]] ||
+  die "missing regular CPU-affinity helper: $AFFINITY_HELPER"
+affinity_constants=$(python3 "$AFFINITY_HELPER" constants-tsv) ||
+  die "could not read the canonical CPU-affinity constants"
+IFS=$'\t' read -r EXPECTED_SERVER_CPUS EXPECTED_PGBENCH_CPUS _ \
+  <<<"$affinity_constants"
+SERVER_CPUS=${SERVER_CPUS:-$EXPECTED_SERVER_CPUS}
+PGBENCH_CPUS=${PGBENCH_CPUS:-$EXPECTED_PGBENCH_CPUS}
+[[ "$SERVER_CPUS" == "$EXPECTED_SERVER_CPUS" &&
+   "$PGBENCH_CPUS" == "$EXPECTED_PGBENCH_CPUS" ]] ||
+  die "CPU affinity differs from the fixed topology-specific protocol"
+
+for tool in python3 sha256sum awk ps taskset lscpu; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
 done
+python3 "$AFFINITY_HELPER" verify-live ||
+  die "live CPU topology or taskset behavior differs from the fixed protocol"
 [[ -f "$HOST_CHECK" ]] ||
   die "missing $HOST_CHECK -- run ./00-check-host.sh first"
-python3 - "$HOST_CHECK" "$(hostname)" <<'PY' ||
-import json
-import sys
-
-path, hostname = sys.argv[1:]
-with open(path, encoding="utf-8") as stream:
-    report = json.load(stream)
-if report.get("warning_count") != 0:
-    raise SystemExit("host check contains warnings")
-if report.get("hostname") != hostname:
-    raise SystemExit("host check was created on a different host")
-PY
+python3 "$AFFINITY_HELPER" \
+  verify-host-report "$HOST_CHECK" "$(hostname)" ||
   die "host check is not a clean report for this host"
 [[ -r "$MANIFEST" ]] ||
   die "missing $MANIFEST -- run ./01-build-all.sh first"
@@ -262,14 +275,6 @@ DBUSER=$(id -un)
 (( W1_ITERATIONS > 0 )) || die "W1_ITERATIONS must be greater than zero"
 (( QUIESCENCE_SECONDS >= 0 )) || die "QUIESCENCE_SECONDS must not be negative"
 
-# CPU pinning is intentionally unsupported for this packaged protocol. The
-# executor requirement is to leave both variables unset; the kit never
-# derives or invents topology-specific ranges.
-SERVER_CPUS=${SERVER_CPUS:-}
-PGBENCH_CPUS=${PGBENCH_CPUS:-}
-[[ -z "$SERVER_CPUS" && -z "$PGBENCH_CPUS" ]] ||
-  die "SERVER_CPUS and PGBENCH_CPUS must remain unset for this protocol"
-
 CONFIGS=(
   master master-aa
   v9-hook-null v9-module-off v9-stats v9-trace
@@ -302,7 +307,7 @@ for workload_file in w3-short-lwlock.sql recording-proof.sql w3-qualification.sq
   [[ -r "$WORKLOAD_DIR/$workload_file" ]] ||
     die "missing workload file: $WORKLOAD_DIR/$workload_file"
 done
-for helper in benchmark_protocol.py w3_qualification.py; do
+for helper in benchmark_protocol.py cpu_affinity.py w3_qualification.py; do
   [[ -r "$SCRIPT_DIR/$helper" ]] ||
     die "missing Python helper: $SCRIPT_DIR/$helper"
 done
@@ -420,12 +425,17 @@ start_server() {
 
   active_prefix=$prefix
   active_datadir=$datadir
-  local -a server_pin=()
-  [[ -z "$SERVER_CPUS" ]] || server_pin=(taskset -c "$SERVER_CPUS")
-  run_from_prefix "$prefix" "${server_pin[@]}" "$prefix/bin/pg_ctl" \
+  run_from_prefix "$prefix" taskset -c "$SERVER_CPUS" \
+    "$prefix/bin/pg_ctl" \
     -D "$datadir" -l "$logfile" \
     -o "-p $PORT -k $SOCKET_DIR" -w start >/dev/null ||
     die "server failed to start for $config; see $logfile"
+  local postmaster_pid
+  read -r postmaster_pid <"$datadir/postmaster.pid"
+  [[ "$postmaster_pid" =~ ^[0-9]+$ ]] ||
+    die "could not read the postmaster pid after starting $config"
+  assert_process_affinity \
+    "$postmaster_pid" "$SERVER_CPUS" "PostgreSQL ($config)"
 }
 
 psql_for() {
@@ -727,11 +737,8 @@ run_pgbench_measured() {
   capture_should_be_active "$config" && check_recording=yes
   capture_should_trace "$config" && expect_trace=true
   local total=$((WARMUP_SECONDS + DURATION))
-  local -a client_pin=()
-  [[ -z "$PGBENCH_CPUS" ]] || client_pin=(taskset -c "$PGBENCH_CPUS")
-
   run_pgbench_from_prefix "$prefix" "$appname" \
-    "${client_pin[@]}" "$prefix/bin/pgbench" -n \
+    taskset -c "$PGBENCH_CPUS" "$prefix/bin/pgbench" -n \
     -c "$clients" -j "$threads" -T "$total" -P 1 \
     --random-seed="$seed" "${extra_args[@]}" postgres \
     >"$logfile" 2>&1 &
@@ -739,8 +746,8 @@ run_pgbench_measured() {
   active_pgbench_pid=$pgbench_pid
 
   # Sample the client driver's aggregate CPU use for every configuration.
-  # With pinning deliberately optional, a driver sitting near the capacity
-  # of all its threads is a confound that must be visible in the evidence.
+  # Even with fixed pinning, a driver sitting near the capacity of all its
+  # threads is a confound that must be visible in the evidence.
   local snapshot_delay=$((WARMUP_SECONDS / 3))
   (( snapshot_delay > 0 )) || snapshot_delay=1
   local proof_start=$SECONDS
@@ -754,6 +761,7 @@ run_pgbench_measured() {
   pgbench_comm=$(ps -o comm= -p "$pgbench_pid" | awk '{print $1}')
   [[ "${pgbench_comm##*/}" == pgbench ]] ||
     die "background pid $pgbench_pid is '$pgbench_comm', not pgbench"
+  assert_process_affinity "$pgbench_pid" "$PGBENCH_CPUS" "pgbench"
   pgbench_cpu=$(ps -o pcpu= -p "$pgbench_pid" | awk '{print $1}')
   [[ "$pgbench_cpu" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
     die "could not read pgbench CPU utilization for pid $pgbench_pid"
@@ -944,6 +952,7 @@ run_cell() {
     start_server "$PREFIX_BASELINE_A" "$datadir" master "$setup_log"
     PGHOST="$SOCKET_DIR" PGPORT="$PORT" PGUSER="$DBUSER" \
       run_from_prefix "$PREFIX_BASELINE_A" \
+      taskset -c "$PGBENCH_CPUS" \
       "$PREFIX_BASELINE_A/bin/pgbench" -i -q --unlogged-tables \
       -s "$PGBENCH_SCALE" postgres \
       >"$LOG_DIR/pgbench-init-$run_index.log" 2>&1 ||
@@ -1132,7 +1141,7 @@ PY
 
 python3 - "$PROTOCOL" "$SEED" "$RUNS" "$DURATION" "$WARMUP_SECONDS" \
   "$PGBENCH_SCALE" "$W1_ITERATIONS" "$MODULE_NAME" "$GUC_CAPTURE" \
-  "$GUC_MAX_TRANCHES" "$GUC_TRACE_RING_SIZE" "$SERVER_CPUS" "$PGBENCH_CPUS" \
+  "$GUC_MAX_TRANCHES" "$GUC_TRACE_RING_SIZE" \
   "$QUIESCENCE_SECONDS" "$TOTAL_CELLS" "$SCRIPT_DIR" \
   "$MODE" "$BUILD_MANIFEST_SHA256" \
   "${CONFIGS[@]}" -- "${WORKLOADS[@]}" <<'PY'
@@ -1143,23 +1152,28 @@ from pathlib import Path
 
 args = sys.argv[1:]
 (out, seed, runs, duration, warmup, scale, w1_iterations, module,
- guc_capture, guc_max_tranches, guc_trace_ring_size, server_cpus,
- pgbench_cpus, quiescence, total_cells, script_dir, mode,
- build_manifest_sha256) = args[:18]
-rest = args[18:]
+ guc_capture, guc_max_tranches, guc_trace_ring_size, quiescence,
+ total_cells, script_dir, mode, build_manifest_sha256) = args[:16]
+rest = args[16:]
 sep = rest.index("--")
 configs, workloads = rest[:sep], rest[sep + 1:]
 
 root = Path(script_dir)
 sys.path.insert(0, script_dir)
-from benchmark_protocol import BOUND_KIT_FILES, W3_PROTOCOL
+from benchmark_protocol import (
+    BOUND_KIT_FILES,
+    CPU_PINNING,
+    PGBENCH_CPUS,
+    SERVER_CPUS,
+    W3_PROTOCOL,
+)
 
 bound_files = BOUND_KIT_FILES
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 data = {
-    "schema_version": 5,
+    "schema_version": 6,
     "benchmark_series": "wet-v10",
     "treatment": "inline-attachment-needed-guard",
     "mode": mode,
@@ -1175,9 +1189,9 @@ data = {
     "guc_capture": guc_capture,
     "guc_max_tranches": guc_max_tranches,
     "guc_trace_ring_size": guc_trace_ring_size,
-    "server_cpus": server_cpus or None,
-    "pgbench_cpus": pgbench_cpus or None,
-    "cpu_pinning": "enabled (taskset)" if (server_cpus or pgbench_cpus) else "unpinned (default)",
+    "server_cpus": SERVER_CPUS,
+    "pgbench_cpus": PGBENCH_CPUS,
+    "cpu_pinning": CPU_PINNING,
     "build_manifest_sha256": build_manifest_sha256,
     "host_check_sha256": {
         name: digest(root / name)

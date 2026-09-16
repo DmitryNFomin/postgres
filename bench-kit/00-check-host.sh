@@ -44,7 +44,7 @@ section "Required tools"
 REQUIRED_TOOLS=(
   python3 perl bison flex make cc ar ranlib sha256sum tar
   awk sed grep find ps pgrep df hostname systemd-detect-virt
-  sort wc tr paste
+  sort wc tr paste lscpu taskset
 )
 for tool in "${REQUIRED_TOOLS[@]}"; do
   if command -v "$tool" >/dev/null 2>&1; then
@@ -104,6 +104,89 @@ log "SMT (hyperthreading):   $SMT_ACTIVE"
 
 if [[ "$PHYSICAL_CORES" -lt 8 ]]; then
   warn "fewer than 8 physical cores ($PHYSICAL_CORES) -- the runbook asks for 8+"
+fi
+
+# ---------------------------------------------------------------------------
+section "Topology-specific CPU affinity"
+AFFINITY_HELPER="$SCRIPT_DIR/cpu_affinity.py"
+SERVER_CPUS=""
+PGBENCH_CPUS=""
+ONLINE_CPULIST=""
+NODE0_CPULIST=""
+NODE1_CPULIST=""
+AFFINITY_TOPOLOGY_VERIFIED=0
+AFFINITY_PROOF_JSON='{"verified": false}'
+TOPOLOGY_OK=1
+
+if [[ -r "$AFFINITY_HELPER" ]]; then
+  if affinity_constants=$(python3 "$AFFINITY_HELPER" constants-tsv); then
+    IFS=$'\t' read -r SERVER_CPUS PGBENCH_CPUS _ \
+      <<<"$affinity_constants"
+  else
+    warn "could not read the canonical CPU-affinity constants"
+    TOPOLOGY_OK=0
+  fi
+else
+  warn "required CPU-affinity helper is missing: $AFFINITY_HELPER"
+  TOPOLOGY_OK=0
+fi
+
+if [[ "$SOCKETS" -ne 2 ||
+      "$CORES_PER_SOCKET" -ne 32 ||
+      "$THREADS_PER_CORE" -ne 1 ]]; then
+  warn "r3 requires exactly 2 sockets, 32 cores per socket, and SMT off"
+  TOPOLOGY_OK=0
+fi
+
+for topology_file in \
+  /sys/devices/system/cpu/online \
+  /sys/devices/system/node/node0/cpulist \
+  /sys/devices/system/node/node1/cpulist
+do
+  if [[ ! -r "$topology_file" ]]; then
+    warn "required CPU-topology file is not readable: $topology_file"
+    TOPOLOGY_OK=0
+  fi
+done
+
+if [[ -r /sys/devices/system/cpu/online ]]; then
+  ONLINE_CPULIST=$(< /sys/devices/system/cpu/online)
+fi
+if [[ -r /sys/devices/system/node/node0/cpulist ]]; then
+  NODE0_CPULIST=$(< /sys/devices/system/node/node0/cpulist)
+fi
+if [[ -r /sys/devices/system/node/node1/cpulist ]]; then
+  NODE1_CPULIST=$(< /sys/devices/system/node/node1/cpulist)
+fi
+if [[ -n "$ONLINE_CPULIST" ]]; then
+  log "Online CPUs:             $ONLINE_CPULIST"
+fi
+if [[ -n "$NODE0_CPULIST" ]]; then
+  log "NUMA node 0 CPUs:        $NODE0_CPULIST"
+fi
+if [[ -n "$NODE1_CPULIST" ]]; then
+  log "NUMA node 1 CPUs:        $NODE1_CPULIST"
+fi
+if [[ -n "$SERVER_CPUS" && -n "$PGBENCH_CPUS" ]]; then
+  log "PostgreSQL taskset:      $SERVER_CPUS (socket/node 1)"
+  log "pgbench taskset:         $PGBENCH_CPUS (8 CPUs on socket/node 0)"
+fi
+
+if [[ "$TOPOLOGY_OK" -eq 1 ]]; then
+  if AFFINITY_PROOF_JSON=$(
+    python3 "$AFFINITY_HELPER" collect
+  ); then
+    AFFINITY_TOPOLOGY_VERIFIED=1
+    log "Affinity topology:      verified"
+  else
+    AFFINITY_PROOF_JSON='{"verified": false}'
+    warn "CPU topology does not match the r3 two-socket affinity protocol"
+    TOPOLOGY_OK=0
+  fi
+fi
+
+if [[ "$AFFINITY_TOPOLOGY_VERIFIED" -ne 1 ]]; then
+  log "Affinity topology:      NOT VERIFIED"
 fi
 
 # ---------------------------------------------------------------------------
@@ -254,7 +337,7 @@ if command -v python3 >/dev/null 2>&1; then
     "$TURBO_STATE" "$MEM_TOTAL_KB" "$MEM_AVAIL_KB" "$SWAP_TOTAL_KB" \
     "$FREE_DISK_MB" "$LOAD1" "$LOAD5" "$LOAD15" "$WARNINGS" \
     "$(hostname)" "$(uname -a)" "$VIRTUALIZATION" \
-    "$POSTGRES_PROCESS_COUNT" <<'PY'
+    "$POSTGRES_PROCESS_COUNT" "$AFFINITY_PROOF_JSON" <<'PY'
 import datetime
 import glob
 import json
@@ -263,8 +346,8 @@ import sys
 (out, cpu_model, sockets, cores_per_socket, threads_per_core,
  physical_cores, logical_cpus, smt_active, turbo_state, mem_total_kb,
  mem_avail_kb, swap_total_kb, free_disk_mb, load1, load5, load15,
- warnings, hostname, kernel, virtualization,
- postgres_process_count) = sys.argv[1:]
+ warnings, hostname, kernel, virtualization, postgres_process_count,
+ affinity_proof_json) = sys.argv[1:]
 
 governors = []
 for path in sorted(glob.glob(
@@ -300,6 +383,7 @@ data = {
         if int(postgres_process_count) > 0
         else "dedicated"
     ),
+    "cpu_affinity_protocol": json.loads(affinity_proof_json),
 }
 with open(out, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2, sort_keys=True)

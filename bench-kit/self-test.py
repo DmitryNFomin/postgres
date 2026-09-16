@@ -18,7 +18,10 @@ from benchmark_protocol import (
     ACTIVE_CONFIGS,
     BOUND_KIT_FILES,
     CONFIGS,
+    CPU_PINNING,
+    PGBENCH_CPUS,
     RESULT_FIELDS,
+    SERVER_CPUS,
     TRACE_CONFIGS,
     W3_PROTOCOL,
     WORKLOADS,
@@ -335,8 +338,26 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
         {
             "hostname": "synthetic-host",
             "warning_count": 0,
+            "sockets": 2,
+            "cores_per_socket": 32,
+            "threads_per_core": 1,
+            "physical_cores": 64,
+            "logical_cpus": 64,
+            "smt_active": "off",
             "co_resident_postgres_process_count": 0,
             "host_isolation": "dedicated",
+            "cpu_affinity_protocol": {
+                "verified": True,
+                "server_cpus": SERVER_CPUS,
+                "server_socket": 1,
+                "server_numa_node": 1,
+                "pgbench_cpus": PGBENCH_CPUS,
+                "pgbench_socket": 0,
+                "pgbench_numa_node": 0,
+                "online_cpu_ids": list(range(64)),
+                "node0_cpu_ids": list(range(0, 64, 2)),
+                "node1_cpu_ids": list(range(1, 64, 2)),
+            },
         },
     )
 
@@ -357,7 +378,7 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
         writer.writerows(schedule)
 
     protocol = {
-        "schema_version": 5,
+        "schema_version": 6,
         "benchmark_series": "wet-v10",
         "treatment": "inline-attachment-needed-guard",
         "mode": "full",
@@ -375,9 +396,9 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
         "guc_capture": "pg_wait_event_tracing.capture",
         "guc_max_tranches": "pg_wait_event_tracing.max_tranches",
         "guc_trace_ring_size": "pg_wait_event_tracing.trace_ring_size",
-        "server_cpus": None,
-        "pgbench_cpus": None,
-        "cpu_pinning": "unpinned (default)",
+        "server_cpus": SERVER_CPUS,
+        "pgbench_cpus": PGBENCH_CPUS,
+        "cpu_pinning": CPU_PINNING,
         "build_manifest_sha256": digest(build / "manifest.json"),
         "host_check_sha256": {
             name: digest(root / name)
@@ -449,8 +470,8 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
             "pgbench_cpu_capacity_fraction": 0.125 if is_pgbench else "",
             "cpu_freq_khz_median_before": 3_000_000,
             "cpu_freq_khz_median_after": 3_000_000,
-            "server_cpus": "",
-            "pgbench_cpus": "",
+            "server_cpus": SERVER_CPUS,
+            "pgbench_cpus": PGBENCH_CPUS,
             "server_log": f"logs/server-{run_index}.log",
         }
         rows.append(row)
@@ -581,8 +602,94 @@ def main() -> int:
         run_analyzer(analyzer, root, expect_success=True)
 
         manifest_path = root / "build" / "manifest.json"
+        host_path = root / "host-check.json"
+        results_csv = results / "results.csv"
         protocol_path = results / "protocol.json"
         completion_path = results / "matrix-complete.json"
+
+        saved_protocol = protocol_path.read_bytes()
+        saved_completion = completion_path.read_bytes()
+        protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+        protocol["server_cpus"] = "0-62:2"
+        write_json(protocol_path, protocol)
+        completion = json.loads(
+            completion_path.read_text(encoding="utf-8")
+        )
+        completion["sha256"]["protocol.json"] = digest(protocol_path)
+        write_json(completion_path, completion)
+        run_analyzer(
+            analyzer,
+            root,
+            expect_success=False,
+            expected_error="CPU affinity differs from the fixed protocol",
+        )
+        protocol_path.write_bytes(saved_protocol)
+        completion_path.write_bytes(saved_completion)
+
+        saved_results_csv = results_csv.read_bytes()
+        saved_completion = completion_path.read_bytes()
+        with results_csv.open(newline="", encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream))
+        rows[0]["pgbench_cpus"] = "0-16:2"
+        with results_csv.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+            writer.writerows(rows)
+        completion = json.loads(
+            completion_path.read_text(encoding="utf-8")
+        )
+        completion["sha256"]["results.csv"] = digest(results_csv)
+        write_json(completion_path, completion)
+        run_analyzer(
+            analyzer,
+            root,
+            expect_success=False,
+            expected_error="CPU affinity differs from the fixed protocol",
+        )
+        results_csv.write_bytes(saved_results_csv)
+        completion_path.write_bytes(saved_completion)
+
+        saved_host = host_path.read_bytes()
+        saved_protocol = protocol_path.read_bytes()
+        saved_completion = completion_path.read_bytes()
+        host = json.loads(host_path.read_text(encoding="utf-8"))
+        host["cpu_affinity_protocol"]["server_socket"] = True
+        write_json(host_path, host)
+        protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+        protocol["host_check_sha256"]["host-check.json"] = digest(host_path)
+        write_json(protocol_path, protocol)
+        completion = json.loads(
+            completion_path.read_text(encoding="utf-8")
+        )
+        completion["sha256"]["protocol.json"] = digest(protocol_path)
+        write_json(completion_path, completion)
+        run_analyzer(
+            analyzer,
+            root,
+            expect_success=False,
+            expected_error="host server_socket must be integer 1",
+        )
+        host = json.loads(saved_host)
+        host["cpu_affinity_protocol"]["node0_cpu_ids"].pop()
+        write_json(host_path, host)
+        protocol = json.loads(saved_protocol)
+        protocol["host_check_sha256"]["host-check.json"] = digest(host_path)
+        write_json(protocol_path, protocol)
+        completion = json.loads(saved_completion)
+        completion["sha256"]["protocol.json"] = digest(protocol_path)
+        write_json(completion_path, completion)
+        run_analyzer(
+            analyzer,
+            root,
+            expect_success=False,
+            expected_error=(
+                "host NUMA node 0 CPU set differs from the fixed protocol"
+            ),
+        )
+        host_path.write_bytes(saved_host)
+        protocol_path.write_bytes(saved_protocol)
+        completion_path.write_bytes(saved_completion)
+
         saved_manifest = manifest_path.read_bytes()
         saved_protocol = protocol_path.read_bytes()
         saved_completion = completion_path.read_bytes()
@@ -654,7 +761,6 @@ def main() -> int:
         completion_path.write_bytes(saved_completion)
         v10_install_tree_path.write_bytes(saved_v10_install_tree)
 
-        host_path = root / "host-check.json"
         saved_host = host_path.read_bytes()
         saved_protocol = protocol_path.read_bytes()
         saved_completion = completion_path.read_bytes()
@@ -703,7 +809,6 @@ def main() -> int:
 
         run_collector(source_kit, root)
 
-        results_csv = results / "results.csv"
         original_results = results_csv.read_bytes()
         with results_csv.open(newline="", encoding="utf-8") as stream:
             rows = list(csv.DictReader(stream))
@@ -726,6 +831,7 @@ def main() -> int:
         "self-test: PASS "
         "(480 valid cells and direct v10/v9 contrasts verified; "
         "co-resident caveat accepted; "
+        "protocol, row, and host affinity tampering rejected; "
         "detached build summaries, mismatched v9/v10 builds, "
         "missing proof, incomplete binding, "
         "forged W3 summary, and failed A/A suitability rejected; "

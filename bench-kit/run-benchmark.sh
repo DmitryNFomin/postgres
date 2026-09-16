@@ -15,7 +15,7 @@ Usage:
   ./run-benchmark.sh --preflight-only
 
 Run the default command inside tmux or screen on the idle Linux host.
-CPU pinning is deliberately disabled by this launcher.
+CPU affinity is fixed for ai211369's two-socket topology.
 EOF
 }
 
@@ -238,7 +238,6 @@ for variable in \
   PKG_CONFIG_PATH PGOPTIONS PGSERVICE PGSERVICEFILE; do
   unset "$variable"
 done
-log "CPU pinning and protocol override variables are unset."
 
 if [[ -f "$SCRIPT_DIR/PACKAGE-MANIFEST.sha256" ]]; then
   CURRENT_PHASE=package-integrity
@@ -251,6 +250,15 @@ if [[ -f "$SCRIPT_DIR/PACKAGE-MANIFEST.sha256" ]]; then
 else
   log "Development checkout: PACKAGE-MANIFEST.sha256 is absent."
 fi
+
+AFFINITY_HELPER="$SCRIPT_DIR/cpu_affinity.py"
+[[ -f "$AFFINITY_HELPER" && ! -L "$AFFINITY_HELPER" ]] ||
+  fail "missing regular CPU-affinity helper: $AFFINITY_HELPER"
+affinity_constants=$(python3 "$AFFINITY_HELPER" constants-tsv) ||
+  fail "could not read the canonical CPU-affinity constants"
+IFS=$'\t' read -r SERVER_CPUS PGBENCH_CPUS _ <<<"$affinity_constants"
+export SERVER_CPUS PGBENCH_CPUS
+log "Fixed CPU affinity: PostgreSQL=$SERVER_CPUS pgbench=$PGBENCH_CPUS"
 
 run_phase preflight "under 1 minute" "$SCRIPT_DIR/00-check-host.sh"
 run_phase kit-self-test "under 1 minute" "$SCRIPT_DIR/self-test.py"

@@ -6,7 +6,7 @@ export LC_ALL=C
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_DIR=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
 DIST_DIR=${1:-"$REPO_DIR/dist"}
-PACKAGE_NAME=wet-v10-baremetal-r2
+PACKAGE_NAME=wet-v10-baremetal-r3
 STAGE=$(mktemp -d)
 ARCHIVE="$DIST_DIR/$PACKAGE_NAME.tar.gz"
 SIDECAR="$ARCHIVE.sha256"
@@ -47,6 +47,7 @@ files=(
   wait-for-idle.sh
   analyze-results.py
   benchmark_protocol.py
+  cpu_affinity.py
   w3_qualification.py
   self-test.py
   run-benchmark.sh
@@ -200,6 +201,7 @@ chmod 755 \
   "$STAGE/$PACKAGE_NAME/analyze-raw-archive.sh" \
   "$STAGE/$PACKAGE_NAME/wait-for-idle.sh" \
   "$STAGE/$PACKAGE_NAME/analyze-results.py" \
+  "$STAGE/$PACKAGE_NAME/cpu_affinity.py" \
   "$STAGE/$PACKAGE_NAME/w3_qualification.py" \
   "$STAGE/$PACKAGE_NAME/self-test.py" \
   "$STAGE/$PACKAGE_NAME/run-benchmark.sh"

@@ -4,16 +4,16 @@ No SSH access or remote automation is required. Copy the two delivered files
 to the executor account on one otherwise-idle Linux bare-metal
 host:
 
-- `wet-v10-baremetal-r2.tar.gz`
-- `wet-v10-baremetal-r2.tar.gz.sha256`
+- `wet-v10-baremetal-r3.tar.gz`
+- `wet-v10-baremetal-r3.tar.gz.sha256`
 
 Put them directly under the executor account's home directory. Then verify,
 extract, and start the complete run:
 
 ```sh
-sha256sum -c wet-v10-baremetal-r2.tar.gz.sha256
-tar -xzf wet-v10-baremetal-r2.tar.gz
-cd wet-v10-baremetal-r2
+sha256sum -c wet-v10-baremetal-r3.tar.gz.sha256
+tar -xzf wet-v10-baremetal-r3.tar.gz
+cd wet-v10-baremetal-r3
 ./run-benchmark.sh
 ```
 
@@ -40,9 +40,11 @@ The package contains checksummed source snapshots for the three pinned
 commits, plus standalone v9 and v10 optimization patches, so the executor
 does not depend on GitHub availability during the run.
 
-The launcher unsets `SERVER_CPUS` and `PGBENCH_CPUS`. It never invents CPU
-ranges. It also unsets protocol override variables, so the full run is always
-12 repetitions, 480 cells, 30 measured seconds, and the declared margins.
+The launcher clears inherited affinity and protocol overrides, then enforces
+the r3 CPU placement: PostgreSQL on CPUs `1-63:2` (socket/NUMA node 1) and
+pgbench on CPUs `0-14:2` (eight cores on socket/NUMA node 0). The full run
+remains 12 repetitions, 480 cells, 30 measured seconds, and the same declared
+margins and A/A thresholds.
 
 ## Early failure and observability
 
@@ -90,19 +92,35 @@ The default run already performs this preflight automatically.
 
 ## Host requirements
 
-- Linux bare metal, at least 8 physical cores and 16 GB RAM.
+- Linux bare metal with exactly two 32-core sockets, CPUs `0-63` online,
+  SMT off, and at least 16 GB RAM.
+- Socket/NUMA node 0 must contain the even CPUs `0,2,...,62`; socket/NUMA
+  node 1 must contain the odd CPUs `1,3,...,63`.
 - At least 30 GB free under the extracted kit.
 - GCC, Python 3.9 or newer, Perl, Bison, Flex, GNU Make, `ar`, `ranlib`,
-  and tar. Meson, Ninja, ICU, readline headers, and zlib headers are not
-  needed.
+  tar, `lscpu`, and `taskset`. Meson, Ninja, ICU, readline headers, and zlib
+  headers are not needed.
 - CPU frequency governor set to `performance`.
 - No active build, backup, or interactive workload. Existing low-activity
   PostgreSQL clusters are recorded as co-resident provenance and do not block.
 - Extract directly under the executor account's home to keep Unix socket
   paths short.
 
-The checker is read-only. It never changes governor, turbo, SMT, affinity, or
-other host settings. Any warning blocks the run before compilation.
+The checker is read-only apart from testing the required masks on a disposable
+`true` process. It never changes governor, turbo, SMT, or persistent host
+settings. It verifies both sysfs NUMA CPU lists and `lscpu` socket mappings.
+Any warning blocks the run before compilation.
+
+## Why r3 uses fixed CPU affinity
+
+The unpinned r2 run correctly stopped at its repetition-3 A/A gate because one
+W3 baseline control cell was an outlier. W3 has eight clients repeatedly
+handing off an exclusive `ProcArrayLock`; unrestricted scheduling can move
+that lock handoff across sockets. R3 keeps every PostgreSQL process on one
+socket and all eight pgbench threads on the other. The launcher verifies the
+postmaster and pgbench process masks at runtime. Exact masks are retained in
+the protocol and every result row, and analysis rejects altered or
+incompatible topology evidence.
 
 ## Pinned sources and matrix
 
@@ -159,7 +177,7 @@ rows, schedule, logs, recording proofs, W3 evidence, host data, bound build
 provenance, exact verifier code, and checksums. It is integrity-verified before
 the launcher reports success.
 
-Copy both result files back beside the extracted r2 kit, then run locally:
+Copy both result files back beside the extracted r3 kit, then run locally:
 
 ```sh
 ./analyze-raw-archive.sh results-<hostname>-<date>.tar.gz

@@ -122,6 +122,7 @@ try:
             raise RuntimeError(f"evidence hash mismatch: {relative}")
     for name in (
         "benchmark_protocol.py",
+        "cpu_affinity.py",
         "w3_qualification.py",
     ):
         trusted = trusted_kit / name
