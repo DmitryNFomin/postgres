@@ -14,8 +14,8 @@ After verifying and extracting the delivered archive, run:
 ./run-benchmark.sh
 ```
 
-No SSH access is used. The launcher verifies the package, runs a synthetic
-480-cell verifier test, checks the host, builds four controlled trees, runs a
+No SSH access is used. The launcher verifies the package, checks the host,
+runs a synthetic 480-cell verifier test, builds four controlled trees, runs a
 40-cell smoke matrix, runs the full 480-cell matrix, and creates a checksummed
 raw-evidence archive.
 

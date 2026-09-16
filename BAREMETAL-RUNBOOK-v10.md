@@ -4,16 +4,16 @@ No SSH access or remote automation is required. Copy the two delivered files
 to the executor account on one otherwise-idle Linux bare-metal
 host:
 
-- `wet-v10-baremetal-r1.tar.gz`
-- `wet-v10-baremetal-r1.tar.gz.sha256`
+- `wet-v10-baremetal-r2.tar.gz`
+- `wet-v10-baremetal-r2.tar.gz.sha256`
 
 Put them directly under the executor account's home directory. Then verify,
 extract, and start the complete run:
 
 ```sh
-sha256sum -c wet-v10-baremetal-r1.tar.gz.sha256
-tar -xzf wet-v10-baremetal-r1.tar.gz
-cd wet-v10-baremetal-r1
+sha256sum -c wet-v10-baremetal-r2.tar.gz.sha256
+tar -xzf wet-v10-baremetal-r2.tar.gz
+cd wet-v10-baremetal-r2
 ./run-benchmark.sh
 ```
 
@@ -25,15 +25,16 @@ command you need to start. Do not run it as root. Leave the host idle.
 The launcher is fail-closed and runs these phases in order:
 
 1. Verify every packaged script, workload, document, and source archive.
-2. Run a sub-minute synthetic verifier and shell/awk portability self-test.
-3. Wait for one idle minute, then check the Linux host and prerequisites.
-4. Build two independent baselines plus separate v9 and v10 sources with
+2. Check the Linux host and prerequisites.
+3. Run a sub-minute synthetic verifier and shell/awk portability self-test.
+4. Wait for one idle minute.
+5. Build two independent baselines plus separate v9 and v10 sources with
    PostgreSQL's bundled `configure` script and GNU Make.
-5. Run a short 40-cell smoke matrix covering all configurations/workloads.
-6. Verify the smoke evidence.
-7. Wait automatically for one idle minute, then repeat the host check.
-8. Run the fixed 480-cell measurement matrix.
-9. Package and checksum the raw evidence without final analysis.
+6. Run a short 40-cell smoke matrix covering all configurations/workloads.
+7. Verify the smoke evidence.
+8. Wait automatically for one idle minute, then repeat the host check.
+9. Run the fixed 480-cell measurement matrix.
+10. Package and checksum the raw evidence without final analysis.
 
 The package contains checksummed source snapshots for the three pinned
 commits, plus standalone v9 and v10 optimization patches, so the executor
@@ -158,7 +159,7 @@ rows, schedule, logs, recording proofs, W3 evidence, host data, bound build
 provenance, exact verifier code, and checksums. It is integrity-verified before
 the launcher reports success.
 
-Copy both result files back beside the extracted r1 kit, then run locally:
+Copy both result files back beside the extracted r2 kit, then run locally:
 
 ```sh
 ./analyze-raw-archive.sh results-<hostname>-<date>.tar.gz

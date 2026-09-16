@@ -475,13 +475,40 @@ for binary in ("postgres", "pgbench", "psql", "initdb", "pg_ctl",
             f"independent baseline builds differ for {binary}: "
             f"{left} != {right}")
 
-fixture_hashes = {
-    item["sha256"]["test_wait_primitive"] for item in builds
-}
-if len(fixture_hashes) != 1:
+for binary in ("postgres", "pgbench", "psql", "initdb", "pg_ctl",
+               "test_wait_primitive"):
+    left = by_name["v9"]["sha256"][binary]
+    right = by_name["v10"]["sha256"][binary]
+    if left != right:
+        raise SystemExit(
+            f"v9/v10 builds differ unexpectedly for {binary}: "
+            f"{left} != {right}")
+
+def normalize_tracing_module(tree):
+    normalized = {}
+    for path, item in tree.items():
+        item = dict(item)
+        if (
+            path.startswith("lib/")
+            and path.rsplit("/", 1)[-1].startswith(
+                "pg_wait_event_tracing."
+            )
+            and item.get("type") == "file"
+        ):
+            item["sha256"] = "<tracing-module>"
+        normalized[path] = item
+    return normalized
+
+if normalize_tracing_module(
+        by_name["v9"]["install_tree"]) != normalize_tracing_module(
+            by_name["v10"]["install_tree"]):
     raise SystemExit(
-        "installed test_wait_primitive binaries differ across builds: "
-        + ", ".join(sorted(fixture_hashes)))
+        "v9/v10 installation trees differ outside the tracing module")
+if (
+    by_name["v9"]["sha256"]["pg_wait_event_tracing"]
+    == by_name["v10"]["sha256"]["pg_wait_event_tracing"]
+):
+    raise SystemExit("v9 and v10 tracing modules are byte-identical")
 
 manifest = {
     "schema_version": 6,

@@ -252,9 +252,9 @@ else
   log "Development checkout: PACKAGE-MANIFEST.sha256 is absent."
 fi
 
+run_phase preflight "under 1 minute" "$SCRIPT_DIR/00-check-host.sh"
 run_phase kit-self-test "under 1 minute" "$SCRIPT_DIR/self-test.py"
 run_phase initial-idle-check "1 to 20 minutes" "$SCRIPT_DIR/wait-for-idle.sh"
-run_phase preflight "under 1 minute" "$SCRIPT_DIR/00-check-host.sh"
 
 if [[ "${PREFLIGHT_ONLY:-0}" -eq 1 ]]; then
   CURRENT_PHASE=preflight

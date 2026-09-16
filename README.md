@@ -9,7 +9,7 @@ and the v10 attachment-needed guard.
 - v9 patch: `patches-v9/0006-optimize-null-wait-event-hook-path.patch`
 - v10 patch: `patches-v10/0007-inline-attachment-needed-guard.patch`
 - Executor runbook: `BAREMETAL-RUNBOOK-v10.md`
-- Package output: `dist/wet-v10-baremetal-r1.tar.gz`
+- Package output: `dist/wet-v10-baremetal-r2.tar.gz`
 
 The v10 source adds one always-inline `pwet_attach_needed` test around the
 unchanged attachment implementation. The package measures v9 and v10 in

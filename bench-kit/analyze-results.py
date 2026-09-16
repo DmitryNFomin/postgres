@@ -347,6 +347,41 @@ def verify_manifest(build_dir: Path) -> dict:
             },
             f"build provenance hash mismatch for {name}",
         )
+        summaries = build.get("sha256")
+        install_tree = build.get("install_tree")
+        require(
+            isinstance(summaries, dict) and isinstance(install_tree, dict),
+            f"invalid binary or install-tree summary for {name}",
+        )
+        for binary in ("postgres", "pgbench", "psql", "initdb", "pg_ctl"):
+            entry = install_tree.get(f"bin/{binary}")
+            require(
+                isinstance(entry, dict)
+                and entry.get("type") == "file"
+                and entry.get("sha256") == summaries.get(binary),
+                f"{name}/{binary} summary differs from install tree",
+            )
+        for library in ("test_wait_primitive", "pg_wait_event_tracing"):
+            candidates = [
+                item
+                for relative, item in install_tree.items()
+                if relative.startswith("lib/")
+                and Path(relative).name.startswith(f"{library}.")
+                and isinstance(item, dict)
+                and item.get("type") == "file"
+            ]
+            summary = summaries.get(library)
+            if summary == "none":
+                require(
+                    not candidates,
+                    f"{name}/{library} is omitted from its binary summary",
+                )
+            else:
+                require(
+                    len(candidates) == 1
+                    and candidates[0].get("sha256") == summary,
+                    f"{name}/{library} summary differs from install tree",
+                )
     expected_commits = {
         "baseline-a": "765efece39ba3fb04fdf20b1dadcd9ecea76fbc9",
         "baseline-b": "765efece39ba3fb04fdf20b1dadcd9ecea76fbc9",
@@ -372,9 +407,32 @@ def verify_manifest(build_dir: Path) -> dict:
     require(len({
         item["fixture_tree"] for item in builds.values()
     }) == 1, "source fixture tree differs across build records")
-    require(len({
-        item["sha256"]["test_wait_primitive"] for item in builds.values()
-    }) == 1, "installed fixture binary differs across builds")
+    for binary in binaries:
+        require(
+            builds["v9"]["sha256"][binary]
+            == builds["v10"]["sha256"][binary],
+            f"v9/v10 builds differ unexpectedly for {binary}",
+        )
+    def normalize_tracing_module(tree: dict) -> dict:
+        normalized = {}
+        for relative, value in tree.items():
+            item = dict(value)
+            if (
+                relative.startswith("lib/")
+                and Path(relative).name.startswith(
+                    "pg_wait_event_tracing."
+                )
+                and item.get("type") == "file"
+            ):
+                item["sha256"] = "<tracing-module>"
+            normalized[relative] = item
+        return normalized
+
+    require(
+        normalize_tracing_module(builds["v9"]["install_tree"])
+        == normalize_tracing_module(builds["v10"]["install_tree"]),
+        "v9/v10 installation trees differ outside the tracing module",
+    )
     for name in ("v9", "v10"):
         require(
             builds[name]["sha256"]["pg_wait_event_tracing"] != "none",

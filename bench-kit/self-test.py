@@ -41,7 +41,13 @@ def write_json(path: Path, data: object) -> None:
     )
 
 
-def run_analyzer(analyzer: Path, root: Path, *, expect_success: bool) -> None:
+def run_analyzer(
+    analyzer: Path,
+    root: Path,
+    *,
+    expect_success: bool,
+    expected_error: str | None = None,
+) -> None:
     process = subprocess.run(
         [
             sys.executable,
@@ -59,6 +65,11 @@ def run_analyzer(analyzer: Path, root: Path, *, expect_success: bool) -> None:
     if (process.returncode == 0) != expect_success:
         raise RuntimeError(
             "unexpected analyzer result\n"
+            f"stdout:\n{process.stdout}\nstderr:\n{process.stderr}"
+        )
+    if expected_error is not None and expected_error not in process.stderr:
+        raise RuntimeError(
+            f"analyzer did not report {expected_error!r}\n"
             f"stdout:\n{process.stdout}\nstderr:\n{process.stderr}"
         )
 
@@ -158,11 +169,13 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source_kit / relative, destination)
 
-    fixture_hash = "1" * 64
-    compiler = {"c": {"id": "synthetic", "version": "1"}}
-    install_tree = {
-        "bin/postgres": {"type": "file", "sha256": "1" * 64},
+    fixture_hashes = {
+        "baseline-a": "1" * 64,
+        "baseline-b": "1" * 64,
+        "v9": "2" * 64,
+        "v10": "2" * 64,
     }
+    compiler = {"c": {"id": "synthetic", "version": "1"}}
     source_manifest = {
         "schema_version": 3,
         "benchmark_series": "wet-v10",
@@ -245,8 +258,24 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
         ),
     ):
         hashes = dict(binary_hashes)
-        hashes["test_wait_primitive"] = fixture_hash
+        hashes["test_wait_primitive"] = fixture_hashes[name]
         hashes["pg_wait_event_tracing"] = module
+        install_tree = {
+            f"bin/{binary}": {
+                "type": "file",
+                "sha256": hashes[binary],
+            }
+            for binary in ("postgres", "pgbench", "psql", "initdb", "pg_ctl")
+        }
+        install_tree["lib/postgresql/test_wait_primitive.so"] = {
+            "type": "file",
+            "sha256": hashes["test_wait_primitive"],
+        }
+        if module != "none":
+            install_tree["lib/postgresql/pg_wait_event_tracing.so"] = {
+                "type": "file",
+                "sha256": module,
+            }
         log_path = build / "build-logs" / f"{name}.log"
         compiler_path = build / "build-logs" / f"{name}-compilers.json"
         install_tree_path = (
@@ -551,9 +580,81 @@ def main() -> int:
         _, _, results = create_tree(source_kit, root)
         run_analyzer(analyzer, root, expect_success=True)
 
-        host_path = root / "host-check.json"
+        manifest_path = root / "build" / "manifest.json"
         protocol_path = results / "protocol.json"
         completion_path = results / "matrix-complete.json"
+        saved_manifest = manifest_path.read_bytes()
+        saved_protocol = protocol_path.read_bytes()
+        saved_completion = completion_path.read_bytes()
+        manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        )
+        v10_build = next(
+            item for item in manifest["builds"] if item["name"] == "v10"
+        )
+        v10_build["sha256"]["test_wait_primitive"] = "3" * 64
+        write_json(manifest_path, manifest)
+        protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+        protocol["build_manifest_sha256"] = digest(manifest_path)
+        write_json(protocol_path, protocol)
+        completion = json.loads(
+            completion_path.read_text(encoding="utf-8")
+        )
+        completion["sha256"]["protocol.json"] = digest(protocol_path)
+        write_json(completion_path, completion)
+        run_analyzer(
+            analyzer,
+            root,
+            expect_success=False,
+            expected_error=(
+                "v10/test_wait_primitive summary differs from install tree"
+            ),
+        )
+        manifest_path.write_bytes(saved_manifest)
+        protocol_path.write_bytes(saved_protocol)
+        completion_path.write_bytes(saved_completion)
+
+        v10_install_tree_path = (
+            root / "build" / "build-logs" / "v10-install-tree.json"
+        )
+        saved_v10_install_tree = v10_install_tree_path.read_bytes()
+        manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        )
+        v10_build = next(
+            item for item in manifest["builds"] if item["name"] == "v10"
+        )
+        v10_build["sha256"]["test_wait_primitive"] = "3" * 64
+        v10_build["install_tree"][
+            "lib/postgresql/test_wait_primitive.so"
+        ]["sha256"] = "3" * 64
+        write_json(v10_install_tree_path, v10_build["install_tree"])
+        v10_build["provenance_sha256"]["install_tree_json"] = digest(
+            v10_install_tree_path
+        )
+        write_json(manifest_path, manifest)
+        protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+        protocol["build_manifest_sha256"] = digest(manifest_path)
+        write_json(protocol_path, protocol)
+        completion = json.loads(
+            completion_path.read_text(encoding="utf-8")
+        )
+        completion["sha256"]["protocol.json"] = digest(protocol_path)
+        write_json(completion_path, completion)
+        run_analyzer(
+            analyzer,
+            root,
+            expect_success=False,
+            expected_error=(
+                "v9/v10 builds differ unexpectedly for test_wait_primitive"
+            ),
+        )
+        manifest_path.write_bytes(saved_manifest)
+        protocol_path.write_bytes(saved_protocol)
+        completion_path.write_bytes(saved_completion)
+        v10_install_tree_path.write_bytes(saved_v10_install_tree)
+
+        host_path = root / "host-check.json"
         saved_host = host_path.read_bytes()
         saved_protocol = protocol_path.read_bytes()
         saved_completion = completion_path.read_bytes()
@@ -625,6 +726,7 @@ def main() -> int:
         "self-test: PASS "
         "(480 valid cells and direct v10/v9 contrasts verified; "
         "co-resident caveat accepted; "
+        "detached build summaries, mismatched v9/v10 builds, "
         "missing proof, incomplete binding, "
         "forged W3 summary, and failed A/A suitability rejected; "
         "raw collection and local clean-room analysis passed)"
