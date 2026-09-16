@@ -37,12 +37,12 @@ directory:
 
 ```sh
 RUN_DIR=$(mktemp -d /root/w6c-power-diag.XXXXXX)
-cp /home/dmitry/wet-v10-w6c-power-diag-r1.tar.gz* "$RUN_DIR/"
+cp /home/dmitry/wet-v10-w6c-power-diag-r2.tar.gz* "$RUN_DIR/"
 cd "$RUN_DIR"
-sha256sum wet-v10-w6c-power-diag-r1.tar.gz
-sha256sum -c wet-v10-w6c-power-diag-r1.tar.gz.sha256
-tar --no-same-owner -xzf wet-v10-w6c-power-diag-r1.tar.gz
-cd wet-v10-w6c-power-diag-r1
+sha256sum wet-v10-w6c-power-diag-r2.tar.gz
+sha256sum -c wet-v10-w6c-power-diag-r2.tar.gz.sha256
+tar --no-same-owner -xzf wet-v10-w6c-power-diag-r2.tar.gz
+cd wet-v10-w6c-power-diag-r2
 ./run-root.sh /home/dmitry/wet-v10-baremetal-r3
 ```
 

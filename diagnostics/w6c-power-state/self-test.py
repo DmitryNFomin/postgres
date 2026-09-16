@@ -14,6 +14,11 @@ SPEC = importlib.util.spec_from_file_location(
 )
 ANALYZE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ANALYZE)
+SCHEDULE_SPEC = importlib.util.spec_from_file_location(
+    "w6c_schedule", HERE / "generate_schedule.py"
+)
+SCHEDULE = importlib.util.module_from_spec(SCHEDULE_SPEC)
+SCHEDULE_SPEC.loader.exec_module(SCHEDULE)
 
 
 def write_fixture(root, turbo_value=0):
@@ -194,6 +199,25 @@ def write_fixture(root, turbo_value=0):
 
 
 def main():
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "schedule.csv"
+        seed = SCHEDULE.generate(path, 8)
+        payload = path.read_bytes()
+        assert 0 <= seed < 2**64
+        assert b"\r" not in payload
+        assert payload.count(b"\n") == 17
+        with path.open(newline="", encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream))
+        assert [int(row["run_index"]) for row in rows] == list(
+            range(1, 17)
+        )
+        for repetition in range(1, 9):
+            assert {
+                row["config"]
+                for row in rows
+                if int(row["repetition"]) == repetition
+            } == {"baseline-a", "baseline-b"}
+
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         write_fixture(root)

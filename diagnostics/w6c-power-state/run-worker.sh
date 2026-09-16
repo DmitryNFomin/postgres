@@ -516,34 +516,22 @@ PY
 mkdir -p "$SOCKET_DIR" "$DATA_ROOT" "$LOG_DIR"
 chmod 700 "$SOCKET_DIR" "$DATA_ROOT" "$LOG_DIR"
 : >"$EVENTS"
-python_run - "$SCHEDULE" "$RUNS" >"$OUT_DIR/seed.txt" <<'PY'
-import csv
-import random
-import secrets
-import sys
-
-path, repetitions = sys.argv[1], int(sys.argv[2])
-seed = secrets.randbits(64)
-randomizer = random.Random(seed)
-rows = []
-for repetition in range(1, repetitions + 1):
-    configs = ["baseline-a", "baseline-b"]
-    randomizer.shuffle(configs)
-    rows.extend((config, repetition) for config in configs)
-with open(path, "x", newline="", encoding="utf-8") as stream:
-    writer = csv.writer(stream)
-    writer.writerow(("run_index", "config", "repetition"))
-    for index, (config, repetition) in enumerate(rows, 1):
-        writer.writerow((index, config, repetition))
-print(seed)
-PY
+python_run "$SCRIPT_DIR/generate_schedule.py" "$SCHEDULE" "$RUNS" \
+  >"$OUT_DIR/seed.txt"
 write_result initialize
 
 mapfile -t cells < <(tail -n +2 "$SCHEDULE")
 [[ ${#cells[@]} -eq $((RUNS * 2)) ]] || die "schedule is incomplete"
+expected_index=1
 for line in "${cells[@]}"; do
+  [[ "$line" != *$'\r'* ]] || die "schedule contains a carriage return"
   IFS=, read -r run_index config repetition <<<"$line"
+  [[ "$run_index" == "$expected_index" &&
+     "$config" =~ ^baseline-[ab]$ &&
+     "$repetition" =~ ^[1-8]$ ]] ||
+    die "schedule row is malformed: $line"
   run_cell "$run_index" "$config" "$repetition"
+  expected_index=$((expected_index + 1))
 done
 write_event worker_complete 0 complete 0
 trap - EXIT ERR

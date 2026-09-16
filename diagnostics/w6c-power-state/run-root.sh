@@ -180,8 +180,9 @@ mkdir "$STAGE" "$TOOLS_DIR" "$WORKER_DIR" \
 chmod 711 "$STAGE"
 chmod 755 "$TOOLS_DIR"
 for name in \
-  README.md analyze.py run-root.sh run-worker.sh run_turbostat.py \
-  sample_system.py self-test.py DIAGNOSTIC-MANIFEST.sha256; do
+  README.md analyze.py generate_schedule.py run-root.sh run-worker.sh \
+  run_turbostat.py sample_system.py self-test.py \
+  DIAGNOSTIC-MANIFEST.sha256; do
   [[ -f "$SOURCE_DIR/$name" && ! -L "$SOURCE_DIR/$name" ]] ||
     die "diagnostic input is not a regular file: $name"
   require_root_owned_nonwritable "$SOURCE_DIR/$name"

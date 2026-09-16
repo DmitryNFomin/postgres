@@ -5,7 +5,7 @@ export LC_ALL=C
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_DIR=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
 DIST_DIR=${1:-"$REPO_DIR/dist"}
-PACKAGE=wet-v10-w6c-power-diag-r1
+PACKAGE=wet-v10-w6c-power-diag-r2
 STAGE=$(mktemp -d)
 ARCHIVE="$DIST_DIR/$PACKAGE.tar.gz"
 TEMP_ARCHIVE=""
@@ -32,15 +32,15 @@ mkdir -p "$DIST_DIR" "$STAGE/$PACKAGE"
 TEMP_ARCHIVE=$(mktemp "$DIST_DIR/.$PACKAGE.XXXXXX.tar.gz")
 TEMP_SIDECAR=$(mktemp "$DIST_DIR/.$PACKAGE.XXXXXX.sha256")
 for name in \
-  README.md analyze.py run-root.sh run-worker.sh run_turbostat.py \
-  sample_system.py \
-  self-test.py; do
+  README.md analyze.py generate_schedule.py run-root.sh run-worker.sh \
+  run_turbostat.py sample_system.py self-test.py; do
   [[ -f "$SCRIPT_DIR/$name" && ! -L "$SCRIPT_DIR/$name" ]] ||
     { echo "missing regular input: $name" >&2; exit 1; }
   cp "$SCRIPT_DIR/$name" "$STAGE/$PACKAGE/"
 done
 chmod 755 \
   "$STAGE/$PACKAGE/analyze.py" \
+  "$STAGE/$PACKAGE/generate_schedule.py" \
   "$STAGE/$PACKAGE/run-root.sh" \
   "$STAGE/$PACKAGE/run-worker.sh" \
   "$STAGE/$PACKAGE/run_turbostat.py" \
