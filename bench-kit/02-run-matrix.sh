@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
 # 02-run-matrix.sh
 #
-# Runs the full measurement matrix: 6 configurations x 4 workloads x 12
-# repetitions = 288 runs.  Each repetition is one complete randomized block
+# Runs the full measurement matrix: 10 configurations x 4 workloads x 12
+# repetitions = 480 runs. Each repetition is one complete randomized block
 # containing every configuration/workload cell.  Every cell uses a fresh
 # PostgreSQL data directory.
 #
-# The six configurations (see the README for the long version):
+# The ten configurations (see the README for the long version):
 #   1  master       baseline build, nothing loaded
 #   2  master-aa    independent rebuild of the baseline (noise/control arm)
-#   3  hook-null    patched build, collector module NOT preloaded
-#   4  module-off   patched build, collector loaded, capture switched off
-#   5  stats        patched build, collector loaded, capture = 'stats'
-#   6  trace        patched build, collector loaded, capture = 'trace'
+#   3-6  v9-{hook-null,module-off,stats,trace}
+#   7-10 v10-{hook-null,module-off,stats,trace}
 #
 # The four workloads:
 #   W1   isolated wait-primitive microbenchmark, 10^8 iterations
@@ -20,7 +18,7 @@
 #   W4   pgbench read-only (-S), 16 clients, 4 GB shared_buffers
 #   W6c  pgbench read-only (-S), 32 clients, 32 MB shared_buffers
 #
-# Expect this step to take roughly 4-5.5 hours. It is unattended and safe
+# Expect this step to take roughly 7-9 hours. It is unattended and safe
 # to run under tmux/screen -- just start it and check back later.
 set -Eeuo pipefail
 export LC_ALL=C
@@ -179,15 +177,17 @@ BUILD_MANIFEST_SHA256=$(sha256sum "$MANIFEST" | awk '{print $1}')
 
 PREFIX_BASELINE_A="$WORK/install/base-a"
 PREFIX_BASELINE_B="$WORK/install/base-b"
-PREFIX_PATCHED="$WORK/install/patchd"
-for p in "$PREFIX_BASELINE_A" "$PREFIX_BASELINE_B" "$PREFIX_PATCHED"; do
+PREFIX_V9="$WORK/install/v9-ref"
+PREFIX_V10="$WORK/install/v10opt"
+for p in "$PREFIX_BASELINE_A" "$PREFIX_BASELINE_B" "$PREFIX_V9" "$PREFIX_V10"; do
   [[ -x "$p/bin/postgres" ]] || die "missing build at $p -- run ./01-build-all.sh first"
 done
 
 if ! python3 - "$MANIFEST" \
   "baseline-a=$PREFIX_BASELINE_A" \
   "baseline-b=$PREFIX_BASELINE_B" \
-  "patched=$PREFIX_PATCHED" <<'PY'
+  "v9=$PREFIX_V9" \
+  "v10=$PREFIX_V10" <<'PY'
 import hashlib
 import json
 import sys
@@ -195,11 +195,11 @@ from pathlib import Path
 
 manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 prefixes = dict(item.split("=", 1) for item in sys.argv[2:])
-if manifest.get("schema_version") != 5:
+if manifest.get("schema_version") != 6:
     raise SystemExit("unsupported build manifest schema")
 if (
-    manifest.get("benchmark_series") != "wet-v9"
-    or manifest.get("treatment") != "null-hook-fast-path"
+    manifest.get("benchmark_series") != "wet-v10"
+    or manifest.get("treatment") != "inline-attachment-needed-guard"
 ):
     raise SystemExit("unexpected build benchmark series or treatment")
 builds = {item["name"]: item for item in manifest.get("builds", [])}
@@ -221,12 +221,12 @@ for name, prefix_text in prefixes.items():
         path for path in prefix.glob("lib/**/pg_wait_event_tracing.*")
         if path.is_file()
     ]
-    if name == "patched":
+    if name in {"v9", "v10"}:
         if len(modules) != 1:
-            raise SystemExit("patched prefix has no unique tracing module")
+            raise SystemExit(f"{name} prefix has no unique tracing module")
         actual = hashlib.sha256(modules[0].read_bytes()).hexdigest()
         if actual != expected["pg_wait_event_tracing"]:
-            raise SystemExit("patched tracing module differs from manifest")
+            raise SystemExit(f"{name} tracing module differs from manifest")
     elif modules:
         raise SystemExit(f"{name} unexpectedly contains the tracing module")
 PY
@@ -270,8 +270,13 @@ PGBENCH_CPUS=${PGBENCH_CPUS:-}
 [[ -z "$SERVER_CPUS" && -z "$PGBENCH_CPUS" ]] ||
   die "SERVER_CPUS and PGBENCH_CPUS must remain unset for this protocol"
 
-CONFIGS=(master master-aa hook-null module-off stats trace)
+CONFIGS=(
+  master master-aa
+  v9-hook-null v9-module-off v9-stats v9-trace
+  v10-hook-null v10-module-off v10-stats v10-trace
+)
 WORKLOADS=(W1 W3 W4 W6c)
+CELLS_PER_REPETITION=$(( ${#CONFIGS[@]} * ${#WORKLOADS[@]} ))
 TOTAL_CELLS=$(( ${#CONFIGS[@]} * ${#WORKLOADS[@]} * RUNS ))
 
 SOCKET_DIR="$RESULTS/sock"
@@ -306,7 +311,7 @@ done
 # with a clear message now rather than a cryptic connection error later.
 SOCKET_PROBE="$SOCKET_DIR/.s.PGSQL.$PORT"
 if [[ ${#SOCKET_PROBE} -gt 100 ]]; then
-  die "the kit's path is too long for a unix socket ($SOCKET_PROBE is ${#SOCKET_PROBE} bytes). Move the whole v9 kit somewhere with a shorter path (e.g. directly under your home directory) and try again."
+  die "the kit's path is too long for a unix socket ($SOCKET_PROBE is ${#SOCKET_PROBE} bytes). Move the whole v10 kit somewhere with a shorter path (e.g. directly under your home directory) and try again."
 fi
 [[ ! -e "$SOCKET_PROBE" ]] ||
   die "a socket already exists at $SOCKET_PROBE; is a server from a previous run still up?"
@@ -318,7 +323,8 @@ config_build_prefix() {
   case "$1" in
     master) echo "$PREFIX_BASELINE_A" ;;
     master-aa) echo "$PREFIX_BASELINE_B" ;;
-    hook-null|module-off|stats|trace) echo "$PREFIX_PATCHED" ;;
+    v9-*) echo "$PREFIX_V9" ;;
+    v10-*) echo "$PREFIX_V10" ;;
     *) die "unknown config: $1" ;;
   esac
 }
@@ -327,7 +333,8 @@ config_build_name() {
   case "$1" in
     master) echo baseline-a ;;
     master-aa) echo baseline-b ;;
-    hook-null|module-off|stats|trace) echo patched ;;
+    v9-*) echo v9 ;;
+    v10-*) echo v10 ;;
     *) die "unknown config: $1" ;;
   esac
 }
@@ -338,18 +345,18 @@ append_config_lines() {
     master|master-aa)
       # Unmodified baseline build. Nothing to add.
       ;;
-    hook-null)
-      # Patched build, but the collector module is deliberately left out of
+    v9-hook-null|v10-hook-null)
+      # Treatment build, but the collector module is deliberately left out of
       # shared_preload_libraries, so it never attaches. This measures the
       # cost of the core hook call sites alone.
       ;;
-    module-off)
+    v9-module-off|v10-module-off)
       {
         echo "shared_preload_libraries = '$MODULE_NAME'"
         echo "$GUC_CAPTURE = 'off'"
       } >>"$conf_file"
       ;;
-    stats)
+    v9-stats|v10-stats)
       {
         echo "shared_preload_libraries = '$MODULE_NAME'"
         echo "$GUC_CAPTURE = 'stats'"
@@ -360,7 +367,7 @@ append_config_lines() {
         echo "$GUC_TRACE_RING_SIZE = '4MB'"
       } >>"$conf_file"
       ;;
-    trace)
+    v9-trace|v10-trace)
       {
         echo "shared_preload_libraries = '$MODULE_NAME'"
         echo "$GUC_CAPTURE = 'trace'"
@@ -438,7 +445,14 @@ psql_for() {
 # ---------------------------------------------------------------------------
 capture_should_be_active() {
   case "$1" in
-    stats|trace) return 0 ;;
+    v9-stats|v9-trace|v10-stats|v10-trace) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+capture_should_trace() {
+  case "$1" in
+    v9-trace|v10-trace) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -450,7 +464,7 @@ assert_capture_state() {
     die "could not read shared_preload_libraries for $config: $preload"
 
   case "$config" in
-    master|master-aa|hook-null)
+    master|master-aa|v9-hook-null|v10-hook-null)
       case "$preload" in
         *"$MODULE_NAME"*)
           die "$MODULE_NAME is unexpectedly present in shared_preload_libraries for $config ('$preload') -- the module must be entirely absent from this configuration"
@@ -460,7 +474,7 @@ assert_capture_state() {
         die "$GUC_CAPTURE is unexpectedly readable for $config (got '$capture_out'); the module should not be loaded at all, so this GUC should not exist"
       fi
       ;;
-    module-off|stats|trace)
+    v9-module-off|v9-stats|v9-trace|v10-module-off|v10-stats|v10-trace)
       case "$preload" in
         *"$MODULE_NAME"*) ;;
         *)
@@ -468,9 +482,9 @@ assert_capture_state() {
           ;;
       esac
       case "$config" in
-        module-off) expected=off ;;
-        stats) expected=stats ;;
-        trace) expected=trace ;;
+        v9-module-off|v10-module-off) expected=off ;;
+        v9-stats|v10-stats) expected=stats ;;
+        v9-trace|v10-trace) expected=trace ;;
       esac
       capture_out=$(psql_for "$prefix" -qAtc "SHOW $GUC_CAPTURE" 2>&1) ||
         die "$GUC_CAPTURE is not readable for $config even though the module should be loaded (got: $capture_out)"
@@ -487,7 +501,7 @@ install_and_assert_sql_extension() {
   local prefix=$1 config=$2 present
 
   case "$config" in
-    module-off|stats|trace)
+    v9-module-off|v9-stats|v9-trace|v10-module-off|v10-stats|v10-trace)
       psql_for "$prefix" -qAtc "CREATE EXTENSION $MODULE_NAME" >/dev/null ||
         die "CREATE EXTENSION $MODULE_NAME failed for $config"
       present=$(psql_for "$prefix" -qAtc \
@@ -496,7 +510,7 @@ install_and_assert_sql_extension() {
       [[ "$present" == 1 ]] ||
         die "$MODULE_NAME SQL extension is not installed for $config"
       ;;
-    master|master-aa|hook-null)
+    master|master-aa|v9-hook-null|v10-hook-null)
       present=$(psql_for "$prefix" -qAtc \
         "SELECT count(*) FROM pg_extension WHERE extname = '$MODULE_NAME'") ||
         die "could not inspect pg_extension for $config"
@@ -702,10 +716,16 @@ PY
 # business being there regardless).
 # ---------------------------------------------------------------------------
 run_pgbench_measured() {
-  local prefix=$1 clients=$2 threads=$3 seed=$4 logfile=$5 check_recording=$6
-  local appname=$7 workload=$8 run_index=$9
-  shift 9
+  local prefix=$1 clients=$2 threads=$3 seed=$4 config=$5 workload=$6
+  local run_index=$7
+  shift 7
   local -a extra_args=("$@")
+  local logfile="$LOG_DIR/pgbench-$run_index.log"
+  local appname="wet-v10-$run_index"
+  local check_recording=no
+  local expect_trace=false
+  capture_should_be_active "$config" && check_recording=yes
+  capture_should_trace "$config" && expect_trace=true
   local total=$((WARMUP_SECONDS + DURATION))
   local -a client_pin=()
   [[ -z "$PGBENCH_CPUS" ]] || client_pin=(taskset -c "$PGBENCH_CPUS")
@@ -773,8 +793,6 @@ PY
   PGBENCH_CAPACITY_RESULT=$pgbench_capacity
 
   if [[ "$check_recording" == yes ]]; then
-      local expect_trace=false
-      [[ "$CURRENT_CELL" == *"config=trace"* ]] && expect_trace=true
       local proof_file="$RECORDING_DIR/cell-$run_index.csv"
       local proof client_count clients_recording timing_calls trace_records
       proof=$(psql_for "$prefix" -qAt -F ',' \
@@ -952,6 +970,8 @@ run_cell() {
 
   local check_recording=no
   capture_should_be_active "$config" && check_recording=yes
+  local expect_trace=false
+  capture_should_trace "$config" && expect_trace=true
 
   # Deterministic preconditioning.  W4 is explicitly warm-cache; W6c is not
   # scanned because its constrained shared_buffers/eviction behavior is the
@@ -984,7 +1004,7 @@ run_cell() {
         # afterwards would always read zero.
         local combined recorded trace_records=0
         local trace_expr="0"
-        [[ "$config" != trace ]] ||
+        [[ "$expect_trace" != true ]] ||
           trace_expr="(SELECT count(*) FROM pg_backend_wait_event_trace WHERE wait_event_type <> 'Query')"
         combined=$(psql_for "$prefix" -qAt -F ',' -c \
           "WITH m AS MATERIALIZED
@@ -1001,7 +1021,7 @@ run_cell() {
         fi
         [[ "$trace_records" =~ ^[0-9]+$ ]] ||
           die "W1 returned a malformed trace proof: '$trace_records'"
-        if [[ "$config" == trace ]] && (( trace_records == 0 )); then
+        if [[ "$expect_trace" == true ]] && (( trace_records == 0 )); then
           die "W1 timing counters recorded, but the backend trace ring is empty"
         fi
         printf '%s\n' \
@@ -1018,9 +1038,8 @@ run_cell() {
       ;;
     W3)
       clients=8
-      run_pgbench_measured "$prefix" 8 8 "$repetition" \
-        "$LOG_DIR/pgbench-$run_index.log" "$check_recording" \
-        "wet-v9-$run_index" "$workload" "$run_index" \
+      run_pgbench_measured "$prefix" 8 8 "$repetition" "$config" \
+        "$workload" "$run_index" \
         -f "$WORKLOAD_DIR/w3-short-lwlock.sql"
       tps=$TPS_RESULT
       latency_ms=$LATENCY_RESULT
@@ -1031,9 +1050,8 @@ run_cell() {
       ;;
     W4)
       clients=16
-      run_pgbench_measured "$prefix" 16 8 "$repetition" \
-        "$LOG_DIR/pgbench-$run_index.log" "$check_recording" \
-        "wet-v9-$run_index" "$workload" "$run_index" -S
+      run_pgbench_measured "$prefix" 16 8 "$repetition" "$config" \
+        "$workload" "$run_index" -S
       tps=$TPS_RESULT
       latency_ms=$LATENCY_RESULT
       samples=$SAMPLES_RESULT
@@ -1043,9 +1061,8 @@ run_cell() {
       ;;
     W6c)
       clients=32
-      run_pgbench_measured "$prefix" 32 8 "$repetition" \
-        "$LOG_DIR/pgbench-$run_index.log" "$check_recording" \
-        "wet-v9-$run_index" "$workload" "$run_index" -S
+      run_pgbench_measured "$prefix" 32 8 "$repetition" "$config" \
+        "$workload" "$run_index" -S
       tps=$TPS_RESULT
       latency_ms=$LATENCY_RESULT
       samples=$SAMPLES_RESULT
@@ -1142,9 +1159,9 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 data = {
-    "schema_version": 4,
-    "benchmark_series": "wet-v9",
-    "treatment": "null-hook-fast-path",
+    "schema_version": 5,
+    "benchmark_series": "wet-v10",
+    "treatment": "inline-attachment-needed-guard",
     "mode": mode,
     "seed": int(seed),
     "runs_per_cell": int(runs),
@@ -1176,11 +1193,14 @@ data = {
     "analysis": {
         "script": "analyze-results.py",
         "primary_reference": "master",
+        "primary_comparison": "v10 minus v9 for each capture mode",
         "pairing_key": "workload + repetition",
         "interval": "two-sided 95% Student t interval over paired contrasts",
         "w1_contrast": "config minus master, nanoseconds per iteration",
+        "v10_v9_w1_contrast": "v10 minus v9, nanoseconds per iteration",
         "w1_equivalence_margin_ns": 2.0,
         "pgbench_contrast": "(config / master - 1) * 100 percent",
+        "v10_v9_pgbench_contrast": "(v10 / v9 - 1) * 100 percent",
         "pgbench_equivalence_margin_percent": 2.0,
         "equivalence_rule": (
             "criterion met only when the complete 95% interval lies "
@@ -1233,9 +1253,9 @@ log "Schedule written: $SCHEDULE_CSV ($TOTAL_CELLS cells)"
 log "Protocol recorded: $PROTOCOL"
 log "Mode: $MODE"
 if [[ "$MODE" == full ]]; then
-  log "Starting the matrix. Expect roughly 4-5.5 hours."
+  log "Starting the matrix. Expect roughly 7-9 hours."
 else
-  log "Starting the 24-cell smoke matrix."
+  log "Starting the 40-cell smoke matrix."
 fi
 log ""
 
@@ -1269,8 +1289,8 @@ for line in "${SCHEDULE_LINES[@]}"; do
   fi
   write_progress running "completed cell $n/$TOTAL_CELLS"
 
-  if [[ "$MODE" == full && $((n % 24)) -eq 0 ]]; then
-    completed_repetition=$((n / 24))
+  if [[ "$MODE" == full && $((n % CELLS_PER_REPETITION)) -eq 0 ]]; then
+    completed_repetition=$((n / CELLS_PER_REPETITION))
     case "$completed_repetition" in
       1|3|6|9)
         log "Running early baseline A/A noise gate after repetition $completed_repetition"

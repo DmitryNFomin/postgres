@@ -6,7 +6,7 @@ export LC_ALL=C
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_DIR=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
 DIST_DIR=${1:-"$REPO_DIR/dist"}
-PACKAGE_NAME=wet-v9-baremetal-r1
+PACKAGE_NAME=wet-v10-baremetal-r1
 STAGE=$(mktemp -d)
 ARCHIVE="$DIST_DIR/$PACKAGE_NAME.tar.gz"
 SIDECAR="$ARCHIVE.sha256"
@@ -72,29 +72,45 @@ for name in "${workloads[@]}"; do
   }
   cp "$SCRIPT_DIR/workloads/$name" "$STAGE/$PACKAGE_NAME/workloads/"
 done
-cp "$REPO_DIR/BAREMETAL-RUNBOOK-v9.md" "$STAGE/$PACKAGE_NAME/"
+cp "$REPO_DIR/BAREMETAL-RUNBOOK-v10.md" "$STAGE/$PACKAGE_NAME/"
 
 BASELINE_COMMIT=765efece39ba3fb04fdf20b1dadcd9ecea76fbc9
-PATCHED_COMMIT=40bffed8a92291c27a5d1956a5cd18dd3609f397
-PATCHED_PARENT=d7b4584a901241258604eef1f03dfd6b3f1fa926
+V9_COMMIT=40bffed8a92291c27a5d1956a5cd18dd3609f397
+V10_COMMIT=c12783fbf86e8116526afe4566d58bf90c3478e0
+V9_PARENT=d7b4584a901241258604eef1f03dfd6b3f1fa926
+V10_PARENT=$V9_COMMIT
 COMMON_BASE=0c5d6269614e107d1d2d669f82f63f7e232b30c9
 FIXTURE_TREE=93dde50fc966a3ab01f4218010ec65548370d6d6
 SOURCE_EPOCH=1789301160
-PATCH_ARTIFACT="$SCRIPT_DIR/patches/0006-optimize-null-wait-event-hook-path.patch"
-REVIEW_PATCH="$REPO_DIR/patches-v9/0006-optimize-null-wait-event-hook-path.patch"
+V9_PATCH_ARTIFACT="$SCRIPT_DIR/patches/0006-optimize-null-wait-event-hook-path.patch"
+V9_REVIEW_PATCH="$REPO_DIR/patches-v9/0006-optimize-null-wait-event-hook-path.patch"
+V10_PATCH_ARTIFACT="$SCRIPT_DIR/patches/0007-inline-attachment-needed-guard.patch"
+V10_REVIEW_PATCH="$REPO_DIR/patches-v10/0007-inline-attachment-needed-guard.patch"
 BASELINE_ARCHIVE="$STAGE/$PACKAGE_NAME/source/postgres-baseline.tar.gz"
-PATCHED_ARCHIVE="$STAGE/$PACKAGE_NAME/source/postgres-patched.tar.gz"
+V9_ARCHIVE="$STAGE/$PACKAGE_NAME/source/postgres-v9.tar.gz"
+V10_ARCHIVE="$STAGE/$PACKAGE_NAME/source/postgres-v10.tar.gz"
 SOURCE_MANIFEST="$STAGE/$PACKAGE_NAME/source/source-manifest.json"
 
-[[ -f "$PATCH_ARTIFACT" && ! -L "$PATCH_ARTIFACT" ]]
-[[ -f "$REVIEW_PATCH" && ! -L "$REVIEW_PATCH" ]]
-[[ "$(git -C "$REPO_DIR" rev-parse "$PATCHED_COMMIT^")" == "$PATCHED_PARENT" ]]
-cmp "$PATCH_ARTIFACT" "$REVIEW_PATCH"
-cmp "$PATCH_ARTIFACT" <(
-  git -C "$REPO_DIR" diff --binary "$PATCHED_PARENT" "$PATCHED_COMMIT"
+for patch in \
+  "$V9_PATCH_ARTIFACT" "$V9_REVIEW_PATCH" \
+  "$V10_PATCH_ARTIFACT" "$V10_REVIEW_PATCH"; do
+  [[ -f "$patch" && ! -L "$patch" ]]
+done
+[[ "$(git -C "$REPO_DIR" rev-parse "$V9_COMMIT^")" == "$V9_PARENT" ]]
+[[ "$(git -C "$REPO_DIR" rev-parse "$V10_COMMIT^")" == "$V10_PARENT" ]]
+cmp "$V9_PATCH_ARTIFACT" "$V9_REVIEW_PATCH"
+cmp "$V9_PATCH_ARTIFACT" <(
+  git -C "$REPO_DIR" diff --binary "$V9_PARENT" "$V9_COMMIT"
 )
-cp "$PATCH_ARTIFACT" "$STAGE/$PACKAGE_NAME/patches/"
-[[ "$(git -C "$REPO_DIR" merge-base "$BASELINE_COMMIT" "$PATCHED_COMMIT")" \
+cmp "$V10_PATCH_ARTIFACT" "$V10_REVIEW_PATCH"
+cmp "$V10_PATCH_ARTIFACT" <(
+  git -C "$REPO_DIR" diff --binary "$V10_PARENT" "$V10_COMMIT"
+)
+cp "$V9_PATCH_ARTIFACT" "$V10_PATCH_ARTIFACT" \
+  "$STAGE/$PACKAGE_NAME/patches/"
+[[ "$(git -C "$REPO_DIR" merge-base "$BASELINE_COMMIT" "$V9_COMMIT")" \
+   == "$COMMON_BASE" ]]
+[[ "$(git -C "$REPO_DIR" merge-base "$BASELINE_COMMIT" "$V10_COMMIT")" \
    == "$COMMON_BASE" ]]
 [[ "$(git -C "$REPO_DIR" show -s --format=%ct "$COMMON_BASE")" \
    == "$SOURCE_EPOCH" ]]
@@ -102,50 +118,71 @@ cp "$PATCH_ARTIFACT" "$STAGE/$PACKAGE_NAME/patches/"
   "$BASELINE_COMMIT:src/test/modules/test_wait_primitive")" \
    == "$FIXTURE_TREE" ]]
 [[ "$(git -C "$REPO_DIR" rev-parse \
-  "$PATCHED_COMMIT:src/test/modules/test_wait_primitive")" \
+  "$V9_COMMIT:src/test/modules/test_wait_primitive")" \
+   == "$FIXTURE_TREE" ]]
+[[ "$(git -C "$REPO_DIR" rev-parse \
+  "$V10_COMMIT:src/test/modules/test_wait_primitive")" \
    == "$FIXTURE_TREE" ]]
 git -C "$REPO_DIR" archive --format=tar.gz \
   -o "$BASELINE_ARCHIVE" "$BASELINE_COMMIT"
 git -C "$REPO_DIR" archive --format=tar.gz \
-  -o "$PATCHED_ARCHIVE" "$PATCHED_COMMIT"
-python3 - "$SOURCE_MANIFEST" "$BASELINE_ARCHIVE" "$PATCHED_ARCHIVE" \
-  "$BASELINE_COMMIT" "$PATCHED_COMMIT" "$COMMON_BASE" "$FIXTURE_TREE" \
-  "$SOURCE_EPOCH" <<'PY'
+  -o "$V9_ARCHIVE" "$V9_COMMIT"
+git -C "$REPO_DIR" archive --format=tar.gz \
+  -o "$V10_ARCHIVE" "$V10_COMMIT"
+python3 - "$SOURCE_MANIFEST" "$BASELINE_ARCHIVE" "$V9_ARCHIVE" \
+  "$V10_ARCHIVE" "$BASELINE_COMMIT" "$V9_COMMIT" "$V10_COMMIT" \
+  "$COMMON_BASE" "$FIXTURE_TREE" "$SOURCE_EPOCH" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-(out, baseline_path, patched_path, baseline_commit, patched_commit,
- common_base, fixture_tree, source_epoch) = sys.argv[1:]
+(out, baseline_path, v9_path, v10_path, baseline_commit, v9_commit,
+ v10_commit, common_base, fixture_tree, source_epoch) = sys.argv[1:]
 
 def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    result = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            result.update(chunk)
+    return result.hexdigest()
 
 data = {
-    "schema_version": 2,
-    "benchmark_series": "wet-v9",
+    "schema_version": 3,
+    "benchmark_series": "wet-v10",
     "repo_url": "https://github.com/DmitryNFomin/postgres.git",
     "commits": {
         "baseline": baseline_commit,
-        "patched": patched_commit,
+        "v9": v9_commit,
+        "v10": v10_commit,
     },
     "common_base": common_base,
     "source_date_epoch": int(source_epoch),
     "fixture_tree": fixture_tree,
-    "treatment": {
+    "reference": {
         "name": "null-hook-fast-path",
+        "commit": v9_commit,
         "parent_commit": "d7b4584a901241258604eef1f03dfd6b3f1fa926",
         "branch_prediction_hint": "none",
+    },
+    "comparison": {
+        "name": "inline-attachment-needed-guard",
+        "reference_commit": v9_commit,
+        "treatment_commit": v10_commit,
+        "treatment_parent_commit": v9_commit,
     },
     "archives": {
         "baseline": {
             "filename": Path(baseline_path).name,
             "sha256": digest(baseline_path),
         },
-        "patched": {
-            "filename": Path(patched_path).name,
-            "sha256": digest(patched_path),
+        "v9": {
+            "filename": Path(v9_path).name,
+            "sha256": digest(v9_path),
+        },
+        "v10": {
+            "filename": Path(v10_path).name,
+            "sha256": digest(v10_path),
         },
     },
 }
@@ -201,14 +238,19 @@ tar -xzf "$ARCHIVE" -C "$VERIFY"
 (
   cd "$VERIFY/$PACKAGE_NAME"
   sha256sum -c PACKAGE-MANIFEST.sha256 >/dev/null
-  mkdir source-check-baseline source-check-patched
+  mkdir source-check-baseline source-check-v9 source-check-v10
   tar -xzf source/postgres-baseline.tar.gz -C source-check-baseline
-  tar -xzf source/postgres-patched.tar.gz -C source-check-patched
+  tar -xzf source/postgres-v9.tar.gz -C source-check-v9
+  tar -xzf source/postgres-v10.tar.gz -C source-check-v10
   diff -qr \
     source-check-baseline/src/test/modules/test_wait_primitive \
-    source-check-patched/src/test/modules/test_wait_primitive >/dev/null
+    source-check-v9/src/test/modules/test_wait_primitive >/dev/null
+  diff -qr \
+    source-check-baseline/src/test/modules/test_wait_primitive \
+    source-check-v10/src/test/modules/test_wait_primitive >/dev/null
   test -x source-check-baseline/configure
-  test -f source-check-patched/contrib/pg_wait_event_tracing/Makefile
+  test -f source-check-v9/contrib/pg_wait_event_tracing/Makefile
+  test -f source-check-v10/contrib/pg_wait_event_tracing/Makefile
   PYTHONDONTWRITEBYTECODE=1 ./self-test.py
 )
 (

@@ -1,18 +1,20 @@
-# Wait-event tracing v9 benchmark
+# Wait-event tracing v10 benchmark
 
-This workspace packages a new bare-metal benchmark series for the wait-event
-hook null-path optimization.
+This workspace packages a same-run bare-metal comparison of the v9 reference
+and the v10 attachment-needed guard.
 
 - Vanilla baseline: `765efece39ba3fb04fdf20b1dadcd9ecea76fbc9`
-- Optimized patched source: `40bffed8a92291c27a5d1956a5cd18dd3609f397`
-- Source patch: `patches-v9/0006-optimize-null-wait-event-hook-path.patch`
-- Executor runbook: `BAREMETAL-RUNBOOK-v9.md`
-- Package output: `dist/wet-v9-baremetal-r1.tar.gz`
+- v9 reference: `40bffed8a92291c27a5d1956a5cd18dd3609f397`
+- v10 treatment: `c12783fbf86e8116526afe4566d58bf90c3478e0`
+- v9 patch: `patches-v9/0006-optimize-null-wait-event-hook-path.patch`
+- v10 patch: `patches-v10/0007-inline-attachment-needed-guard.patch`
+- Executor runbook: `BAREMETAL-RUNBOOK-v10.md`
+- Package output: `dist/wet-v10-baremetal-r1.tar.gz`
 
-The optimized source loads each hook pointer once and avoids reading the
-volatile wait-event value when no end hook exists. It preserves enabled
-stats/trace behavior and uses no `likely()` or `unlikely()` hint.
+The v10 source adds one always-inline `pwet_attach_needed` test around the
+unchanged attachment implementation. The package measures v9 and v10 in
+matching hook-null, module-off, stats, and trace modes.
 
 The `briefs`, `reports`, `patches-v8`, `README-v8.md`, and
 `IMPLEMENTATION-PLAN-v8.md` files are retained as historical v8 design
-material. The runnable v9 kit is under `bench-kit`.
+material. The runnable v10 kit is under `bench-kit`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the 288-cell verifier with synthetic, then tampered, evidence."""
+"""Exercise the 480-cell verifier with synthetic, then tampered, evidence."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from benchmark_protocol import (
     BOUND_KIT_FILES,
     CONFIGS,
     RESULT_FIELDS,
+    TRACE_CONFIGS,
     W3_PROTOCOL,
     WORKLOADS,
 )
@@ -163,24 +164,45 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
         "bin/postgres": {"type": "file", "sha256": "1" * 64},
     }
     source_manifest = {
-        "schema_version": 2,
-        "benchmark_series": "wet-v9",
+        "schema_version": 3,
+        "benchmark_series": "wet-v10",
         "repo_url": "https://github.com/DmitryNFomin/postgres.git",
         "commits": {
             "baseline": "765efece39ba3fb04fdf20b1dadcd9ecea76fbc9",
-            "patched": "40bffed8a92291c27a5d1956a5cd18dd3609f397",
+            "v9": "40bffed8a92291c27a5d1956a5cd18dd3609f397",
+            "v10": "c12783fbf86e8116526afe4566d58bf90c3478e0",
         },
         "common_base": "0c5d6269614e107d1d2d669f82f63f7e232b30c9",
         "source_date_epoch": 1789301160,
         "fixture_tree": "93dde50fc966a3ab01f4218010ec65548370d6d6",
-        "treatment": {
+        "reference": {
             "name": "null-hook-fast-path",
+            "commit": "40bffed8a92291c27a5d1956a5cd18dd3609f397",
             "parent_commit": "d7b4584a901241258604eef1f03dfd6b3f1fa926",
             "branch_prediction_hint": "none",
         },
+        "comparison": {
+            "name": "inline-attachment-needed-guard",
+            "reference_commit":
+                "40bffed8a92291c27a5d1956a5cd18dd3609f397",
+            "treatment_commit":
+                "c12783fbf86e8116526afe4566d58bf90c3478e0",
+            "treatment_parent_commit":
+                "40bffed8a92291c27a5d1956a5cd18dd3609f397",
+        },
         "archives": {
-            "baseline": {"sha256": "b" * 64},
-            "patched": {"sha256": "c" * 64},
+            "baseline": {
+                "filename": "postgres-baseline.tar.gz",
+                "sha256": "b" * 64,
+            },
+            "v9": {
+                "filename": "postgres-v9.tar.gz",
+                "sha256": "c" * 64,
+            },
+            "v10": {
+                "filename": "postgres-v10.tar.gz",
+                "sha256": "d" * 64,
+            },
         },
     }
     write_json(build / "source-manifest.json", source_manifest)
@@ -212,8 +234,13 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
             "none",
         ),
         (
-            "patched",
+            "v9",
             "40bffed8a92291c27a5d1956a5cd18dd3609f397",
+            "8" * 64,
+        ),
+        (
+            "v10",
+            "c12783fbf86e8116526afe4566d58bf90c3478e0",
             "9" * 64,
         ),
     ):
@@ -246,9 +273,9 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
             }
         )
     manifest = {
-        "schema_version": 5,
-        "benchmark_series": "wet-v9",
-        "treatment": "null-hook-fast-path",
+        "schema_version": 6,
+        "benchmark_series": "wet-v10",
+        "treatment": "inline-attachment-needed-guard",
         "build_host": "synthetic-host",
         "common_base": "0c5d6269614e107d1d2d669f82f63f7e232b30c9",
         "source_date_epoch": 1789301160,
@@ -264,7 +291,8 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
         "bundled_source": {
             "manifest_sha256": digest(build / "source-manifest.json"),
             "baseline_archive_sha256": "b" * 64,
-            "patched_archive_sha256": "c" * 64,
+            "v9_archive_sha256": "c" * 64,
+            "v10_archive_sha256": "d" * 64,
         },
         "builds": builds,
     }
@@ -300,13 +328,13 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
         writer.writerows(schedule)
 
     protocol = {
-        "schema_version": 4,
-        "benchmark_series": "wet-v9",
-        "treatment": "null-hook-fast-path",
+        "schema_version": 5,
+        "benchmark_series": "wet-v10",
+        "treatment": "inline-attachment-needed-guard",
         "mode": "full",
         "seed": seed,
         "runs_per_cell": 12,
-        "expected_cells": 288,
+        "expected_cells": 480,
         "duration_seconds": 30,
         "warmup_seconds": 10,
         "quiescence_seconds": 5,
@@ -330,6 +358,13 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
             relative: digest(kit / relative) for relative in bound
         },
         "analysis": {
+            "primary_reference": "master",
+            "primary_comparison": "v10 minus v9 for each capture mode",
+            "pairing_key": "workload + repetition",
+            "v10_v9_w1_contrast":
+                "v10 minus v9, nanoseconds per iteration",
+            "v10_v9_pgbench_contrast":
+                "(v10 / v9 - 1) * 100 percent",
             "w1_equivalence_margin_ns": 2.0,
             "pgbench_equivalence_margin_percent": 2.0,
             "aa_stability": {
@@ -355,7 +390,7 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
         build_name = {
             "master": "baseline-a",
             "master-aa": "baseline-b",
-        }.get(config, "patched")
+        }.get(config, config.split("-", 1)[0])
         is_pgbench = workload != "W1"
         clients = {"W3": 8, "W4": 16, "W6c": 32}.get(workload, "")
         row = {
@@ -431,7 +466,7 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
             if workload == "W1":
                 proof.write_text(
                     "timing_calls,trace_records\n"
-                    f"100,{1 if config == 'trace' else 0}\n",
+                    f"100,{1 if config in TRACE_CONFIGS else 0}\n",
                     encoding="utf-8",
                 )
             else:
@@ -439,7 +474,7 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
                     "client_count,clients_recording,timing_calls,"
                     "representative_trace_records\n"
                     f"{clients},{clients},100,"
-                    f"{1 if config == 'trace' else 0}\n",
+                    f"{1 if config in TRACE_CONFIGS else 0}\n",
                     encoding="utf-8",
                 )
         if workload == "W3" and config in ACTIVE:
@@ -483,8 +518,8 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
         {
             "state": "complete",
             "mode": "full",
-            "cells_completed": 288,
-            "cells_total": 288,
+            "cells_completed": 480,
+            "cells_total": 480,
         },
     )
     completion_files = (
@@ -498,7 +533,7 @@ def create_tree(source_kit: Path, root: Path) -> tuple[Path, Path, Path]:
     write_json(
         results / "matrix-complete.json",
         {
-            "rows": 288,
+            "rows": 480,
             "sha256": {
                 name: digest(results / name) for name in completion_files
             },
@@ -511,7 +546,7 @@ def main() -> int:
     source_kit = Path(__file__).resolve().parent
     verify_runner_contract(source_kit)
     analyzer = source_kit / "analyze-results.py"
-    with tempfile.TemporaryDirectory(prefix="wet-v9-self-test-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="wet-v10-self-test-") as temporary:
         root = Path(temporary)
         _, _, results = create_tree(source_kit, root)
         run_analyzer(analyzer, root, expect_success=True)
@@ -559,7 +594,7 @@ def main() -> int:
         )
         write_json(protocol_path, protocol)
 
-        summary = results / "w3-qualification" / "cell-11.json"
+        summary = results / "w3-qualification" / "cell-15.json"
         saved = summary.read_bytes()
         write_json(summary, {"passed": True, "checks": {}})
         run_analyzer(analyzer, root, expect_success=False)
@@ -588,7 +623,8 @@ def main() -> int:
 
     print(
         "self-test: PASS "
-        "(288 valid cells and co-resident caveat accepted; "
+        "(480 valid cells and direct v10/v9 contrasts verified; "
+        "co-resident caveat accepted; "
         "missing proof, incomplete binding, "
         "forged W3 summary, and failed A/A suitability rejected; "
         "raw collection and local clean-room analysis passed)"

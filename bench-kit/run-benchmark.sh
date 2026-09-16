@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command, fail-closed driver for the complete v9 bare-metal benchmark.
+# One-command, fail-closed driver for the complete v10 bare-metal benchmark.
 set -Eeuo pipefail
 export LC_ALL=C
 
@@ -214,7 +214,7 @@ run_phase() {
   write_status running "completed"
 }
 
-log "PostgreSQL wait-event-tracing v9 bare-metal benchmark"
+log "PostgreSQL wait-event-tracing v10 bare-metal benchmark"
 log "Kit: $SCRIPT_DIR"
 log "Log: $MAIN_LOG"
 log "SSH automation is not used. This process runs only on the current host."
@@ -273,20 +273,20 @@ if find "$SCRIPT_DIR" -maxdepth 1 \
   fail "a prior result archive exists; move it out of the kit before starting"
 fi
 
-run_phase build "15 to 25 minutes" "$SCRIPT_DIR/01-build-all.sh"
-run_phase smoke "about 5 to 15 minutes" \
+run_phase build "20 to 35 minutes" "$SCRIPT_DIR/01-build-all.sh"
+run_phase smoke "about 8 to 20 minutes" \
   env BENCHMARK_MODE=smoke "$SCRIPT_DIR/02-run-matrix.sh"
 run_phase smoke-verification "under 1 minute" \
   python3 "$SCRIPT_DIR/analyze-results.py" "$SCRIPT_DIR/smoke-results" \
   --output-json "$SCRIPT_DIR/smoke-results/analysis.json" \
   --output-markdown "$SCRIPT_DIR/smoke-results/analysis.md"
 
-log "Smoke matrix passed all 24 configuration/workload cells."
+log "Smoke matrix passed all 40 configuration/workload cells."
 run_phase cooldown "1 to 20 minutes" "$SCRIPT_DIR/wait-for-idle.sh"
 run_phase final-host-check "under 1 minute" "$SCRIPT_DIR/00-check-host.sh"
 log "Cooldown and final host check passed."
-log "The full 288-cell matrix will now start."
-run_phase matrix "4 to 5.5 hours" "$SCRIPT_DIR/02-run-matrix.sh"
+log "The full 480-cell matrix will now start."
+run_phase matrix "7 to 9 hours" "$SCRIPT_DIR/02-run-matrix.sh"
 run_phase collection "a few minutes" "$SCRIPT_DIR/03-collect.sh"
 
 archive=$(find "$SCRIPT_DIR" -maxdepth 1 \

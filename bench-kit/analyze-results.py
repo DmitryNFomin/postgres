@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify and summarize a v9 wait-event benchmark results tree."""
+"""Verify and summarize a v10 wait-event benchmark results tree."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ from benchmark_protocol import (
     PGBENCH_WORKLOADS,
     RESULT_FIELDS,
     SMOKE_PROFILE,
+    TRACE_CONFIGS,
+    V10_V9_PAIRS,
     W3_PROTOCOL,
     WORKLOADS,
 )
@@ -169,11 +171,11 @@ def verify_manifest(build_dir: Path) -> dict:
     path = build_dir / "manifest.json"
     require(path.is_file(), f"missing build manifest: {path}")
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    require(manifest.get("schema_version") == 5,
+    require(manifest.get("schema_version") == 6,
             "unsupported build manifest schema")
     require(
-        manifest.get("benchmark_series") == "wet-v9"
-        and manifest.get("treatment") == "null-hook-fast-path",
+        manifest.get("benchmark_series") == "wet-v10"
+        and manifest.get("treatment") == "inline-attachment-needed-guard",
         "unexpected build benchmark series or treatment",
     )
     require(manifest.get("compiler_cache") == "disabled",
@@ -181,7 +183,7 @@ def verify_manifest(build_dir: Path) -> dict:
     require(
         manifest.get("common_base")
         == "0c5d6269614e107d1d2d669f82f63f7e232b30c9",
-        "unexpected baseline/patched common base",
+        "unexpected baseline/v9/v10 common base",
     )
     require(manifest.get("source_date_epoch") == 1789301160,
             "unexpected reproducibility epoch")
@@ -209,7 +211,8 @@ def verify_manifest(build_dir: Path) -> dict:
         == {
             "manifest_sha256",
             "baseline_archive_sha256",
-            "patched_archive_sha256",
+            "v9_archive_sha256",
+            "v10_archive_sha256",
         },
         "build manifest lacks bundled-source provenance",
     )
@@ -232,10 +235,10 @@ def verify_manifest(build_dir: Path) -> dict:
     source_manifest = json.loads(
         source_manifest_path.read_text(encoding="utf-8")
     )
-    require(source_manifest.get("schema_version") == 2,
+    require(source_manifest.get("schema_version") == 3,
             "unsupported source manifest schema")
     require(
-        source_manifest.get("benchmark_series") == "wet-v9",
+        source_manifest.get("benchmark_series") == "wet-v10",
         "unexpected source benchmark series",
     )
     require(
@@ -247,7 +250,8 @@ def verify_manifest(build_dir: Path) -> dict:
         source_manifest.get("commits")
         == {
             "baseline": "765efece39ba3fb04fdf20b1dadcd9ecea76fbc9",
-            "patched": "40bffed8a92291c27a5d1956a5cd18dd3609f397",
+            "v9": "40bffed8a92291c27a5d1956a5cd18dd3609f397",
+            "v10": "c12783fbf86e8116526afe4566d58bf90c3478e0",
         },
         "source manifest commits differ",
     )
@@ -260,27 +264,55 @@ def verify_manifest(build_dir: Path) -> dict:
         "source manifest ancestry or fixture identity differs",
     )
     require(
-        source_manifest.get("treatment")
+        source_manifest.get("reference")
         == {
             "name": "null-hook-fast-path",
+            "commit": "40bffed8a92291c27a5d1956a5cd18dd3609f397",
             "parent_commit": "d7b4584a901241258604eef1f03dfd6b3f1fa926",
             "branch_prediction_hint": "none",
         },
-        "source manifest treatment metadata differs",
+        "source manifest v9 reference metadata differs",
     )
     require(
-        source_manifest.get("archives", {}).get("baseline", {}).get("sha256")
+        source_manifest.get("comparison")
+        == {
+            "name": "inline-attachment-needed-guard",
+            "reference_commit":
+                "40bffed8a92291c27a5d1956a5cd18dd3609f397",
+            "treatment_commit":
+                "c12783fbf86e8116526afe4566d58bf90c3478e0",
+            "treatment_parent_commit":
+                "40bffed8a92291c27a5d1956a5cd18dd3609f397",
+        },
+        "source manifest v10 comparison metadata differs",
+    )
+    require(
+        set(source_manifest.get("archives", {}))
+        == {"baseline", "v9", "v10"}
+        and source_manifest["archives"]["baseline"].get("filename")
+        == "postgres-baseline.tar.gz"
+        and source_manifest["archives"]["v9"].get("filename")
+        == "postgres-v9.tar.gz"
+        and source_manifest["archives"]["v10"].get("filename")
+        == "postgres-v10.tar.gz"
+        and source_manifest.get("archives", {}).get(
+            "baseline", {}
+        ).get("sha256")
         == bundled["baseline_archive_sha256"]
-        and source_manifest.get("archives", {}).get("patched", {}).get(
+        and source_manifest.get("archives", {}).get("v9", {}).get(
             "sha256"
         )
-        == bundled["patched_archive_sha256"],
+        == bundled["v9_archive_sha256"]
+        and source_manifest.get("archives", {}).get("v10", {}).get(
+            "sha256"
+        )
+        == bundled["v10_archive_sha256"],
         "source archive hashes differ between manifests",
     )
     build_logs = build_dir / "build-logs"
     require(build_logs.is_dir() and not build_logs.is_symlink(),
             "archived build provenance lacks build logs")
-    for build_name in ("baseline-a", "baseline-b", "patched"):
+    for build_name in ("baseline-a", "baseline-b", "v9", "v10"):
         for suffix in (".log", "-compilers.json", "-install-tree.json"):
             log_path = build_logs / f"{build_name}{suffix}"
             require(
@@ -290,7 +322,7 @@ def verify_manifest(build_dir: Path) -> dict:
                 f"missing build provenance file: {log_path.name}",
             )
     builds = {item["name"]: item for item in manifest.get("builds", [])}
-    require(set(builds) == {"baseline-a", "baseline-b", "patched"},
+    require(set(builds) == {"baseline-a", "baseline-b", "v9", "v10"},
             f"unexpected build set: {sorted(builds)}")
     for name, build in builds.items():
         compiler_path = build_logs / f"{name}-compilers.json"
@@ -318,7 +350,8 @@ def verify_manifest(build_dir: Path) -> dict:
     expected_commits = {
         "baseline-a": "765efece39ba3fb04fdf20b1dadcd9ecea76fbc9",
         "baseline-b": "765efece39ba3fb04fdf20b1dadcd9ecea76fbc9",
-        "patched": "40bffed8a92291c27a5d1956a5cd18dd3609f397",
+        "v9": "40bffed8a92291c27a5d1956a5cd18dd3609f397",
+        "v10": "c12783fbf86e8116526afe4566d58bf90c3478e0",
     }
     for name, expected in expected_commits.items():
         require(builds[name]["commit"] == expected,
@@ -342,8 +375,16 @@ def verify_manifest(build_dir: Path) -> dict:
     require(len({
         item["sha256"]["test_wait_primitive"] for item in builds.values()
     }) == 1, "installed fixture binary differs across builds")
-    require(builds["patched"]["sha256"]["pg_wait_event_tracing"] != "none",
-            "patched build lacks pg_wait_event_tracing")
+    for name in ("v9", "v10"):
+        require(
+            builds[name]["sha256"]["pg_wait_event_tracing"] != "none",
+            f"{name} build lacks pg_wait_event_tracing",
+        )
+    require(
+        builds["v9"]["sha256"]["pg_wait_event_tracing"]
+        != builds["v10"]["sha256"]["pg_wait_event_tracing"],
+        "v9 and v10 tracing modules are byte-identical",
+    )
     for name in ("baseline-a", "baseline-b"):
         require(builds[name]["sha256"]["pg_wait_event_tracing"] == "none",
                 f"{name} unexpectedly contains pg_wait_event_tracing")
@@ -351,11 +392,11 @@ def verify_manifest(build_dir: Path) -> dict:
 
 
 def verify_protocol(protocol: dict) -> None:
-    require(protocol.get("schema_version") == 4,
+    require(protocol.get("schema_version") == 5,
             "unsupported protocol schema")
     require(
-        protocol.get("benchmark_series") == "wet-v9"
-        and protocol.get("treatment") == "null-hook-fast-path",
+        protocol.get("benchmark_series") == "wet-v10"
+        and protocol.get("treatment") == "inline-attachment-needed-guard",
         "unexpected protocol benchmark series or treatment",
     )
     mode = protocol.get("mode")
@@ -389,6 +430,17 @@ def verify_protocol(protocol: dict) -> None:
         "CPU pinning must remain disabled",
     )
     analysis = protocol.get("analysis", {})
+    require(
+        analysis.get("primary_reference") == "master"
+        and analysis.get("primary_comparison")
+        == "v10 minus v9 for each capture mode"
+        and analysis.get("pairing_key") == "workload + repetition"
+        and analysis.get("v10_v9_w1_contrast")
+        == "v10 minus v9, nanoseconds per iteration"
+        and analysis.get("v10_v9_pgbench_contrast")
+        == "(v10 / v9 - 1) * 100 percent",
+        "direct v10/v9 analysis protocol differs",
+    )
     require(analysis.get("w1_equivalence_margin_ns") == 2.0,
             "W1 equivalence margin differs from the fixed protocol")
     require(
@@ -551,10 +603,14 @@ def verify_rows(rows: list[dict[str, str]], protocol: dict) -> None:
     build_for = {
         "master": "baseline-a",
         "master-aa": "baseline-b",
-        "hook-null": "patched",
-        "module-off": "patched",
-        "stats": "patched",
-        "trace": "patched",
+        "v9-hook-null": "v9",
+        "v9-module-off": "v9",
+        "v9-stats": "v9",
+        "v9-trace": "v9",
+        "v10-hook-null": "v10",
+        "v10-module-off": "v10",
+        "v10-stats": "v10",
+        "v10-trace": "v10",
     }
     shared_buffers_for = {
         "W1": "128MB",
@@ -824,7 +880,7 @@ def verify_runtime_evidence(
                 require(int(item["timing_calls"]) > 0,
                         f"timing proof is empty for run {index}")
                 trace_records = int(item["representative_trace_records"])
-            if row["config"] == "trace":
+            if row["config"] in TRACE_CONFIGS:
                 require(trace_records > 0,
                         f"trace proof is empty for run {index}")
             else:
@@ -919,6 +975,30 @@ def statistical_analysis(
         margin = w1_margin if workload == "W1" else pgbench_margin
         arms = {}
         contrasts = {}
+        v10_vs_v9 = {}
+
+        def paired_contrast(
+            treatment_config: str,
+            reference_config: str,
+        ) -> dict[str, float | int | str]:
+            paired = []
+            for repetition in range(1, runs + 1):
+                treatment = float(
+                    by_key[(treatment_config, workload, repetition)][metric]
+                )
+                reference = float(
+                    by_key[(reference_config, workload, repetition)][metric]
+                )
+                if workload == "W1":
+                    paired.append(treatment - reference)
+                else:
+                    paired.append((treatment / reference - 1.0) * 100.0)
+            interval = confidence_interval(paired)
+            interval["classification"] = classify_interval(interval, margin)
+            interval["margin"] = margin
+            interval["units"] = units
+            return interval
+
         for config in CONFIGS:
             values = [
                 float(by_key[(config, workload, repetition)][metric])
@@ -927,21 +1007,13 @@ def statistical_analysis(
             arms[config] = describe(values)
             if config == "master":
                 continue
-            paired = []
-            for repetition in range(1, runs + 1):
-                value = float(
-                    by_key[(config, workload, repetition)][metric])
-                reference = float(
-                    by_key[("master", workload, repetition)][metric])
-                if workload == "W1":
-                    paired.append(value - reference)
-                else:
-                    paired.append((value / reference - 1.0) * 100.0)
-            interval = confidence_interval(paired)
-            interval["classification"] = classify_interval(interval, margin)
-            interval["margin"] = margin
-            interval["units"] = units
-            contrasts[config] = interval
+            contrasts[config] = paired_contrast(config, "master")
+
+        for mode, v10_config, v9_config in V10_V9_PAIRS:
+            interval = paired_contrast(v10_config, v9_config)
+            interval["treatment"] = v10_config
+            interval["reference"] = v9_config
+            v10_vs_v9[mode] = interval
 
         aa_pairs = []
         for repetition in range(1, runs + 1):
@@ -967,6 +1039,7 @@ def statistical_analysis(
             "metric": metric,
             "arms": arms,
             "contrasts_vs_master": contrasts,
+            "v10_vs_v9": v10_vs_v9,
             "aa_stability": {
                 "paired_symmetric_percent": aa_interval,
                 "passed": aa_passed,
@@ -980,7 +1053,7 @@ def statistical_analysis(
 def render_markdown(report: dict) -> str:
     suitability = report["performance_suitability"]
     lines = [
-        "# Wait-event tracing v9 benchmark analysis",
+        "# Wait-event tracing v10 benchmark analysis",
         "",
         "Evidence completeness and integrity: **PASS**",
         "",
@@ -1000,6 +1073,8 @@ def render_markdown(report: dict) -> str:
         "Statistical labels use paired 95% Student t intervals. "
         "Equivalence is reported only when the full interval lies inside "
         "the predeclared margin.",
+        "For direct comparisons, positive W1 values mean v10 is slower; "
+        "positive pgbench values mean v10 has higher throughput.",
         "",
     ]
     for workload in WORKLOADS:
@@ -1007,6 +1082,23 @@ def render_markdown(report: dict) -> str:
         unit = "ns/iteration" if workload == "W1" else "%"
         lines.extend([
             f"## {workload}",
+            "",
+            "### Direct v10 minus v9 comparison",
+            "",
+            "| Mode | Paired difference | 95% interval | Classification |",
+            "|---|---:|---:|---|",
+        ])
+        for mode, _, _ in V10_V9_PAIRS:
+            contrast = item["v10_vs_v9"][mode]
+            lines.append(
+                f"| {mode} | {contrast['mean']:.6g} {unit} | "
+                f"[{contrast['lower_95']:.6g}, "
+                f"{contrast['upper_95']:.6g}] {unit} | "
+                f"{contrast['classification']} |"
+            )
+        lines.extend([
+            "",
+            "### Secondary comparison against vanilla",
             "",
             "| Configuration | Paired difference | 95% interval | Classification |",
             "|---|---:|---:|---|",

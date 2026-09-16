@@ -1,19 +1,19 @@
-# Bare-metal measurement runbook, wait-event tracing v9
+# Bare-metal measurement runbook, wait-event tracing v10
 
 No SSH access or remote automation is required. Copy the two delivered files
 to the executor account on one otherwise-idle Linux bare-metal
 host:
 
-- `wet-v9-baremetal-r1.tar.gz`
-- `wet-v9-baremetal-r1.tar.gz.sha256`
+- `wet-v10-baremetal-r1.tar.gz`
+- `wet-v10-baremetal-r1.tar.gz.sha256`
 
 Put them directly under the executor account's home directory. Then verify,
 extract, and start the complete run:
 
 ```sh
-sha256sum -c wet-v9-baremetal-r1.tar.gz.sha256
-tar -xzf wet-v9-baremetal-r1.tar.gz
-cd wet-v9-baremetal-r1
+sha256sum -c wet-v10-baremetal-r1.tar.gz.sha256
+tar -xzf wet-v10-baremetal-r1.tar.gz
+cd wet-v10-baremetal-r1
 ./run-benchmark.sh
 ```
 
@@ -27,21 +27,21 @@ The launcher is fail-closed and runs these phases in order:
 1. Verify every packaged script, workload, document, and source archive.
 2. Run a sub-minute synthetic verifier and shell/awk portability self-test.
 3. Wait for one idle minute, then check the Linux host and prerequisites.
-4. Build two independent baselines and the patched source with PostgreSQL's
-   bundled `configure` script and GNU Make.
-5. Run a short 24-cell smoke matrix covering all configurations/workloads.
+4. Build two independent baselines plus separate v9 and v10 sources with
+   PostgreSQL's bundled `configure` script and GNU Make.
+5. Run a short 40-cell smoke matrix covering all configurations/workloads.
 6. Verify the smoke evidence.
 7. Wait automatically for one idle minute, then repeat the host check.
-8. Run the fixed 288-cell measurement matrix.
+8. Run the fixed 480-cell measurement matrix.
 9. Package and checksum the raw evidence without final analysis.
 
-The package contains checksummed source snapshots for the two pinned commits,
-plus the standalone v9 optimization patch, so the executor does not depend on
-GitHub availability during the run.
+The package contains checksummed source snapshots for the three pinned
+commits, plus standalone v9 and v10 optimization patches, so the executor
+does not depend on GitHub availability during the run.
 
 The launcher unsets `SERVER_CPUS` and `PGBENCH_CPUS`. It never invents CPU
 ranges. It also unsets protocol override variables, so the full run is always
-12 repetitions, 288 cells, 30 measured seconds, and the declared margins.
+12 repetitions, 480 cells, 30 measured seconds, and the declared margins.
 
 ## Early failure and observability
 
@@ -108,9 +108,10 @@ other host settings. Any warning blocks the run before compilation.
 | Build | Commit |
 |---|---|
 | baseline A and B | `765efece39ba3fb04fdf20b1dadcd9ecea76fbc9` |
-| patched, optimized null-hook path | `40bffed8a92291c27a5d1956a5cd18dd3609f397` |
+| v9 reference, optimized null-hook path | `40bffed8a92291c27a5d1956a5cd18dd3609f397` |
+| v10 treatment, inline attachment guard | `c12783fbf86e8116526afe4566d58bf90c3478e0` |
 
-Compared with v8, the patched source snapshots the begin/end hook pointers
+Compared with v8, the v9 source snapshots the begin/end hook pointers
 once per timed report. The end path reads the volatile wait-event value only
 when an end hook will consume it. The recursion guard is restored with direct
 assignments, avoiding post-callback reload/arithmetic. There is deliberately
@@ -118,25 +119,31 @@ no `likely()` or `unlikely()` hint, so compiler layout is not explicitly
 biased against enabled collection. Hook ordering, chaining, recursion
 protection, stats, and trace behavior are unchanged.
 
-Six configurations (`master`, `master-aa`, `hook-null`, `module-off`, `stats`,
-`trace`) run W1, W3, W4, and W6c 12 times each. Each workload/repetition is a
-complete randomized six-configuration block. Every cell gets a fresh cluster.
-Dataset creation uses neutral baseline binaries before treatment startup.
+V10 adds an always-inline `pwet_attach_needed` check around the unchanged
+attachment implementation. When no attachment is pending, parse and executor
+hooks avoid an out-of-line call. The original safe-point, retry, stats, and
+trace transitions remain in the slow path.
+
+Ten configurations (`master`, `master-aa`, and v9/v10 versions of `hook-null`,
+`module-off`, `stats`, and `trace`) run W1, W3, W4, and W6c 12 times each.
+Each workload/repetition is a complete randomized ten-configuration block.
+Every cell gets a fresh cluster. Dataset creation uses neutral baseline
+binaries before treatment startup.
 
 The analysis uses repetition-paired 95% Student t intervals. The predeclared
-equivalence margins are ±2 ns/iteration for W1 and ±2% for pgbench. A final
-archive is produced only if all baseline A/A stability gates pass.
-Co-resident PostgreSQL processes are reported as a suitability caveat even
-when those gates pass.
+equivalence margins are ±2 ns/iteration for W1 and ±2% for pgbench. The
+primary contrasts pair v10 against v9 in each mode. Secondary contrasts pair
+all configurations against vanilla. Co-resident PostgreSQL processes are
+reported as a suitability caveat even when the baseline A/A gates pass.
 
 Expected duration:
 
 | Phase | Approximate time |
 |---|---:|
 | integrity, idle gate, self-test, host check | 2 to 21 minutes |
-| three controlled builds | 15 to 25 minutes |
-| 24-cell smoke matrix | 5 to 15 minutes |
-| 288-cell full matrix | 4 to 5.5 hours |
+| four controlled builds | 20 to 35 minutes |
+| 40-cell smoke matrix | 8 to 20 minutes |
+| 480-cell full matrix | 7 to 9 hours |
 | raw collection | a few minutes |
 
 ## Successful output

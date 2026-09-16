@@ -104,16 +104,18 @@ for name in w3-short-lwlock.sql recording-proof.sql w3-qualification.sql; do
     die "missing workload file: $name"
   cp "$SCRIPT_DIR/workloads/$name" "$STAGE/kit/workloads/"
 done
-for name in 0006-optimize-null-wait-event-hook-path.patch; do
+for name in \
+  0006-optimize-null-wait-event-hook-path.patch \
+  0007-inline-attachment-needed-guard.patch; do
   [[ -f "$SCRIPT_DIR/patches/$name" &&
      ! -L "$SCRIPT_DIR/patches/$name" ]] ||
     die "missing optimization patch: $name"
   cp "$SCRIPT_DIR/patches/$name" "$STAGE/kit/patches/"
 done
-if [[ -f "$SCRIPT_DIR/BAREMETAL-RUNBOOK-v9.md" ]]; then
-  cp "$SCRIPT_DIR/BAREMETAL-RUNBOOK-v9.md" "$STAGE/kit/"
-elif [[ -f "$SCRIPT_DIR/../BAREMETAL-RUNBOOK-v9.md" ]]; then
-  cp "$SCRIPT_DIR/../BAREMETAL-RUNBOOK-v9.md" "$STAGE/kit/"
+if [[ -f "$SCRIPT_DIR/BAREMETAL-RUNBOOK-v10.md" ]]; then
+  cp "$SCRIPT_DIR/BAREMETAL-RUNBOOK-v10.md" "$STAGE/kit/"
+elif [[ -f "$SCRIPT_DIR/../BAREMETAL-RUNBOOK-v10.md" ]]; then
+  cp "$SCRIPT_DIR/../BAREMETAL-RUNBOOK-v10.md" "$STAGE/kit/"
 fi
 
 python3 - "$STAGE" "$STAGE/MANIFEST.sha256" <<'PY'

@@ -1,0 +1,36 @@
+diff --git a/contrib/pg_wait_event_tracing/pg_wait_event_tracing.c b/contrib/pg_wait_event_tracing/pg_wait_event_tracing.c
+index d0d46c7..2aaf3d0 100644
+--- a/contrib/pg_wait_event_tracing/pg_wait_event_tracing.c
++++ b/contrib/pg_wait_event_tracing/pg_wait_event_tracing.c
+@@ -546,7 +546,8 @@ static shmem_startup_hook_type prev_shmem_startup_hook;
+ 
+ static void pwet_wait_begin(uint32 wait_event_info);
+ static void pwet_wait_end(uint32 wait_event_info);
+-static void pwet_maybe_attach(void);
++static pg_always_inline void pwet_maybe_attach(void);
++static void pwet_maybe_attach_slow(void);
+ static bool pwet_ensure_stats_dsa(void);
+ static void pwet_release_stats(void);
+ static void pwet_before_shmem_exit(int code, Datum arg);
+@@ -1521,8 +1522,20 @@ pwet_attach_stats(void)
+ 	return pwet_my_stats != NULL;
+ }
+ 
+-static void
++/*
++ * The steady-state path reaches this from every parsed and executed query.
++ * Keep its no-attachment-needed case to one backend-local flag test,
++ * avoiding an out-of-line call into the attachment machinery.
++ */
++static pg_always_inline void
+ pwet_maybe_attach(void)
++{
++	if (pwet_attach_needed)
++		pwet_maybe_attach_slow();
++}
++
++static void
++pwet_maybe_attach_slow(void)
+ {
+ 	bool		ready;
+ 

@@ -1,14 +1,35 @@
-"""Canonical constants for the v9 bare-metal benchmark protocol."""
+"""Canonical constants for the v10 bare-metal benchmark protocol."""
 
 from __future__ import annotations
 
 from w3_qualification import THRESHOLDS
 
 
-CONFIGS = ("master", "master-aa", "hook-null", "module-off", "stats", "trace")
+CONFIGS = (
+    "master",
+    "master-aa",
+    "v9-hook-null",
+    "v9-module-off",
+    "v9-stats",
+    "v9-trace",
+    "v10-hook-null",
+    "v10-module-off",
+    "v10-stats",
+    "v10-trace",
+)
 WORKLOADS = ("W1", "W3", "W4", "W6c")
 PGBENCH_WORKLOADS = ("W3", "W4", "W6c")
-ACTIVE_CONFIGS = ("stats", "trace")
+ACTIVE_CONFIGS = (
+    "v9-stats",
+    "v9-trace",
+    "v10-stats",
+    "v10-trace",
+)
+TRACE_CONFIGS = ("v9-trace", "v10-trace")
+V10_V9_PAIRS = tuple(
+    (mode, f"v10-{mode}", f"v9-{mode}")
+    for mode in ("hook-null", "module-off", "stats", "trace")
+)
 RESULT_FIELDS = (
     "run_index",
     "seed",
@@ -47,6 +68,7 @@ BOUND_KIT_FILES = (
     "benchmark_protocol.py",
     "w3_qualification.py",
     "patches/0006-optimize-null-wait-event-hook-path.patch",
+    "patches/0007-inline-attachment-needed-guard.patch",
     "workloads/w3-short-lwlock.sql",
     "workloads/recording-proof.sql",
     "workloads/w3-qualification.sql",
@@ -55,7 +77,7 @@ BOUND_KIT_FILES = (
 FULL_PROFILE = {
     "mode": "full",
     "runs_per_cell": 12,
-    "expected_cells": 288,
+    "expected_cells": 480,
     "duration_seconds": 30,
     "warmup_seconds": 10,
     "quiescence_seconds": 5,
@@ -66,7 +88,7 @@ FULL_PROFILE = {
 SMOKE_PROFILE = {
     "mode": "smoke",
     "runs_per_cell": 1,
-    "expected_cells": 24,
+    "expected_cells": 40,
     "duration_seconds": 6,
     "warmup_seconds": 3,
     "quiescence_seconds": 0,
@@ -76,5 +98,5 @@ SMOKE_PROFILE = {
 
 W3_PROTOCOL = dict(THRESHOLDS)
 W3_PROTOCOL["scope"] = (
-    "each stats and trace W3 client population during warmup"
+    "each v9/v10 stats and trace W3 client population during warmup"
 )

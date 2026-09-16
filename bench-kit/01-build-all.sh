@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build two independent baseline copies and the patched PostgreSQL tree.
+# Build two independent baselines plus the pinned v9 and v10 trees.
 #
 # Every build uses the same source, build, and install path.  The completed
 # installation is copied to an equal-length runtime prefix before the next
@@ -11,16 +11,18 @@ export LC_ALL=C
 
 REPO_URL="https://github.com/DmitryNFomin/postgres.git"
 COMMIT_BASELINE="765efece39ba3fb04fdf20b1dadcd9ecea76fbc9"
-COMMIT_PATCHED="40bffed8a92291c27a5d1956a5cd18dd3609f397"
-BRANCH_BASELINE="bench-v9-baseline"
-BRANCH_PATCHED="bench-v9-patched"
+COMMIT_V9="40bffed8a92291c27a5d1956a5cd18dd3609f397"
+COMMIT_V10="c12783fbf86e8116526afe4566d58bf90c3478e0"
+BRANCH_BASELINE="bench-v10-baseline"
+BRANCH_V9="bench-v10-v9-reference"
+BRANCH_V10="bench-v10-attachment-guard"
 
 die() { echo "01-build-all.sh: ERROR: $*" >&2; exit 1; }
 log() { printf '%s\n' "[$(date -u +%H:%M:%S)] $*"; }
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-for placeholder in "$REPO_URL" "$COMMIT_BASELINE" "$COMMIT_PATCHED"; do
+for placeholder in "$REPO_URL" "$COMMIT_BASELINE" "$COMMIT_V9" "$COMMIT_V10"; do
   [[ "$placeholder" != *"@@"* ]] ||
     die "an unfilled @@...@@ placeholder remains in the pinned source values"
 done
@@ -33,7 +35,8 @@ HOST_CHECK="$SCRIPT_DIR/host-check.json"
 SOURCE_DIR="$SCRIPT_DIR/source"
 SOURCE_MANIFEST="$SOURCE_DIR/source-manifest.json"
 SOURCE_ARCHIVE_BASELINE="$SOURCE_DIR/postgres-baseline.tar.gz"
-SOURCE_ARCHIVE_PATCHED="$SOURCE_DIR/postgres-patched.tar.gz"
+SOURCE_ARCHIVE_V9="$SOURCE_DIR/postgres-v9.tar.gz"
+SOURCE_ARCHIVE_V10="$SOURCE_DIR/postgres-v10.tar.gz"
 WORK="$SCRIPT_DIR/work"
 ACTIVE_SOURCE="$WORK/src/active"
 ACTIVE_BUILD="$WORK/build/active"
@@ -85,46 +88,67 @@ log "Using $JOBS parallel build job(s)"
 for source_file in \
   "$SOURCE_MANIFEST" \
   "$SOURCE_ARCHIVE_BASELINE" \
-  "$SOURCE_ARCHIVE_PATCHED"; do
+  "$SOURCE_ARCHIVE_V9" \
+  "$SOURCE_ARCHIVE_V10"; do
   [[ -f "$source_file" && ! -L "$source_file" ]] ||
     die "missing regular bundled-source file: $source_file"
 done
 log "Using bundled pinned source archives (no network required)"
 SOURCE_METADATA_TEXT=$(
   python3 - "$SOURCE_MANIFEST" "$SOURCE_ARCHIVE_BASELINE" \
-    "$SOURCE_ARCHIVE_PATCHED" "$REPO_URL" "$COMMIT_BASELINE" \
-    "$COMMIT_PATCHED" <<'PY'
+    "$SOURCE_ARCHIVE_V9" "$SOURCE_ARCHIVE_V10" "$REPO_URL" \
+    "$COMMIT_BASELINE" "$COMMIT_V9" "$COMMIT_V10" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-(manifest_path, baseline_path, patched_path, repo_url, baseline_commit,
- patched_commit) = sys.argv[1:]
+(manifest_path, baseline_path, v9_path, v10_path, repo_url, baseline_commit,
+ v9_commit, v10_commit) = sys.argv[1:]
 manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-if manifest.get("schema_version") != 2:
+if manifest.get("schema_version") != 3:
     raise SystemExit("unsupported bundled-source manifest")
-if manifest.get("benchmark_series") != "wet-v9":
+if manifest.get("benchmark_series") != "wet-v10":
     raise SystemExit("unexpected bundled-source benchmark series")
 if manifest.get("repo_url") != repo_url:
     raise SystemExit("bundled-source repository URL mismatch")
 if manifest.get("commits") != {
     "baseline": baseline_commit,
-    "patched": patched_commit,
+    "v9": v9_commit,
+    "v10": v10_commit,
 }:
     raise SystemExit("bundled-source commit mismatch")
-if manifest.get("treatment") != {
+if manifest.get("comparison") != {
+    "name": "inline-attachment-needed-guard",
+    "reference_commit": v9_commit,
+    "treatment_commit": v10_commit,
+    "treatment_parent_commit": v9_commit,
+}:
+    raise SystemExit("bundled-source comparison metadata mismatch")
+if manifest.get("reference") != {
     "name": "null-hook-fast-path",
+    "commit": v9_commit,
     "parent_commit": "d7b4584a901241258604eef1f03dfd6b3f1fa926",
     "branch_prediction_hint": "none",
 }:
-    raise SystemExit("bundled-source treatment metadata mismatch")
+    raise SystemExit("bundled-source reference metadata mismatch")
+archives = manifest.get("archives")
+if not isinstance(archives, dict) or set(archives) != {
+    "baseline", "v9", "v10"
+}:
+    raise SystemExit("bundled-source archive set mismatch")
 for name, path_text in (
     ("baseline", baseline_path),
-    ("patched", patched_path),
+    ("v9", v9_path),
+    ("v10", v10_path),
 ):
-    digest = hashlib.sha256(Path(path_text).read_bytes()).hexdigest()
-    if digest != manifest["archives"][name]["sha256"]:
+    digest = hashlib.sha256()
+    with Path(path_text).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if archives[name].get("filename") != Path(path_text).name:
+        raise SystemExit(f"bundled {name} source filename mismatch")
+    if digest.hexdigest() != archives[name].get("sha256"):
         raise SystemExit(f"bundled {name} source hash mismatch")
 print(manifest["common_base"])
 print(manifest["source_date_epoch"])
@@ -137,15 +161,17 @@ mapfile -t SOURCE_METADATA <<<"$SOURCE_METADATA_TEXT"
 COMMON_BASE=${SOURCE_METADATA[0]}
 REPRO_EPOCH=${SOURCE_METADATA[1]}
 FIXTURE_TREE_BASELINE=${SOURCE_METADATA[2]}
-FIXTURE_TREE_PATCHED=${SOURCE_METADATA[2]}
+FIXTURE_TREE_V9=${SOURCE_METADATA[2]}
+FIXTURE_TREE_V10=${SOURCE_METADATA[2]}
 cp "$SOURCE_MANIFEST" "$WORK/source-manifest.json"
 
 [[ "$COMMON_BASE" == 0c5d6269614e107d1d2d669f82f63f7e232b30c9 ]] ||
-  die "unexpected baseline/patched common base: $COMMON_BASE"
+  die "unexpected baseline/v9/v10 common base: $COMMON_BASE"
 [[ "$REPRO_EPOCH" == 1789301160 ]] ||
   die "unexpected reproducibility epoch: $REPRO_EPOCH"
-[[ "$FIXTURE_TREE_BASELINE" == "$FIXTURE_TREE_PATCHED" ]] ||
-  die "benchmark fixture trees differ: baseline=$FIXTURE_TREE_BASELINE patched=$FIXTURE_TREE_PATCHED"
+[[ "$FIXTURE_TREE_BASELINE" == "$FIXTURE_TREE_V9" &&
+   "$FIXTURE_TREE_BASELINE" == "$FIXTURE_TREE_V10" ]] ||
+  die "benchmark fixture trees differ across baseline, v9, and v10"
 
 : >"$RECORDS"
 
@@ -161,7 +187,10 @@ build_one() {
 
   rm -rf -- "$ACTIVE_SOURCE" "$ACTIVE_BUILD" "$ACTIVE_PREFIX" "$runtime_prefix"
   local archive=$SOURCE_ARCHIVE_BASELINE
-  [[ "$name" != patched ]] || archive=$SOURCE_ARCHIVE_PATCHED
+  case "$name" in
+    v9) archive=$SOURCE_ARCHIVE_V9 ;;
+    v10) archive=$SOURCE_ARCHIVE_V10 ;;
+  esac
   mkdir -p "$ACTIVE_SOURCE"
   tar -xzf "$archive" -C "$ACTIVE_SOURCE" >>"$log" 2>&1 ||
     die "extracting bundled source failed for $name; see $log"
@@ -217,9 +246,9 @@ PY
     make -C "$ACTIVE_BUILD" install >>"$log" 2>&1 ||
     die "install failed for $name; see $log"
 
-  if [[ "$name" == patched ]]; then
+  if [[ "$name" == v9 || "$name" == v10 ]]; then
     local tracing_extension="$ACTIVE_SOURCE/contrib/pg_wait_event_tracing"
-    log "  installing patched tracing extension"
+    log "  installing $name tracing extension"
     SOURCE_DATE_EPOCH="$REPRO_EPOCH" \
       CCACHE_DISABLE=1 SCCACHE_RECACHE=1 \
       make -C "$tracing_extension" USE_PGXS=1 \
@@ -251,7 +280,7 @@ PY
 
   # Static archives are build-only artifacts and can carry archive-member
   # timestamps on some toolchains.  No benchmark process or later build uses
-  # them, so keep the three runtime installations limited to executable
+  # them, so keep the four runtime installations limited to executable
   # artifacts whose complete trees must reproduce byte for byte.
   find "$ACTIVE_PREFIX" -type f -name '*.a' -delete
 
@@ -303,9 +332,9 @@ PY
   fi
 
   case "$name" in
-    patched)
+    v9|v10)
       [[ "$module_sha" != none ]] ||
-        die "patched commit does not install pg_wait_event_tracing"
+        die "$name commit does not install pg_wait_event_tracing"
       ;;
     baseline-a|baseline-b)
       [[ "$module_sha" == none ]] ||
@@ -398,28 +427,30 @@ PY
 }
 
 # Equal runtime prefix lengths make their path strings equally capable of
-# affecting runtime layout.  Compilation itself always uses ACTIVE_PREFIX.
-for leaf in base-a base-b patchd; do
+# affecting runtime layout. Compilation itself always uses ACTIVE_PREFIX.
+for leaf in base-a base-b v9-ref v10opt; do
   [[ ${#leaf} -eq 6 ]] || die "runtime prefix leaf '$leaf' is not six bytes"
 done
 
 build_one baseline-a "$BRANCH_BASELINE" "$COMMIT_BASELINE" base-a
 build_one baseline-b "$BRANCH_BASELINE" "$COMMIT_BASELINE" base-b
 verify_baseline_reproducibility ||
-  die "independent baseline builds differ; patched build was not started"
+  die "independent baseline builds differ; v9/v10 builds were not started"
 log "Independent baseline reproducibility: PASS"
-build_one patched "$BRANCH_PATCHED" "$COMMIT_PATCHED" patchd
+build_one v9 "$BRANCH_V9" "$COMMIT_V9" v9-ref
+build_one v10 "$BRANCH_V10" "$COMMIT_V10" v10opt
 
 SOURCE_MANIFEST_SHA=$(hash_file "$SOURCE_MANIFEST")
 SOURCE_ARCHIVE_BASELINE_SHA=$(hash_file "$SOURCE_ARCHIVE_BASELINE")
-SOURCE_ARCHIVE_PATCHED_SHA=$(hash_file "$SOURCE_ARCHIVE_PATCHED")
+SOURCE_ARCHIVE_V9_SHA=$(hash_file "$SOURCE_ARCHIVE_V9")
+SOURCE_ARCHIVE_V10_SHA=$(hash_file "$SOURCE_ARCHIVE_V10")
 
 python3 - "$MANIFEST" "$RECORDS" "$REPO_URL" "$COMMON_BASE" \
   "$REPRO_EPOCH" "$(make --version | head -n 1)" "$JOBS" \
   "${CC:-}" "${CFLAGS:-}" "${CPPFLAGS:-}" "${LDFLAGS:-}" \
   "${CONFIGURE_FLAGS[*]}" "$(hostname)" \
   "$SOURCE_MANIFEST_SHA" "$SOURCE_ARCHIVE_BASELINE_SHA" \
-  "$SOURCE_ARCHIVE_PATCHED_SHA" <<'PY'
+  "$SOURCE_ARCHIVE_V9_SHA" "$SOURCE_ARCHIVE_V10_SHA" <<'PY'
 import datetime
 import json
 import sys
@@ -427,12 +458,12 @@ import sys
 (out, records_path, repo_url, common_base, source_date_epoch, make_version,
  jobs, cc_env, cflags, cppflags, ldflags, configure_flags, build_host,
  source_manifest_sha256, source_baseline_sha256,
- source_patched_sha256) = sys.argv[1:]
+ source_v9_sha256, source_v10_sha256) = sys.argv[1:]
 with open(records_path, encoding="utf-8") as f:
     builds = [json.loads(line) for line in f if line.strip()]
 
 by_name = {item["name"]: item for item in builds}
-if set(by_name) != {"baseline-a", "baseline-b", "patched"}:
+if set(by_name) != {"baseline-a", "baseline-b", "v9", "v10"}:
     raise SystemExit(f"unexpected build records: {sorted(by_name)}")
 
 for binary in ("postgres", "pgbench", "psql", "initdb", "pg_ctl",
@@ -453,9 +484,9 @@ if len(fixture_hashes) != 1:
         + ", ".join(sorted(fixture_hashes)))
 
 manifest = {
-    "schema_version": 5,
-    "benchmark_series": "wet-v9",
-    "treatment": "null-hook-fast-path",
+    "schema_version": 6,
+    "benchmark_series": "wet-v10",
+    "treatment": "inline-attachment-needed-guard",
     "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "build_host": build_host,
     "repo_url": repo_url,
@@ -476,7 +507,8 @@ manifest = {
     "bundled_source": {
         "manifest_sha256": source_manifest_sha256,
         "baseline_archive_sha256": source_baseline_sha256,
-        "patched_archive_sha256": source_patched_sha256,
+        "v9_archive_sha256": source_v9_sha256,
+        "v10_archive_sha256": source_v10_sha256,
     },
     "path_control": {
         "compile_source": builds[0]["compile_prefix"].replace(
@@ -498,7 +530,8 @@ log "Build manifest: $MANIFEST"
 log "Runtime prefixes:"
 log "  baseline A: $INSTALL_ROOT/base-a"
 log "  baseline B: $INSTALL_ROOT/base-b"
-log "  patched:    $INSTALL_ROOT/patchd"
+log "  v9 reference: $INSTALL_ROOT/v9-ref"
+log "  v10 guard:   $INSTALL_ROOT/v10opt"
 log ""
-log "All three controlled-path builds succeeded."
+log "All four controlled-path builds succeeded."
 log "Next step: ./02-run-matrix.sh"
