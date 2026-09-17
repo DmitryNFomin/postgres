@@ -1,0 +1,41 @@
+{
+  "counts": {
+    "aggregate_files_renamed": 256,
+    "bytecode_files_removed": 3,
+    "process_ids_pseudonymized": 1248,
+    "process_list_lines_removed": 8,
+    "text_files_changed": 75
+  },
+  "manifest_policy": {
+    "EVIDENCE-MANIFEST.sha256": "regenerated for the sanitized archive",
+    "provenance/CROSSOVER-MANIFEST.sha256": "preserved as the original r5 acquisition manifest",
+    "provenance/ORIGINAL-EVIDENCE-MANIFEST.sha256": "preserved from the source archive",
+    "provenance/ORIGINAL-WORKER-PROTOCOL.json": "preserved from the source archive",
+    "tools/CROSSOVER-MANIFEST.sha256": "regenerated because the tools README path was sanitized"
+  },
+  "measurement_integrity": {
+    "aggregate_logs": "byte-identical",
+    "analysis_outputs": "byte-identical",
+    "event_boundaries": "byte-identical",
+    "mode_proofs_csv": "backend-list digests updated",
+    "pgbench_logs": "byte-identical",
+    "protocol": "experiment constants unchanged; sanitized provenance manifest hash updated",
+    "results_csv": "numeric fields unchanged; process IDs and backend-list digests updated",
+    "schedule": "byte-identical"
+  },
+  "schema_version": 1,
+  "source_archive_sha256": "724cced5bf5bc3c818d67334d6a70ea8473fe69b548cb032ef01bb1471cf2012",
+  "source_members": 446,
+  "source_regular_files": 439,
+  "transformations": {
+    "bytecode": "generated __pycache__ files removed",
+    "executor": "replaced with benchmark-user",
+    "home_paths": "replaced with /home/benchmark-user",
+    "hostname": "replaced with benchmark-host",
+    "kernel": "replaced with redacted",
+    "process_ids": "consistently pseudonymized in filenames, logs, CSVs, and backend identity proofs",
+    "process_list": "removed from host-check.txt",
+    "staging_paths": "replaced with /var/tmp/w6c-persistent-crossover.SANITIZED",
+    "tar_ownership": "normalized to uid/gid 0 with empty names"
+  }
+}

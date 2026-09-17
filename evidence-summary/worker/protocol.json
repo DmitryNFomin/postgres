@@ -1,0 +1,58 @@
+{
+  "analysis_unit": "one persistent-backend server session",
+  "benchmark": "wet-v10-w6c-persistent-crossover",
+  "blocks_per_session": 8,
+  "bound_file_sha256": {
+    "analyze.py": "79973faf91008b38a8bfc886a07b6e2be6134a9e5aca4daf7ecaa67d14ea7eb2",
+    "extract_blocks.py": "647070f228d434b2acb0a42a5c7caa0be22d3ab7c0d93938881b9409c2f239f9",
+    "generate_schedule.py": "732f3d95d14584f1e02e177d1756f11b326e6c9d6802b0e129d7c7b7713e0ccb",
+    "host_state.py": "e9fb8725c08f65164cfa26b7090adf4fbfb4be7b5aa066c7855e2a1a542b11e1",
+    "protocol.py": "f36bb3a552efa70d99666eeca99a785e61271fcd8e768b68e1a8dfa34419cab1",
+    "run-worker.sh": "d5308217136bd511eb40bffa7c1d2d018a2e3dfb0df27eb5f42f0dfdc9f8b289",
+    "verify_affinity.py": "a610880a9639858e9a8e648d74fe95f0d50187cac5a9440e8da52f78e625e7cf",
+    "verify_installs.py": "a779ef5540b02895f2195d1d11204ba4c3f01d8e85a4d30df625089c50910df6",
+    "verify_runtime.py": "c78bae1aad5728f856449f74154ea29736490487b9540e84b8af32f9f0f4f128"
+  },
+  "clients": 32,
+  "equivalence_margin_percent": 2.0,
+  "initial_warmup_seconds": 10,
+  "measurement_seconds": 30,
+  "one_second_samples_are_independent": false,
+  "outlier_policy": "retain every successful block; no post-hoc exclusions",
+  "pairing": "adjacent v9/v10 sessions clone one neutral dataset and share the sequence and pgbench seed",
+  "pairs": 16,
+  "pgbench_cpus": "0-14:2",
+  "placebo_margin_percent": 1.0,
+  "r3_build_manifest_sha256": "af082a5cdae68626cea08c62f24aeec88e4f380a2f311ec7638885aba379c7fa",
+  "r3_package_manifest_sha256": "1deb4eb2bf7698ebae432d3c4e684fb4b8c4ddfac1a5976b73f280668dc4c5f1",
+  "scale": 100,
+  "schedule_seed": 5424488025738561399,
+  "schema_version": 1,
+  "sequences": {
+    "A": [
+      "off",
+      "stats",
+      "stats",
+      "off",
+      "off",
+      "trace",
+      "trace",
+      "off"
+    ],
+    "B": [
+      "off",
+      "trace",
+      "trace",
+      "off",
+      "off",
+      "stats",
+      "stats",
+      "off"
+    ]
+  },
+  "server_cpus": "1-63:2",
+  "sessions": 32,
+  "settle_seconds": 3,
+  "threads": 8,
+  "v10_v9_unit": "one adjacent matched session pair"
+}
