@@ -19,6 +19,10 @@ R3 is built for the target host's verified two-socket CPU map. It fixes
 PostgreSQL to socket/NUMA node 1 and pgbench to eight CPUs on socket/NUMA
 node 0, while preserving all r2 A/A rejection thresholds.
 
+The follow-up persistent-backend crossover, which blocks W6c throughput
+plateaus within long-lived sessions, is under
+`benchmarks/w6c-persistent-crossover`.
+
 The `briefs`, `reports`, `patches-v8`, `README-v8.md`, and
 `IMPLEMENTATION-PLAN-v8.md` files are retained as historical v8 design
 material. The runnable v10 kit is under `bench-kit`.
