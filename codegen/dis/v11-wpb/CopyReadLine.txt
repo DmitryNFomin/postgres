@@ -1,0 +1,461 @@
+
+/root/codegen/bin/v11-wpb.postgres:     file format elf64-x86-64
+
+
+Disassembly of section .init:
+
+Disassembly of section .plt:
+
+Disassembly of section .plt.got:
+
+Disassembly of section .plt.sec:
+
+Disassembly of section .text:
+
+00000000002c0730 <CopyReadLine>:
+  2c0730:	push   r15
+  2c0732:	push   r14
+  2c0734:	push   r13
+  2c0736:	push   r12
+  2c0738:	push   rbp
+  2c0739:	mov    ebp,esi
+  2c073b:	push   rbx
+  2c073c:	mov    rbx,rdi
+  2c073f:	sub    rsp,0x28
+  2c0743:	mov    BYTE PTR [rsp+0xf],sil
+  2c0748:	mov    rax,QWORD PTR fs:0x28
+  2c0751:	mov    QWORD PTR [rsp+0x18],rax
+  2c0756:	xor    eax,eax
+  2c0758:	lea    rax,[rdi+0x1f8]
+  2c075f:	mov    rdi,rax
+  2c0762:	mov    QWORD PTR [rsp],rax
+  2c0766:	call   6c8c70 <resetStringInfo>
+  2c076b:	mov    BYTE PTR [rbx+0x210],0x0
+  2c0772:	test   bpl,bpl
+  2c0775:	je     2c08b8 <CopyReadLine+0x188>
+  2c077b:	mov    rax,QWORD PTR [rbx+0x98]
+  2c0782:	movzx  esi,BYTE PTR [rbx+0x198]
+  2c0789:	mov    ebp,DWORD PTR [rbx+0x220]
+  2c078f:	movzx  ecx,BYTE PTR [rax]
+  2c0792:	mov    rax,QWORD PTR [rbx+0xa0]
+  2c0799:	movzx  r13d,BYTE PTR [rax]
+  2c079d:	xor    eax,eax
+  2c079f:	mov    BYTE PTR [rsp+0x8],cl
+  2c07a3:	cmp    cl,r13b
+  2c07a6:	cmove  r13d,eax
+  2c07aa:	test   sil,sil
+  2c07ad:	jne    2c0bc0 <CopyReadLine+0x490>
+  2c07b3:	xor    r14d,r14d
+  2c07b6:	mov    r12,QWORD PTR [rbx+0x218]
+  2c07bd:	xor    r15d,r15d
+  2c07c0:	xor    edi,edi
+  2c07c2:	mov    eax,r14d
+  2c07c5:	mov    ecx,DWORD PTR [rbx+0x224]
+  2c07cb:	mov    r14d,r13d
+  2c07ce:	mov    r13d,eax
+  2c07d1:	cmp    ebp,ecx
+  2c07d3:	jge    2c0840 <CopyReadLine+0x110>
+  2c07d5:	test   dil,dil
+  2c07d8:	jne    2c0840 <CopyReadLine+0x110>
+  2c07da:	movsxd rax,ebp
+  2c07dd:	lea    r10d,[rbp+0x1]
+  2c07e1:	movsx  eax,BYTE PTR [r12+rax*1]
+  2c07e6:	cmp    al,0xd
+  2c07e8:	je     2c09f0 <CopyReadLine+0x2c0>
+  2c07ee:	cmp    al,r14b
+  2c07f1:	mov    r9d,r13d
+  2c07f4:	sete   dl
+  2c07f7:	cmp    BYTE PTR [rsp+0x8],al
+  2c07fb:	sete   dil
+  2c07ff:	xor    r9d,0x1
+  2c0803:	and    dl,r15b
+  2c0806:	je     2c09a8 <CopyReadLine+0x278>
+  2c080c:	test   r13b,r13b
+  2c080f:	je     2c09cc <CopyReadLine+0x29c>
+  2c0815:	xor    edx,edx
+  2c0817:	xor    r15d,r15d
+  2c081a:	test   dil,dil
+  2c081d:	je     2c09cc <CopyReadLine+0x29c>
+  2c0823:	cmp    al,0xd
+  2c0825:	je     2c0a40 <CopyReadLine+0x310>
+  2c082b:	cmp    al,0xa
+  2c082d:	je     2c0bf0 <CopyReadLine+0x4c0>
+  2c0833:	mov    ebp,r10d
+  2c0836:	mov    r13d,edx
+  2c0839:	xor    edi,edi
+  2c083b:	cmp    ebp,ecx
+  2c083d:	jl     2c07d5 <CopyReadLine+0xa5>
+  2c083f:	nop
+  2c0840:	movsxd rsi,DWORD PTR [rbx+0x220]
+  2c0847:	cmp    ebp,esi
+  2c0849:	jg     2c0a10 <CopyReadLine+0x2e0>
+  2c084f:	xor    esi,esi
+  2c0851:	mov    rdi,rbx
+  2c0854:	call   2c02c0 <CopyLoadInputBuf>
+  2c0859:	mov    ecx,DWORD PTR [rbx+0x224]
+  2c085f:	mov    ebp,DWORD PTR [rbx+0x220]
+  2c0865:	movzx  esi,BYTE PTR [rbx+0x228]
+  2c086c:	mov    eax,ecx
+  2c086e:	sub    eax,ebp
+  2c0870:	test   eax,eax
+  2c0872:	jg     2c07da <CopyReadLine+0xaa>
+  2c0878:	cmp    DWORD PTR [rbx+0x8],0x1
+  2c087c:	je     2c0970 <CopyReadLine+0x240>
+  2c0882:	mov    eax,0x1
+  2c0887:	mov    BYTE PTR [rbx+0x210],0x1
+  2c088e:	mov    rdx,QWORD PTR [rsp+0x18]
+  2c0893:	sub    rdx,QWORD PTR fs:0x28
+  2c089c:	jne    2c0e51 <CopyReadLine+0x721>
+  2c08a2:	add    rsp,0x28
+  2c08a6:	pop    rbx
+  2c08a7:	pop    rbp
+  2c08a8:	pop    r12
+  2c08aa:	pop    r13
+  2c08ac:	pop    r14
+  2c08ae:	pop    r15
+  2c08b0:	ret
+  2c08b1:	nop    DWORD PTR [rax+0x0]
+  2c08b8:	movzx  ecx,BYTE PTR [rbx+0x198]
+  2c08bf:	mov    ebp,DWORD PTR [rbx+0x220]
+  2c08c5:	test   cl,cl
+  2c08c7:	jne    2c0b60 <CopyReadLine+0x430>
+  2c08cd:	mov    edx,DWORD PTR [rbx+0x224]
+  2c08d3:	mov    r13,QWORD PTR [rbx+0x218]
+  2c08da:	cmp    ebp,edx
+  2c08dc:	jge    2c092f <CopyReadLine+0x1ff>
+  2c08de:	movsxd rax,ebp
+  2c08e1:	lea    r12d,[rbp+0x1]
+  2c08e5:	movzx  eax,BYTE PTR [r13+rax*1+0x0]
+  2c08eb:	cmp    al,0xd
+  2c08ed:	je     2c0ab8 <CopyReadLine+0x388>
+  2c08f3:	cmp    al,0xa
+  2c08f5:	je     2c0b30 <CopyReadLine+0x400>
+  2c08fb:	cmp    al,0x5c
+  2c08fd:	jne    2c0928 <CopyReadLine+0x1f8>
+  2c08ff:	cmp    r12d,edx
+  2c0902:	mov    esi,ecx
+  2c0904:	setge  al
+  2c0907:	xor    sil,0x1
+  2c090b:	je     2c0d08 <CopyReadLine+0x5d8>
+  2c0911:	test   al,al
+  2c0913:	jne    2c092f <CopyReadLine+0x1ff>
+  2c0915:	movsxd rax,r12d
+  2c0918:	lea    r12d,[rbp+0x2]
+  2c091c:	cmp    BYTE PTR [r13+rax*1+0x0],0x2e
+  2c0922:	je     2c0d48 <CopyReadLine+0x618>
+  2c0928:	mov    ebp,r12d
+  2c092b:	cmp    ebp,edx
+  2c092d:	jl     2c08de <CopyReadLine+0x1ae>
+  2c092f:	mov    eax,DWORD PTR [rbx+0x220]
+  2c0935:	cmp    eax,ebp
+  2c0937:	jl     2c0c80 <CopyReadLine+0x550>
+  2c093d:	xor    esi,esi
+  2c093f:	mov    rdi,rbx
+  2c0942:	call   2c02c0 <CopyLoadInputBuf>
+  2c0947:	mov    edx,DWORD PTR [rbx+0x224]
+  2c094d:	mov    ebp,DWORD PTR [rbx+0x220]
+  2c0953:	movzx  ecx,BYTE PTR [rbx+0x228]
+  2c095a:	mov    eax,edx
+  2c095c:	sub    eax,ebp
+  2c095e:	test   eax,eax
+  2c0960:	jg     2c08de <CopyReadLine+0x1ae>
+  2c0966:	jmp    2c0878 <CopyReadLine+0x148>
+  2c096b:	nop    DWORD PTR [rax+rax*1+0x0]
+  2c0970:	mov    rsi,QWORD PTR [rbx+0x218]
+  2c0977:	mov    edx,0x10000
+  2c097c:	mov    rdi,rbx
+  2c097f:	call   2bfed0 <CopyGetData.constprop.0>
+  2c0984:	test   eax,eax
+  2c0986:	jg     2c0970 <CopyReadLine+0x240>
+  2c0988:	mov    QWORD PTR [rbx+0x220],0x0
+  2c0993:	mov    QWORD PTR [rbx+0x238],0x0
+  2c099e:	jmp    2c0882 <CopyReadLine+0x152>
+  2c09a3:	nop    DWORD PTR [rax+rax*1+0x0]
+  2c09a8:	test   dil,dil
+  2c09ab:	je     2c09b9 <CopyReadLine+0x289>
+  2c09ad:	test   r9b,r9b
+  2c09b0:	je     2c09b9 <CopyReadLine+0x289>
+  2c09b2:	xor    r15d,0x1
+  2c09b6:	xor    r13d,r13d
+  2c09b9:	cmp    al,r14b
+  2c09bc:	cmove  edx,r13d
+  2c09c0:	test   r15b,r15b
+  2c09c3:	je     2c0823 <CopyReadLine+0xf3>
+  2c09c9:	mov    r9d,edx
+  2c09cc:	cmp    DWORD PTR [rbx+0x20],0x1
+  2c09d0:	je     2c0a30 <CopyReadLine+0x300>
+  2c09d2:	cmp    eax,0xd
+  2c09d5:	je     2c0a35 <CopyReadLine+0x305>
+  2c09d7:	movzx  r15d,BYTE PTR [rsp+0xf]
+  2c09dd:	mov    r13d,r9d
+  2c09e0:	mov    ebp,r10d
+  2c09e3:	xor    edi,edi
+  2c09e5:	jmp    2c07d1 <CopyReadLine+0xa1>
+  2c09ea:	nop    WORD PTR [rax+rax*1+0x0]
+  2c09f0:	cmp    r10d,ecx
+  2c09f3:	mov    edx,esi
+  2c09f5:	setge  dil
+  2c09f9:	xor    edx,0x1
+  2c09fc:	and    dil,dl
+  2c09ff:	je     2c07ee <CopyReadLine+0xbe>
+  2c0a05:	xor    esi,esi
+  2c0a07:	jmp    2c07d1 <CopyReadLine+0xa1>
+  2c0a0c:	nop    DWORD PTR [rax+0x0]
+  2c0a10:	mov    rdi,QWORD PTR [rsp]
+  2c0a14:	mov    edx,ebp
+  2c0a16:	sub    edx,esi
+  2c0a18:	add    rsi,QWORD PTR [rbx+0x218]
+  2c0a1f:	call   6c8f50 <appendBinaryStringInfo>
+  2c0a24:	mov    DWORD PTR [rbx+0x220],ebp
+  2c0a2a:	jmp    2c084f <CopyReadLine+0x11f>
+  2c0a2f:	nop
+  2c0a30:	cmp    eax,0xa
+  2c0a33:	jne    2c09d7 <CopyReadLine+0x2a7>
+  2c0a35:	add    QWORD PTR [rbx+0x130],0x1
+  2c0a3d:	jmp    2c09d7 <CopyReadLine+0x2a7>
+  2c0a3f:	nop
+  2c0a40:	mov    eax,DWORD PTR [rbx+0x20]
+  2c0a43:	test   eax,eax
+  2c0a45:	je     2c0a50 <CopyReadLine+0x320>
+  2c0a47:	cmp    eax,0x3
+  2c0a4a:	jne    2c0e38 <CopyReadLine+0x708>
+  2c0a50:	cmp    r10d,ecx
+  2c0a53:	setge  dil
+  2c0a57:	xor    esi,0x1
+  2c0a5a:	and    dil,sil
+  2c0a5d:	jne    2c0c70 <CopyReadLine+0x540>
+  2c0a63:	movsxd rdx,r10d
+  2c0a66:	cmp    BYTE PTR [r12+rdx*1],0xa
+  2c0a6b:	je     2c0ca8 <CopyReadLine+0x578>
+  2c0a71:	cmp    eax,0x3
+  2c0a74:	je     115240 <CopyReadLine.cold+0xb6>
+  2c0a7a:	mov    edx,DWORD PTR [rbx+0x220]
+  2c0a80:	mov    DWORD PTR [rbx+0x20],0x2
+  2c0a87:	cmp    r10d,edx
+  2c0a8a:	jg     2c0c18 <CopyReadLine+0x4e8>
+  2c0a90:	mov    eax,DWORD PTR [rbx+0x200]
+  2c0a96:	mov    rdx,QWORD PTR [rbx+0x1f8]
+  2c0a9d:	sub    eax,0x1
+  2c0aa0:	mov    DWORD PTR [rbx+0x200],eax
+  2c0aa6:	cdqe
+  2c0aa8:	mov    BYTE PTR [rdx+rax*1],0x0
+  2c0aac:	xor    eax,eax
+  2c0aae:	jmp    2c0887 <CopyReadLine+0x157>
+  2c0ab3:	nop    DWORD PTR [rax+rax*1+0x0]
+  2c0ab8:	mov    eax,DWORD PTR [rbx+0x20]
+  2c0abb:	test   eax,eax
+  2c0abd:	je     2c0ac8 <CopyReadLine+0x398>
+  2c0abf:	cmp    eax,0x3
+  2c0ac2:	jne    2c0dc1 <CopyReadLine+0x691>
+  2c0ac8:	cmp    r12d,edx
+  2c0acb:	jl     2c0ad6 <CopyReadLine+0x3a6>
+  2c0acd:	cmp    cl,0x1
+  2c0ad0:	jne    2c092f <CopyReadLine+0x1ff>
+  2c0ad6:	movsxd rdx,r12d
+  2c0ad9:	cmp    BYTE PTR [r13+rdx*1+0x0],0xa
+  2c0adf:	je     2c0ce8 <CopyReadLine+0x5b8>
+  2c0ae5:	cmp    eax,0x3
+  2c0ae8:	je     1152d4 <CopyReadLine.cold+0x14a>
+  2c0aee:	movsxd rdx,DWORD PTR [rbx+0x220]
+  2c0af5:	mov    DWORD PTR [rbx+0x20],0x2
+  2c0afc:	cmp    r12d,edx
+  2c0aff:	jle    2c0a90 <CopyReadLine+0x360>
+  2c0b01:	mov    rsi,QWORD PTR [rbx+0x218]
+  2c0b08:	mov    eax,r12d
+  2c0b0b:	mov    rdi,QWORD PTR [rsp]
+  2c0b0f:	sub    eax,edx
+  2c0b11:	add    rsi,rdx
+  2c0b14:	mov    edx,eax
+  2c0b16:	call   6c8f50 <appendBinaryStringInfo>
+  2c0b1b:	mov    DWORD PTR [rbx+0x220],r12d
+  2c0b22:	mov    eax,DWORD PTR [rbx+0x20]
+  2c0b25:	jmp    2c0c46 <CopyReadLine+0x516>
+  2c0b2a:	nop    WORD PTR [rax+rax*1+0x0]
+  2c0b30:	mov    eax,DWORD PTR [rbx+0x20]
+  2c0b33:	sub    eax,0x2
+  2c0b36:	cmp    eax,0x1
+  2c0b39:	jbe    11528a <CopyReadLine.cold+0x100>
+  2c0b3f:	movsxd rdx,DWORD PTR [rbx+0x220]
+  2c0b46:	mov    DWORD PTR [rbx+0x20],0x1
+  2c0b4d:	cmp    edx,r12d
+  2c0b50:	jge    2c0a90 <CopyReadLine+0x360>
+  2c0b56:	jmp    2c0b01 <CopyReadLine+0x3d1>
+  2c0b58:	nop    DWORD PTR [rax+rax*1+0x0]
+  2c0b60:	lea    rcx,[rsp+0x14]
+  2c0b65:	lea    rdx,[rsp+0x13]
+  2c0b6a:	xor    esi,esi
+  2c0b6c:	mov    rdi,rbx
+  2c0b6f:	mov    BYTE PTR [rsp+0x13],0x0
+  2c0b74:	call   2c0560 <CopyReadLineTextSIMDHelper.constprop.0>
+  2c0b79:	movzx  ecx,BYTE PTR [rsp+0x13]
+  2c0b7e:	mov    ebp,DWORD PTR [rsp+0x14]
+  2c0b82:	test   al,al
+  2c0b84:	je     2c08cd <CopyReadLine+0x19d>
+  2c0b8a:	mov    eax,DWORD PTR [rbx+0x220]
+  2c0b90:	cmp    ebp,eax
+  2c0b92:	jle    2c0878 <CopyReadLine+0x148>
+  2c0b98:	mov    rdi,QWORD PTR [rsp]
+  2c0b9c:	mov    edx,ebp
+  2c0b9e:	movsxd rsi,eax
+  2c0ba1:	add    rsi,QWORD PTR [rbx+0x218]
+  2c0ba8:	sub    edx,eax
+  2c0baa:	call   6c8f50 <appendBinaryStringInfo>
+  2c0baf:	mov    DWORD PTR [rbx+0x220],ebp
+  2c0bb5:	jmp    2c0878 <CopyReadLine+0x148>
+  2c0bba:	nop    WORD PTR [rax+rax*1+0x0]
+  2c0bc0:	mov    esi,0x1
+  2c0bc5:	lea    rcx,[rsp+0x14]
+  2c0bca:	lea    rdx,[rsp+0x13]
+  2c0bcf:	mov    rdi,rbx
+  2c0bd2:	mov    BYTE PTR [rsp+0x13],0x0
+  2c0bd7:	call   2c0560 <CopyReadLineTextSIMDHelper.constprop.0>
+  2c0bdc:	movzx  esi,BYTE PTR [rsp+0x13]
+  2c0be1:	mov    ebp,DWORD PTR [rsp+0x14]
+  2c0be5:	test   al,al
+  2c0be7:	je     2c07b3 <CopyReadLine+0x83>
+  2c0bed:	jmp    2c0b8a <CopyReadLine+0x45a>
+  2c0bef:	nop
+  2c0bf0:	mov    eax,DWORD PTR [rbx+0x20]
+  2c0bf3:	sub    eax,0x2
+  2c0bf6:	cmp    eax,0x1
+  2c0bf9:	jbe    115304 <CopyReadLine.cold+0x17a>
+  2c0bff:	mov    edx,DWORD PTR [rbx+0x220]
+  2c0c05:	mov    DWORD PTR [rbx+0x20],0x1
+  2c0c0c:	cmp    r10d,edx
+  2c0c0f:	jle    2c0a90 <CopyReadLine+0x360>
+  2c0c15:	nop    DWORD PTR [rax]
+  2c0c18:	mov    eax,r10d
+  2c0c1b:	mov    rdi,QWORD PTR [rsp]
+  2c0c1f:	movsxd rsi,edx
+  2c0c22:	mov    DWORD PTR [rsp+0x8],r10d
+  2c0c27:	sub    eax,edx
+  2c0c29:	add    rsi,QWORD PTR [rbx+0x218]
+  2c0c30:	mov    edx,eax
+  2c0c32:	call   6c8f50 <appendBinaryStringInfo>
+  2c0c37:	mov    r10d,DWORD PTR [rsp+0x8]
+  2c0c3c:	mov    eax,DWORD PTR [rbx+0x20]
+  2c0c3f:	mov    DWORD PTR [rbx+0x220],r10d
+  2c0c46:	cmp    eax,0x3
+  2c0c49:	je     2c0cc2 <CopyReadLine+0x592>
+  2c0c4b:	ja     2c0aac <CopyReadLine+0x37c>
+  2c0c51:	cmp    eax,0x1
+  2c0c54:	je     2c0a90 <CopyReadLine+0x360>
+  2c0c5a:	cmp    eax,0x2
+  2c0c5d:	je     2c0a90 <CopyReadLine+0x360>
+  2c0c63:	xor    eax,eax
+  2c0c65:	jmp    2c0887 <CopyReadLine+0x157>
+  2c0c6a:	nop    WORD PTR [rax+rax*1+0x0]
+  2c0c70:	mov    r13d,edx
+  2c0c73:	xor    esi,esi
+  2c0c75:	jmp    2c07d1 <CopyReadLine+0xa1>
+  2c0c7a:	nop    WORD PTR [rax+rax*1+0x0]
+  2c0c80:	mov    rdi,QWORD PTR [rsp]
+  2c0c84:	mov    edx,ebp
+  2c0c86:	movsxd rsi,eax
+  2c0c89:	add    rsi,QWORD PTR [rbx+0x218]
+  2c0c90:	sub    edx,eax
+  2c0c92:	call   6c8f50 <appendBinaryStringInfo>
+  2c0c97:	mov    DWORD PTR [rbx+0x220],ebp
+  2c0c9d:	jmp    2c093d <CopyReadLine+0x20d>
+  2c0ca2:	nop    WORD PTR [rax+rax*1+0x0]
+  2c0ca8:	mov    edx,DWORD PTR [rbx+0x220]
+  2c0cae:	lea    r10d,[rbp+0x2]
+  2c0cb2:	mov    DWORD PTR [rbx+0x20],0x3
+  2c0cb9:	cmp    r10d,edx
+  2c0cbc:	jg     2c0c18 <CopyReadLine+0x4e8>
+  2c0cc2:	mov    eax,DWORD PTR [rbx+0x200]
+  2c0cc8:	mov    rdx,QWORD PTR [rbx+0x1f8]
+  2c0ccf:	sub    eax,0x2
+  2c0cd2:	mov    DWORD PTR [rbx+0x200],eax
+  2c0cd8:	cdqe
+  2c0cda:	mov    BYTE PTR [rdx+rax*1],0x0
+  2c0cde:	xor    eax,eax
+  2c0ce0:	jmp    2c0887 <CopyReadLine+0x157>
+  2c0ce5:	nop    DWORD PTR [rax]
+  2c0ce8:	movsxd rdx,DWORD PTR [rbx+0x220]
+  2c0cef:	lea    r12d,[rbp+0x2]
+  2c0cf3:	mov    DWORD PTR [rbx+0x20],0x3
+  2c0cfa:	cmp    r12d,edx
+  2c0cfd:	jle    2c0cc2 <CopyReadLine+0x592>
+  2c0cff:	jmp    2c0b01 <CopyReadLine+0x3d1>
+  2c0d04:	nop    DWORD PTR [rax+0x0]
+  2c0d08:	test   al,al
+  2c0d0a:	je     2c0915 <CopyReadLine+0x1e5>
+  2c0d10:	movsxd rax,DWORD PTR [rbx+0x220]
+  2c0d17:	cmp    r12d,eax
+  2c0d1a:	jle    2c0878 <CopyReadLine+0x148>
+  2c0d20:	mov    edx,r12d
+  2c0d23:	mov    rdi,QWORD PTR [rsp]
+  2c0d27:	sub    edx,eax
+  2c0d29:	add    rax,QWORD PTR [rbx+0x218]
+  2c0d30:	mov    rsi,rax
+  2c0d33:	call   6c8f50 <appendBinaryStringInfo>
+  2c0d38:	mov    DWORD PTR [rbx+0x220],r12d
+  2c0d3f:	jmp    2c0878 <CopyReadLine+0x148>
+  2c0d44:	nop    DWORD PTR [rax+0x0]
+  2c0d48:	mov    eax,DWORD PTR [rbx+0x20]
+  2c0d4b:	cmp    eax,0x3
+  2c0d4e:	je     2c0de8 <CopyReadLine+0x6b8>
+  2c0d54:	cmp    edx,r12d
+  2c0d57:	jg     2c0d62 <CopyReadLine+0x632>
+  2c0d59:	test   sil,sil
+  2c0d5c:	jne    2c092f <CopyReadLine+0x1ff>
+  2c0d62:	lea    ecx,[r12+0x1]
+  2c0d67:	movsxd r12,r12d
+  2c0d6a:	movzx  edx,BYTE PTR [r13+r12*1+0x0]
+  2c0d70:	cmp    dl,0xd
+  2c0d73:	setne  dil
+  2c0d77:	cmp    dl,0xa
+  2c0d7a:	je     2c0d85 <CopyReadLine+0x655>
+  2c0d7c:	test   dil,dil
+  2c0d7f:	jne    115331 <CopyReadLine.cold+0x1a7>
+  2c0d85:	mov    esi,eax
+  2c0d87:	and    esi,0xfffffffd
+  2c0d8a:	cmp    esi,0x1
+  2c0d8d:	jne    2c0e1c <CopyReadLine+0x6ec>
+  2c0d93:	cmp    dl,0xa
+  2c0d96:	jne    2c0e56 <CopyReadLine+0x726>
+  2c0d9c:	mov    eax,DWORD PTR [rbx+0x200]
+  2c0da2:	test   eax,eax
+  2c0da4:	jg     11536d <CopyReadLine.cold+0x1e3>
+  2c0daa:	cmp    ebp,DWORD PTR [rbx+0x220]
+  2c0db0:	jg     11536d <CopyReadLine.cold+0x1e3>
+  2c0db6:	mov    DWORD PTR [rbx+0x220],ecx
+  2c0dbc:	jmp    2c0878 <CopyReadLine+0x148>
+  2c0dc1:	cmp    eax,0x1
+  2c0dc4:	je     11518a <CopyReadLine.cold>
+  2c0dca:	movsxd rdx,DWORD PTR [rbx+0x220]
+  2c0dd1:	cmp    r12d,edx
+  2c0dd4:	jg     2c0b01 <CopyReadLine+0x3d1>
+  2c0dda:	cmp    eax,0x3
+  2c0ddd:	ja     2c0aac <CopyReadLine+0x37c>
+  2c0de3:	jmp    2c0a90 <CopyReadLine+0x360>
+  2c0de8:	cmp    edx,r12d
+  2c0deb:	jg     2c0df6 <CopyReadLine+0x6c6>
+  2c0ded:	test   sil,sil
+  2c0df0:	jne    2c092f <CopyReadLine+0x1ff>
+  2c0df6:	movsxd r12,r12d
+  2c0df9:	lea    edi,[rbp+0x3]
+  2c0dfc:	movzx  ecx,BYTE PTR [r13+r12*1+0x0]
+  2c0e02:	cmp    cl,0xa
+  2c0e05:	je     1153e5 <CopyReadLine.cold+0x25b>
+  2c0e0b:	cmp    cl,0xd
+  2c0e0e:	jne    1153a9 <CopyReadLine.cold+0x21f>
+  2c0e14:	mov    r12d,edi
+  2c0e17:	jmp    2c0d54 <CopyReadLine+0x624>
+  2c0e1c:	cmp    eax,0x2
+  2c0e1f:	jne    2c0d9c <CopyReadLine+0x66c>
+  2c0e25:	test   dil,dil
+  2c0e28:	je     2c0d9c <CopyReadLine+0x66c>
+  2c0e2e:	jmp    1151d4 <CopyReadLine.cold+0x4a>
+  2c0e33:	nop    DWORD PTR [rax+rax*1+0x0]
+  2c0e38:	cmp    eax,0x1
+  2c0e3b:	je     115210 <CopyReadLine.cold+0x86>
+  2c0e41:	mov    edx,DWORD PTR [rbx+0x220]
+  2c0e47:	cmp    r10d,edx
+  2c0e4a:	jle    2c0dda <CopyReadLine+0x6aa>
+  2c0e4c:	jmp    2c0c18 <CopyReadLine+0x4e8>
+  2c0e51:	call   e7a70 <__stack_chk_fail@plt>
+  2c0e56:	jmp    1151d4 <CopyReadLine.cold+0x4a>
+
+Disassembly of section .fini:

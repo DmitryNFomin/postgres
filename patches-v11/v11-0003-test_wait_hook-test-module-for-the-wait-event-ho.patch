@@ -1,0 +1,943 @@
+From e783c12a17169f63080f6bf7362056ebdfddd900 Mon Sep 17 00:00:00 2001
+From: Dmitry Fomin <fomin.list@gmail.com>
+Date: Fri, 18 Sep 2026 12:25:18 +0200
+Subject: [PATCH v11 3/5] test_wait_hook: test module for the wait event hook
+ contract
+
+Add src/test/modules/test_wait_hook, exercising the
+wait_event_begin_hook/wait_event_end_hook contract documented in
+src/include/utils/wait_event.h: hooks may use only preallocated
+backend-local state (no palloc, waits, locks, or elog); the
+wait_event_hook_depth guard prevents re-entry; and a consumer that
+chains onto an already-installed hook must call the previous begin
+hook before its own begin work and its own end work before the
+previous end hook.
+
+Two installable consumers, 'A' and 'B', record begin/end events
+(consumer id, wait_event_info, and the depth seen) into a 64-entry
+backend-local ring, retrievable and clearable via a SQL SRF. Only
+PgSleep events are recorded: the hooks are installed for the whole
+backend, not just for the statement under test, and this session's
+own housekeeping waits (a ClientRead wait between statements,
+catalog I/O) are timed waits on this branch too, so without the
+filter the ring would pick up unrelated events nondeterministically.
+
+The regression test drives its waits through a new
+test_wait_hook_wait(), a single WaitLatch() call with a fixed 1ms
+timeout and no WL_LATCH_SET, rather than through pg_sleep(): pg_sleep()
+passes WL_LATCH_SET, so an already-set process latch can make it
+return early and loop for a second wait, recording a spurious extra
+pair. test_wait_hook_wait() always produces exactly one.
+
+The regression test shows:
+
+- no events with nothing installed;
+- one consumer sees exactly one begin/end pair per wait, with the
+  expected wait event name;
+- two chained consumers fire in the required order: outer begin,
+  inner begin, inner end, outer end;
+- a hook that deliberately violates the "no waits inside a hook"
+  rule by waiting on the latch itself is caught by the depth guard,
+  which also exposes a side effect: pgstat_report_wait_end_timed()
+  unconditionally clears the raw wait-event state even when the
+  guard suppresses the hook call, so the outer wait's own end
+  arrives stale and is filtered out;
+- an error raised right after a wait start, with no matching end,
+  still leaves the backend consistent, because AbortTransaction()
+  performs the missing end call on the caller's behalf;
+- no events once every consumer is uninstalled.
+
+Discussion: https://postgr.es/m/CAPHG-0mAOn05ae6Kqx1wHXxzOk4E5W7ajjd=QBhgkR7a0uyQmw@mail.gmail.com
+---
+ src/test/modules/Makefile                     |   1 +
+ src/test/modules/meson.build                  |   1 +
+ src/test/modules/test_wait_hook/.gitignore    |   4 +
+ src/test/modules/test_wait_hook/Makefile      |  23 ++
+ src/test/modules/test_wait_hook/README        |  50 +++
+ .../expected/test_wait_hook.out               | 172 +++++++++
+ src/test/modules/test_wait_hook/meson.build   |  33 ++
+ .../test_wait_hook/sql/test_wait_hook.sql     |  75 ++++
+ .../test_wait_hook/test_wait_hook--1.0.sql    |  89 +++++
+ .../modules/test_wait_hook/test_wait_hook.c   | 339 ++++++++++++++++++
+ .../test_wait_hook/test_wait_hook.control     |   4 +
+ 11 files changed, 791 insertions(+)
+ create mode 100644 src/test/modules/test_wait_hook/.gitignore
+ create mode 100644 src/test/modules/test_wait_hook/Makefile
+ create mode 100644 src/test/modules/test_wait_hook/README
+ create mode 100644 src/test/modules/test_wait_hook/expected/test_wait_hook.out
+ create mode 100644 src/test/modules/test_wait_hook/meson.build
+ create mode 100644 src/test/modules/test_wait_hook/sql/test_wait_hook.sql
+ create mode 100644 src/test/modules/test_wait_hook/test_wait_hook--1.0.sql
+ create mode 100644 src/test/modules/test_wait_hook/test_wait_hook.c
+ create mode 100644 src/test/modules/test_wait_hook/test_wait_hook.control
+
+diff --git a/src/test/modules/Makefile b/src/test/modules/Makefile
+index 71a2e65ad70..577f21a8845 100644
+--- a/src/test/modules/Makefile
++++ b/src/test/modules/Makefile
+@@ -54,6 +54,7 @@ SUBDIRS = \
+ 		  test_shm_mq \
+ 		  test_slru \
+ 		  test_tidstore \
++		  test_wait_hook \
+ 		  test_wait_lsn \
+ 		  unsafe_tests \
+ 		  worker_spi \
+diff --git a/src/test/modules/meson.build b/src/test/modules/meson.build
+index 77e1a2810e5..a5454899fb4 100644
+--- a/src/test/modules/meson.build
++++ b/src/test/modules/meson.build
+@@ -55,6 +55,7 @@ subdir('test_shmem')
+ subdir('test_shm_mq')
+ subdir('test_slru')
+ subdir('test_tidstore')
++subdir('test_wait_hook')
+ subdir('test_wait_lsn')
+ subdir('typcache')
+ subdir('unsafe_tests')
+diff --git a/src/test/modules/test_wait_hook/.gitignore b/src/test/modules/test_wait_hook/.gitignore
+new file mode 100644
+index 00000000000..5dcb3ff9723
+--- /dev/null
++++ b/src/test/modules/test_wait_hook/.gitignore
+@@ -0,0 +1,4 @@
++# Generated subdirectories
++/log/
++/results/
++/tmp_check/
+diff --git a/src/test/modules/test_wait_hook/Makefile b/src/test/modules/test_wait_hook/Makefile
+new file mode 100644
+index 00000000000..911e8e1eb9d
+--- /dev/null
++++ b/src/test/modules/test_wait_hook/Makefile
+@@ -0,0 +1,23 @@
++# src/test/modules/test_wait_hook/Makefile
++
++MODULE_big = test_wait_hook
++OBJS = \
++	$(WIN32RES) \
++	test_wait_hook.o
++PGFILEDESC = "test_wait_hook - test code for the wait event hook contract"
++
++EXTENSION = test_wait_hook
++DATA = test_wait_hook--1.0.sql
++
++REGRESS = test_wait_hook
++
++ifdef USE_PGXS
++PG_CONFIG = pg_config
++PGXS := $(shell $(PG_CONFIG) --pgxs)
++include $(PGXS)
++else
++subdir = src/test/modules/test_wait_hook
++top_builddir = ../../../..
++include $(top_builddir)/src/Makefile.global
++include $(top_srcdir)/contrib/contrib-global.mk
++endif
+diff --git a/src/test/modules/test_wait_hook/README b/src/test/modules/test_wait_hook/README
+new file mode 100644
+index 00000000000..a6c851e7113
+--- /dev/null
++++ b/src/test/modules/test_wait_hook/README
+@@ -0,0 +1,50 @@
++test_wait_hook is a test module for the wait_event_begin_hook /
++wait_event_end_hook contract defined in src/include/utils/wait_event.h:
++
++- a hook implementation may use only preallocated backend-local state; it
++  must not palloc, wait, take a lock, or call elog/ereport;
++- the wait_event_hook_depth guard prevents a hook body from re-entering the
++  hooks (directly or by triggering another instrumented wait);
++- a consumer that chains onto an already-installed hook must save the
++  previous begin/end pointers, call the previous begin hook before its own
++  begin work, and do its own end work before calling the previous end hook.
++
++All of this module's state -- the ring of recorded events, which consumers
++are installed, and the previous hook pointers each of them chains onto --
++is backend-local: preallocated static arrays and variables, exactly what
++the contract requires.  Nothing here is process-wide or shared memory.
++
++Two test consumers, 'A' and 'B', can be installed independently with
++test_wait_hook_install(), and each records the begin/end events it sees
++(consumer id, wait_event_info, and the wait_event_hook_depth value observed)
++into a 64-entry ring, retrievable and clearable with test_wait_hook_events().
++Installing 'B' while another hook is already in place chains 'B' onto it,
++which is what the regression test uses to show the required call order:
++the outer consumer's begin hook runs first and its end hook runs last.
++
++The hooks are installed for the whole backend, not just for the statement
++under test, so the ring only ever records PgSleep events (see the comment
++on ring_push() in test_wait_hook.c).  Otherwise this session's own
++housekeeping waits -- a ClientRead wait while idling between statements,
++or file I/O from ordinary catalog access -- would land in the ring too,
++nondeterministically.  The regression test uses test_wait_hook_wait() to
++generate its PgSleep waits rather than pg_sleep(): pg_sleep()'s loop
++passes WL_LATCH_SET to WaitLatch(), so if the process latch happens to
++already be set, it returns immediately and loops around for a second
++wait, recording a spurious extra pair.  test_wait_hook_wait() calls
++WaitLatch() once, without WL_LATCH_SET, so it always produces exactly one
++begin/end pair.
++
++test_wait_hook_nested_wait_in_hook(true) makes consumer A's begin hook
++itself wait on the process latch -- a deliberate violation of the "no
++waits inside a hook" rule -- to demonstrate that the depth guard keeps
++that nested wait from re-entering the hooks.  It also demonstrates a less
++obvious consequence: pgstat_report_wait_end_timed() unconditionally clears
++the raw wait-event state even when the depth guard suppresses the hook
++call, so the *outer* wait's end call goes on to read a stale value.  See
++the comment on consumerA_begin() in test_wait_hook.c for the mechanics.
++
++test_wait_hook_error_after_start() reports a wait start and then raises an
++error without reporting the matching end, to check that AbortTransaction()
++performs that end call as part of its normal cleanup, leaving my_wait_event
++tracking and the hooks in a consistent state for subsequent waits.
+diff --git a/src/test/modules/test_wait_hook/expected/test_wait_hook.out b/src/test/modules/test_wait_hook/expected/test_wait_hook.out
+new file mode 100644
+index 00000000000..14ff9eb95b0
+--- /dev/null
++++ b/src/test/modules/test_wait_hook/expected/test_wait_hook.out
+@@ -0,0 +1,172 @@
++--
++-- Test module for the wait_event_begin_hook/wait_event_end_hook contract
++-- (see src/include/utils/wait_event.h).
++--
++-- test_wait_hook_wait() is used throughout as a single, deterministic
++-- wait: it performs exactly one WaitLatch() call with no WL_LATCH_SET, so
++-- it always produces exactly one begin/end pair per installed consumer,
++-- with no timing-dependent counts.  (pg_sleep() is not used for this: its
++-- loop passes WL_LATCH_SET, so an already-set process latch can make it
++-- return early and loop around for a second wait.)  The ring only ever
++-- records PgSleep events (see the comment on ring_push() in
++-- test_wait_hook.c), which also keeps this session's own housekeeping
++-- waits -- such as the ClientRead wait between statements -- out of the
++-- results.
++--
++CREATE EXTENSION test_wait_hook;
++--
++-- 1. With no consumer installed, waiting produces no events.
++--
++SELECT test_wait_hook_wait();
++ test_wait_hook_wait 
++---------------------
++ 
++(1 row)
++
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++ kind | consumer | wait_event | depth 
++------+----------+------------+-------
++(0 rows)
++
++--
++-- 2. One consumer installed: a single wait yields exactly one matched
++-- begin/end pair, reporting the expected wait event.
++--
++SELECT test_wait_hook_install('A');
++ test_wait_hook_install 
++------------------------
++ 
++(1 row)
++
++SELECT test_wait_hook_wait();
++ test_wait_hook_wait 
++---------------------
++ 
++(1 row)
++
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++ kind  | consumer | wait_event | depth 
++-------+----------+------------+-------
++ begin | A        | PgSleep    |     1
++ end   | A        | PgSleep    |     1
++(2 rows)
++
++--
++-- 3. A second consumer chained on top of the first: begin hooks fire
++-- outer-to-inner (A, then B) and end hooks fire inner-to-outer (B, then
++-- A), per the chaining contract.
++--
++SELECT test_wait_hook_install('B');
++ test_wait_hook_install 
++------------------------
++ 
++(1 row)
++
++SELECT test_wait_hook_wait();
++ test_wait_hook_wait 
++---------------------
++ 
++(1 row)
++
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++ kind  | consumer | wait_event | depth 
++-------+----------+------------+-------
++ begin | A        | PgSleep    |     1
++ begin | B        | PgSleep    |     1
++ end   | B        | PgSleep    |     1
++ end   | A        | PgSleep    |     1
++(4 rows)
++
++SELECT test_wait_hook_uninstall_all();
++ test_wait_hook_uninstall_all 
++------------------------------
++ 
++(1 row)
++
++--
++-- 4. A hook that violates the contract by waiting on the latch itself.
++-- The depth guard stops that nested wait from re-entering the hooks, so
++-- no extra begin/end appears; but the nested wait's own bookkeeping still
++-- clears the raw wait-event state before the outer wait's end call reads
++-- it back, so that outer end is filtered out too (see the comment in
++-- consumerA_begin()).  Only the outer begin survives.
++--
++SELECT test_wait_hook_install('A');
++ test_wait_hook_install 
++------------------------
++ 
++(1 row)
++
++SELECT test_wait_hook_nested_wait_in_hook(true);
++ test_wait_hook_nested_wait_in_hook 
++------------------------------------
++ 
++(1 row)
++
++SELECT test_wait_hook_wait();
++ test_wait_hook_wait 
++---------------------
++ 
++(1 row)
++
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++ kind  | consumer | wait_event | depth 
++-------+----------+------------+-------
++ begin | A        | PgSleep    |     1
++(1 row)
++
++SELECT test_wait_hook_nested_wait_in_hook(false);
++ test_wait_hook_nested_wait_in_hook 
++------------------------------------
++ 
++(1 row)
++
++--
++-- 5. An error raised right after a wait start, without a matching end,
++-- still leaves the backend consistent: AbortTransaction() performs the
++-- missing end call on the caller's behalf, and a later wait behaves
++-- normally again.
++--
++SELECT test_wait_hook_error_after_start();
++ERROR:  deliberate error after wait start
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++ kind  | consumer | wait_event | depth 
++-------+----------+------------+-------
++ begin | A        | PgSleep    |     1
++ end   | A        | PgSleep    |     1
++(2 rows)
++
++SELECT test_wait_hook_wait();
++ test_wait_hook_wait 
++---------------------
++ 
++(1 row)
++
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++ kind  | consumer | wait_event | depth 
++-------+----------+------------+-------
++ begin | A        | PgSleep    |     1
++ end   | A        | PgSleep    |     1
++(2 rows)
++
++--
++-- 6. After uninstalling, waiting produces no events again.
++--
++SELECT test_wait_hook_uninstall_all();
++ test_wait_hook_uninstall_all 
++------------------------------
++ 
++(1 row)
++
++SELECT test_wait_hook_wait();
++ test_wait_hook_wait 
++---------------------
++ 
++(1 row)
++
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++ kind | consumer | wait_event | depth 
++------+----------+------------+-------
++(0 rows)
++
++DROP EXTENSION test_wait_hook;
+diff --git a/src/test/modules/test_wait_hook/meson.build b/src/test/modules/test_wait_hook/meson.build
+new file mode 100644
+index 00000000000..f778ec4f383
+--- /dev/null
++++ b/src/test/modules/test_wait_hook/meson.build
+@@ -0,0 +1,33 @@
++# Copyright (c) 2026, PostgreSQL Global Development Group
++
++test_wait_hook_sources = files(
++  'test_wait_hook.c',
++)
++
++if host_system == 'windows'
++  test_wait_hook_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
++    '--NAME', 'test_wait_hook',
++    '--FILEDESC', 'test_wait_hook - test code for the wait event hook contract',])
++endif
++
++test_wait_hook = shared_module('test_wait_hook',
++  test_wait_hook_sources,
++  kwargs: pg_test_mod_args,
++)
++test_install_libs += test_wait_hook
++
++test_install_data += files(
++  'test_wait_hook.control',
++  'test_wait_hook--1.0.sql',
++)
++
++tests += {
++  'name': 'test_wait_hook',
++  'sd': meson.current_source_dir(),
++  'bd': meson.current_build_dir(),
++  'regress': {
++    'sql': [
++      'test_wait_hook',
++    ],
++  },
++}
+diff --git a/src/test/modules/test_wait_hook/sql/test_wait_hook.sql b/src/test/modules/test_wait_hook/sql/test_wait_hook.sql
+new file mode 100644
+index 00000000000..ff513620adf
+--- /dev/null
++++ b/src/test/modules/test_wait_hook/sql/test_wait_hook.sql
+@@ -0,0 +1,75 @@
++--
++-- Test module for the wait_event_begin_hook/wait_event_end_hook contract
++-- (see src/include/utils/wait_event.h).
++--
++-- test_wait_hook_wait() is used throughout as a single, deterministic
++-- wait: it performs exactly one WaitLatch() call with no WL_LATCH_SET, so
++-- it always produces exactly one begin/end pair per installed consumer,
++-- with no timing-dependent counts.  (pg_sleep() is not used for this: its
++-- loop passes WL_LATCH_SET, so an already-set process latch can make it
++-- return early and loop around for a second wait.)  The ring only ever
++-- records PgSleep events (see the comment on ring_push() in
++-- test_wait_hook.c), which also keeps this session's own housekeeping
++-- waits -- such as the ClientRead wait between statements -- out of the
++-- results.
++--
++CREATE EXTENSION test_wait_hook;
++
++--
++-- 1. With no consumer installed, waiting produces no events.
++--
++SELECT test_wait_hook_wait();
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++
++--
++-- 2. One consumer installed: a single wait yields exactly one matched
++-- begin/end pair, reporting the expected wait event.
++--
++SELECT test_wait_hook_install('A');
++SELECT test_wait_hook_wait();
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++
++--
++-- 3. A second consumer chained on top of the first: begin hooks fire
++-- outer-to-inner (A, then B) and end hooks fire inner-to-outer (B, then
++-- A), per the chaining contract.
++--
++SELECT test_wait_hook_install('B');
++SELECT test_wait_hook_wait();
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++
++SELECT test_wait_hook_uninstall_all();
++
++--
++-- 4. A hook that violates the contract by waiting on the latch itself.
++-- The depth guard stops that nested wait from re-entering the hooks, so
++-- no extra begin/end appears; but the nested wait's own bookkeeping still
++-- clears the raw wait-event state before the outer wait's end call reads
++-- it back, so that outer end is filtered out too (see the comment in
++-- consumerA_begin()).  Only the outer begin survives.
++--
++SELECT test_wait_hook_install('A');
++SELECT test_wait_hook_nested_wait_in_hook(true);
++SELECT test_wait_hook_wait();
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++SELECT test_wait_hook_nested_wait_in_hook(false);
++
++--
++-- 5. An error raised right after a wait start, without a matching end,
++-- still leaves the backend consistent: AbortTransaction() performs the
++-- missing end call on the caller's behalf, and a later wait behaves
++-- normally again.
++--
++SELECT test_wait_hook_error_after_start();
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++SELECT test_wait_hook_wait();
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++
++--
++-- 6. After uninstalling, waiting produces no events again.
++--
++SELECT test_wait_hook_uninstall_all();
++SELECT test_wait_hook_wait();
++SELECT kind, consumer, wait_event, depth FROM test_wait_hook_events();
++
++DROP EXTENSION test_wait_hook;
+diff --git a/src/test/modules/test_wait_hook/test_wait_hook--1.0.sql b/src/test/modules/test_wait_hook/test_wait_hook--1.0.sql
+new file mode 100644
+index 00000000000..abf20b9f0c4
+--- /dev/null
++++ b/src/test/modules/test_wait_hook/test_wait_hook--1.0.sql
+@@ -0,0 +1,89 @@
++/* src/test/modules/test_wait_hook/test_wait_hook--1.0.sql */
++
++\echo Use "CREATE EXTENSION test_wait_hook" to load this file. \quit
++
++--
++-- test_wait_hook_install(consumer)
++--
++-- Installs a test consumer of the wait_event_begin_hook/wait_event_end_hook
++-- pair.  consumer must be 'A' or 'B'.  Installing 'B' while 'A' (or any
++-- other hook) is already installed chains 'B' onto it, per the contract
++-- documented in src/include/utils/wait_event.h.
++--
++CREATE FUNCTION test_wait_hook_install(consumer text)
++RETURNS void
++AS 'MODULE_PATHNAME', 'test_wait_hook_install'
++LANGUAGE C STRICT VOLATILE PARALLEL UNSAFE;
++
++--
++-- test_wait_hook_uninstall_all()
++--
++-- Undoes every test_wait_hook_install() call in this session, in reverse
++-- order, restoring whatever hooks were previously in place.
++--
++CREATE FUNCTION test_wait_hook_uninstall_all()
++RETURNS void
++AS 'MODULE_PATHNAME', 'test_wait_hook_uninstall_all'
++LANGUAGE C VOLATILE PARALLEL UNSAFE;
++
++--
++-- test_wait_hook_events()
++--
++-- Returns the events recorded by the installed consumers, in the order
++-- they occurred, and empties the ring.
++--
++CREATE FUNCTION test_wait_hook_events(
++    OUT kind text,
++    OUT consumer text,
++    OUT wait_event_type text,
++    OUT wait_event text,
++    OUT depth int)
++RETURNS SETOF record
++AS 'MODULE_PATHNAME', 'test_wait_hook_events'
++LANGUAGE C VOLATILE PARALLEL UNSAFE ROWS 64;
++
++--
++-- test_wait_hook_nested_wait_in_hook(enable)
++--
++-- Toggles a deliberate contract violation in consumer A's begin hook: while
++-- enabled, the hook itself waits on the process latch, to demonstrate that
++-- the depth guard in wait_event.h prevents the resulting nested wait from
++-- re-entering the hooks.
++--
++CREATE FUNCTION test_wait_hook_nested_wait_in_hook(enable boolean)
++RETURNS void
++AS 'MODULE_PATHNAME', 'test_wait_hook_nested_wait_in_hook'
++LANGUAGE C STRICT VOLATILE PARALLEL UNSAFE;
++
++--
++-- test_wait_hook_error_after_start()
++--
++-- Reports the start of a wait and then raises an error without reporting
++-- the matching end, to exercise the cleanup path that AbortTransaction()
++-- performs on the caller's behalf.
++--
++CREATE FUNCTION test_wait_hook_error_after_start()
++RETURNS void
++AS 'MODULE_PATHNAME', 'test_wait_hook_error_after_start'
++LANGUAGE C VOLATILE PARALLEL UNSAFE;
++
++--
++-- test_wait_hook_wait()
++--
++-- Waits on the process latch for exactly one WaitLatch() call (a fixed
++-- 1ms timeout, no WL_LATCH_SET), reporting WAIT_EVENT_PG_SLEEP.  Unlike
++-- pg_sleep(), an already-set process latch cannot make this return early
++-- or loop around for a second wait, so it always produces exactly one
++-- begin/end pair.
++--
++CREATE FUNCTION test_wait_hook_wait()
++RETURNS void
++AS 'MODULE_PATHNAME', 'test_wait_hook_wait'
++LANGUAGE C VOLATILE PARALLEL UNSAFE;
++
++REVOKE ALL ON FUNCTION test_wait_hook_install(text) FROM PUBLIC;
++REVOKE ALL ON FUNCTION test_wait_hook_uninstall_all() FROM PUBLIC;
++REVOKE ALL ON FUNCTION test_wait_hook_events() FROM PUBLIC;
++REVOKE ALL ON FUNCTION test_wait_hook_nested_wait_in_hook(boolean) FROM PUBLIC;
++REVOKE ALL ON FUNCTION test_wait_hook_error_after_start() FROM PUBLIC;
++REVOKE ALL ON FUNCTION test_wait_hook_wait() FROM PUBLIC;
+diff --git a/src/test/modules/test_wait_hook/test_wait_hook.c b/src/test/modules/test_wait_hook/test_wait_hook.c
+new file mode 100644
+index 00000000000..77d690381df
+--- /dev/null
++++ b/src/test/modules/test_wait_hook/test_wait_hook.c
+@@ -0,0 +1,339 @@
++/*--------------------------------------------------------------------------
++ *
++ * test_wait_hook.c
++ *		Test module for the wait_event_begin_hook/wait_event_end_hook
++ *		contract (see src/include/utils/wait_event.h).
++ *
++ * All state kept by this module is backend-local: preallocated static
++ * arrays only, exactly as the hook contract requires.  Nothing here
++ * palloc's, waits, takes a lock, or calls elog/ereport from inside a hook,
++ * except for test_wait_hook_nested_wait_in_hook() mode, which exists
++ * specifically to demonstrate what happens when a hook implementation
++ * breaks that rule.
++ *
++ * Copyright (c) 2026, PostgreSQL Global Development Group
++ *
++ * IDENTIFICATION
++ *		src/test/modules/test_wait_hook/test_wait_hook.c
++ *
++ * -------------------------------------------------------------------------
++ */
++#include "postgres.h"
++
++#include "fmgr.h"
++#include "funcapi.h"
++#include "miscadmin.h"
++#include "storage/latch.h"
++#include "utils/builtins.h"
++#include "utils/tuplestore.h"
++#include "utils/wait_event.h"
++
++PG_MODULE_MAGIC;
++
++/* ----------------------------------------------------------------------
++ * Event ring
++ * ----------------------------------------------------------------------
++ */
++
++typedef enum TestWaitHookEventKind
++{
++	TEST_WAIT_HOOK_BEGIN,
++	TEST_WAIT_HOOK_END,
++} TestWaitHookEventKind;
++
++typedef struct TestWaitHookEvent
++{
++	TestWaitHookEventKind kind;
++	char		consumer;		/* 'A' or 'B' */
++	uint32		wait_event_info;
++	int			depth;			/* wait_event_hook_depth seen by the hook */
++} TestWaitHookEvent;
++
++#define TEST_WAIT_HOOK_RING_SIZE 64
++
++static TestWaitHookEvent ring[TEST_WAIT_HOOK_RING_SIZE];
++static int	ring_head = 0;		/* index of the oldest recorded event */
++static int	ring_len = 0;		/* number of valid events, <= RING_SIZE */
++
++/*
++ * Record one event, discarding the oldest once the ring is full.
++ *
++ * Only PgSleep events are recorded -- the ones test_wait_hook_wait() and
++ * test_wait_hook_error_after_start() generate.  The hooks are installed
++ * for the whole backend, not just for the statement under test: between
++ * statements this session blocks in secure_read() on a ClientRead wait,
++ * and ordinary catalog access can block on file I/O, both of which are
++ * timed waits on this branch too.  Without this filter the ring would
++ * nondeterministically pick up ClientRead and IO:DataFileRead pairs that
++ * have nothing to do with the scenario being tested.  This also covers
++ * wait_event_info == 0, the sentinel that pgstat_report_wait_start()/
++ * pgstat_report_wait_end() use to mean "not currently waiting", which a
++ * contract-violating hook (see test_wait_hook_nested_wait_in_hook()
++ * below) can otherwise leak in here: a wait started from inside a hook
++ * body clobbers my_wait_event_info before the outer wait's own end call
++ * reads it back.
++ */
++static void
++ring_push(TestWaitHookEventKind kind, char consumer, uint32 wait_event_info)
++{
++	TestWaitHookEvent *e;
++	int			idx;
++
++	if (wait_event_info != WAIT_EVENT_PG_SLEEP)
++		return;
++
++	if (ring_len < TEST_WAIT_HOOK_RING_SIZE)
++		idx = (ring_head + ring_len++) % TEST_WAIT_HOOK_RING_SIZE;
++	else
++	{
++		idx = ring_head;
++		ring_head = (ring_head + 1) % TEST_WAIT_HOOK_RING_SIZE;
++	}
++
++	e = &ring[idx];
++	e->kind = kind;
++	e->consumer = consumer;
++	e->wait_event_info = wait_event_info;
++	e->depth = wait_event_hook_depth;
++}
++
++/* ----------------------------------------------------------------------
++ * Consumers A and B
++ *
++ * Each consumer chains onto whatever was installed before it: the begin
++ * hook calls the saved previous begin hook before doing its own work, and
++ * the end hook does its own work before calling the saved previous end
++ * hook.  That is the ordering the contract in wait_event.h requires of a
++ * chaining consumer.
++ * ----------------------------------------------------------------------
++ */
++
++static wait_event_hook_type prevA_begin = NULL;
++static wait_event_hook_type prevA_end = NULL;
++static wait_event_hook_type prevB_begin = NULL;
++static wait_event_hook_type prevB_end = NULL;
++
++static bool a_installed = false;
++static bool b_installed = false;
++
++/* LIFO order in which consumers were installed, for uninstall_all() */
++#define TEST_WAIT_HOOK_MAX_CONSUMERS 2
++static char install_order[TEST_WAIT_HOOK_MAX_CONSUMERS];
++static int	n_installed = 0;
++
++/* set by test_wait_hook_nested_wait_in_hook() */
++static bool nested_wait_in_hook = false;
++
++static void
++consumerA_begin(uint32 wait_event_info)
++{
++	if (prevA_begin != NULL)
++		prevA_begin(wait_event_info);
++
++	ring_push(TEST_WAIT_HOOK_BEGIN, 'A', wait_event_info);
++
++	if (nested_wait_in_hook)
++	{
++		/*
++		 * Deliberately violate the "no waits inside a hook" rule to prove
++		 * that the depth guard in wait_event.h suppresses the resulting
++		 * nested begin/end pair: wait_event_hook_depth is already 1 here,
++		 * so the timed reporting functions will not call back into any
++		 * installed hook.  What is not suppressed is that
++		 * pgstat_report_wait_end_timed() unconditionally clears
++		 * my_wait_event_info once this nested wait finishes; that is why
++		 * the outer wait's own end call arrives here with
++		 * wait_event_info == 0 and gets filtered out by ring_push().
++		 */
++		WaitLatch(MyLatch, WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 1,
++				  WAIT_EVENT_PG_SLEEP);
++	}
++}
++
++static void
++consumerA_end(uint32 wait_event_info)
++{
++	ring_push(TEST_WAIT_HOOK_END, 'A', wait_event_info);
++
++	if (prevA_end != NULL)
++		prevA_end(wait_event_info);
++}
++
++static void
++consumerB_begin(uint32 wait_event_info)
++{
++	if (prevB_begin != NULL)
++		prevB_begin(wait_event_info);
++
++	ring_push(TEST_WAIT_HOOK_BEGIN, 'B', wait_event_info);
++}
++
++static void
++consumerB_end(uint32 wait_event_info)
++{
++	ring_push(TEST_WAIT_HOOK_END, 'B', wait_event_info);
++
++	if (prevB_end != NULL)
++		prevB_end(wait_event_info);
++}
++
++/* ----------------------------------------------------------------------
++ * SQL-callable functions
++ * ----------------------------------------------------------------------
++ */
++
++PG_FUNCTION_INFO_V1(test_wait_hook_install);
++PG_FUNCTION_INFO_V1(test_wait_hook_uninstall_all);
++PG_FUNCTION_INFO_V1(test_wait_hook_events);
++PG_FUNCTION_INFO_V1(test_wait_hook_nested_wait_in_hook);
++PG_FUNCTION_INFO_V1(test_wait_hook_error_after_start);
++PG_FUNCTION_INFO_V1(test_wait_hook_wait);
++
++Datum
++test_wait_hook_install(PG_FUNCTION_ARGS)
++{
++	char	   *consumer_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
++	char		consumer;
++
++	if (strcmp(consumer_str, "A") == 0)
++		consumer = 'A';
++	else if (strcmp(consumer_str, "B") == 0)
++		consumer = 'B';
++	else
++		ereport(ERROR,
++				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
++				 errmsg("consumer must be \"A\" or \"B\"")));
++
++	if ((consumer == 'A' && a_installed) || (consumer == 'B' && b_installed))
++		ereport(ERROR,
++				(errmsg("consumer \"%c\" is already installed", consumer)));
++
++	if (n_installed >= TEST_WAIT_HOOK_MAX_CONSUMERS)
++		ereport(ERROR,
++				(errmsg("both consumers are already installed")));
++
++	if (consumer == 'A')
++	{
++		prevA_begin = wait_event_begin_hook;
++		prevA_end = wait_event_end_hook;
++		wait_event_begin_hook = consumerA_begin;
++		wait_event_end_hook = consumerA_end;
++		a_installed = true;
++	}
++	else
++	{
++		prevB_begin = wait_event_begin_hook;
++		prevB_end = wait_event_end_hook;
++		wait_event_begin_hook = consumerB_begin;
++		wait_event_end_hook = consumerB_end;
++		b_installed = true;
++	}
++
++	install_order[n_installed++] = consumer;
++
++	PG_RETURN_VOID();
++}
++
++Datum
++test_wait_hook_uninstall_all(PG_FUNCTION_ARGS)
++{
++	/* Unwind in reverse installation order, restoring saved pointers. */
++	while (n_installed > 0)
++	{
++		char		consumer = install_order[--n_installed];
++
++		if (consumer == 'A')
++		{
++			wait_event_begin_hook = prevA_begin;
++			wait_event_end_hook = prevA_end;
++			prevA_begin = NULL;
++			prevA_end = NULL;
++			a_installed = false;
++		}
++		else
++		{
++			wait_event_begin_hook = prevB_begin;
++			wait_event_end_hook = prevB_end;
++			prevB_begin = NULL;
++			prevB_end = NULL;
++			b_installed = false;
++		}
++	}
++
++	nested_wait_in_hook = false;
++
++	PG_RETURN_VOID();
++}
++
++Datum
++test_wait_hook_events(PG_FUNCTION_ARGS)
++{
++	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
++
++	InitMaterializedSRF(fcinfo, 0);
++
++	for (int i = 0; i < ring_len; i++)
++	{
++		TestWaitHookEvent *e = &ring[(ring_head + i) % TEST_WAIT_HOOK_RING_SIZE];
++		Datum		values[5];
++		bool		nulls[5];
++		char		consumer_str[2];
++
++		memset(nulls, 0, sizeof(nulls));
++
++		consumer_str[0] = e->consumer;
++		consumer_str[1] = '\0';
++
++		values[0] = CStringGetTextDatum(e->kind == TEST_WAIT_HOOK_BEGIN ? "begin" : "end");
++		values[1] = CStringGetTextDatum(consumer_str);
++		values[2] = CStringGetTextDatum(pgstat_get_wait_event_type(e->wait_event_info));
++		values[3] = CStringGetTextDatum(pgstat_get_wait_event(e->wait_event_info));
++		values[4] = Int32GetDatum(e->depth);
++
++		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
++	}
++
++	/* The SRF has copied everything it needs; the ring is now free. */
++	ring_head = 0;
++	ring_len = 0;
++
++	return (Datum) 0;
++}
++
++Datum
++test_wait_hook_nested_wait_in_hook(PG_FUNCTION_ARGS)
++{
++	nested_wait_in_hook = PG_GETARG_BOOL(0);
++
++	PG_RETURN_VOID();
++}
++
++Datum
++test_wait_hook_error_after_start(PG_FUNCTION_ARGS)
++{
++	pgstat_report_wait_start_timed(WAIT_EVENT_PG_SLEEP);
++
++	ereport(ERROR,
++			(errcode(ERRCODE_INTERNAL_ERROR),
++			 errmsg("deliberate error after wait start")));
++
++	PG_RETURN_VOID();			/* unreachable */
++}
++
++/*
++ * A single, deterministic PgSleep wait: exactly one WaitLatch() call with
++ * a fixed 1ms timeout and no WL_LATCH_SET.  Deliberately not using
++ * pg_sleep() here: its loop passes WL_LATCH_SET, so if the process latch
++ * is already set (for reasons unrelated to this test), WaitLatch() returns
++ * immediately and pg_sleep() loops around and waits again, recording a
++ * second, spurious begin/end pair.  Omitting WL_LATCH_SET makes the latch's
++ * set state irrelevant, so this always produces exactly one pair.
++ */
++Datum
++test_wait_hook_wait(PG_FUNCTION_ARGS)
++{
++	(void) WaitLatch(MyLatch, WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 1,
++					 WAIT_EVENT_PG_SLEEP);
++
++	PG_RETURN_VOID();
++}
+diff --git a/src/test/modules/test_wait_hook/test_wait_hook.control b/src/test/modules/test_wait_hook/test_wait_hook.control
+new file mode 100644
+index 00000000000..ed379301468
+--- /dev/null
++++ b/src/test/modules/test_wait_hook/test_wait_hook.control
+@@ -0,0 +1,4 @@
++comment = 'Test code for the wait event hook contract'
++default_version = '1.0'
++module_pathname = '$libdir/test_wait_hook'
++relocatable = true
+-- 
+2.49.0
+

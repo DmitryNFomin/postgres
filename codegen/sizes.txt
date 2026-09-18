@@ -1,0 +1,13 @@
+=== size ===
+--- master ---
+   text	   data	    bss	    dec	    hex	filename
+10483381	 272376	 277184	11032941	 a8596d	/root/codegen/bin/master.postgres
+--- v11 ---
+   text	   data	    bss	    dec	    hex	filename
+10496015	 272376	 277216	11045607	 a88ae7	/root/codegen/bin/v11.postgres
+--- v11-wpb ---
+   text	   data	    bss	    dec	    hex	filename
+10491773	 272376	 277216	11041365	 a87a55	/root/codegen/bin/v11-wpb.postgres
+--- control ---
+   text	   data	    bss	    dec	    hex	filename
+10483821	 272376	 277216	11033413	 a85b45	/root/codegen/bin/control.postgres

@@ -1,0 +1,78 @@
+
+/root/codegen/bin/v11-wpb.postgres:     file format elf64-x86-64
+
+
+Disassembly of section .init:
+
+Disassembly of section .plt:
+
+Disassembly of section .plt.got:
+
+Disassembly of section .plt.sec:
+
+Disassembly of section .text:
+
+00000000004ef780 <FileReadV>:
+  4ef780:	endbr64
+  4ef784:	push   r15
+  4ef786:	movsxd r15,edi
+  4ef789:	push   r14
+  4ef78b:	mov    edi,r15d
+  4ef78e:	mov    r14,rcx
+  4ef791:	push   r13
+  4ef793:	mov    r13d,r8d
+  4ef796:	push   r12
+  4ef798:	mov    r12d,edx
+  4ef79b:	push   rbp
+  4ef79c:	mov    rbp,rsi
+  4ef79f:	push   rbx
+  4ef7a0:	sub    rsp,0x8
+  4ef7a4:	call   4ee750 <FileAccess>
+  4ef7a9:	movsxd rbx,eax
+  4ef7ac:	test   rbx,rbx
+  4ef7af:	js     4ef848 <FileReadV+0xc8>
+  4ef7b5:	lea    rax,[r15*8+0x0]
+  4ef7bd:	mov    rdx,QWORD PTR [rip+0x55d51c]        # a4cce0 <VfdCache>
+  4ef7c4:	sub    rax,r15
+  4ef7c7:	lea    r15,[rdx+rax*8]
+  4ef7cb:	jmp    4ef80d <FileReadV+0x8d>
+  4ef7cd:	nop    DWORD PTR [rax]
+  4ef7d0:	mov    rdx,QWORD PTR [rbp+0x8]
+  4ef7d4:	mov    rsi,QWORD PTR [rbp+0x0]
+  4ef7d8:	mov    rcx,r14
+  4ef7db:	call   e7760 <pread@plt>
+  4ef7e0:	mov    rbx,rax
+  4ef7e3:	cmp    QWORD PTR [rip+0x57014d],0x0        # a5f938 <wait_event_end_hook>
+  4ef7eb:	jne    14ef3c <FileReadV.cold+0xd>
+  4ef7f1:	mov    rax,QWORD PTR [rip+0x53fb30]        # a2f328 <my_wait_event_info>
+  4ef7f8:	mov    DWORD PTR [rax],0x0
+  4ef7fe:	test   rbx,rbx
+  4ef801:	jns    4ef848 <FileReadV+0xc8>
+  4ef803:	call   e7a30 <__errno_location@plt>
+  4ef808:	cmp    DWORD PTR [rax],0x4
+  4ef80b:	jne    4ef848 <FileReadV+0xc8>
+  4ef80d:	mov    rax,QWORD PTR [rip+0x53fb14]        # a2f328 <my_wait_event_info>
+  4ef814:	mov    DWORD PTR [rax],r13d
+  4ef817:	cmp    QWORD PTR [rip+0x570121],0x0        # a5f940 <wait_event_begin_hook>
+  4ef81f:	jne    14ef2f <FileReadV.cold>
+  4ef825:	mov    edi,DWORD PTR [r15]
+  4ef828:	cmp    r12d,0x1
+  4ef82c:	je     4ef7d0 <FileReadV+0x50>
+  4ef82e:	mov    rcx,r14
+  4ef831:	mov    edx,r12d
+  4ef834:	mov    rsi,rbp
+  4ef837:	call   e7fa0 <preadv@plt>
+  4ef83c:	mov    rbx,rax
+  4ef83f:	jmp    4ef7e3 <FileReadV+0x63>
+  4ef841:	nop    DWORD PTR [rax+0x0]
+  4ef848:	add    rsp,0x8
+  4ef84c:	mov    rax,rbx
+  4ef84f:	pop    rbx
+  4ef850:	pop    rbp
+  4ef851:	pop    r12
+  4ef853:	pop    r13
+  4ef855:	pop    r14
+  4ef857:	pop    r15
+  4ef859:	ret
+
+Disassembly of section .fini:

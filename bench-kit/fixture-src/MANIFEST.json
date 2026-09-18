@@ -1,0 +1,18 @@
+{
+  "captured_with": "git show (read-only; the branch was never checked out)",
+  "commit": "765efece39ba3fb04fdf20b1dadcd9ecea76fbc9",
+  "files_sha256": {
+    "test_wait_primitive/Makefile": "0d61169e60fb35e0fd8c62bf9254c28c2d40dea2e00386e4592e38b356d4564f",
+    "test_wait_primitive/README.md": "b35991f708d7cb4fea41d3c528efcaf4a524a12760580ab3eda268dc6caf14c3",
+    "test_wait_primitive/expected/test_wait_primitive.out": "e70de50b04b8142fd94c487279ba892e1ad871d442a39fb282167cc93f7ac63c",
+    "test_wait_primitive/meson.build": "4035c2fc9e1c9bf2663e044144687d0c225ec4967fc5bef61b1c8f21692be33d",
+    "test_wait_primitive/sql/test_wait_primitive.sql": "c4fd98b54b6ba3ffd4aa549ea03a7df5946b959ffe6bc045bec73d668c6cc852",
+    "test_wait_primitive/test_wait_primitive--1.0.sql": "c88bb49e73ecee180281b971679433d770913c2ffc2c5f1da961b74969a44c66",
+    "test_wait_primitive/test_wait_primitive.c": "d374f5861cfeeaae40dfe1e3e49ea51f1c2f83a754cf60412fc65ea3067a544d",
+    "test_wait_primitive/test_wait_primitive.control": "cf241d773fed9683a08615df0dc3c9fe043cc339c1d2baa0dde779d4da1cf0bd"
+  },
+  "path": "src/test/modules/test_wait_primitive",
+  "source_branch": "fork/bench-v8-baseline",
+  "source_repo": "/Users/dmitryfomin/work/git/postgres (local checkout; upstream https://github.com/DmitryNFomin/postgres.git)",
+  "tree": "93dde50fc966a3ab01f4218010ec65548370d6d6"
+}

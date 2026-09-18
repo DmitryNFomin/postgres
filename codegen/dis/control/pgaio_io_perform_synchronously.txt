@@ -1,0 +1,83 @@
+
+/root/codegen/bin/control.postgres:     file format elf64-x86-64
+
+
+Disassembly of section .init:
+
+Disassembly of section .plt:
+
+Disassembly of section .plt.got:
+
+Disassembly of section .plt.sec:
+
+Disassembly of section .text:
+
+00000000004dc520 <pgaio_io_perform_synchronously>:
+  4dc520:	endbr64
+  4dc524:	push   rbx
+  4dc525:	mov    rdx,QWORD PTR [rip+0x56d164]        # a49690 <pgaio_ctl>
+  4dc52c:	mov    rbx,rdi
+  4dc52f:	mov    eax,DWORD PTR [rdi+0x5c]
+  4dc532:	shl    rax,0x4
+  4dc536:	add    rax,QWORD PTR [rdx+0x18]
+  4dc53a:	mov    rsi,rax
+  4dc53d:	mov    eax,DWORD PTR [rip+0x5861c9]        # a6270c <CritSectionCount>
+  4dc543:	add    eax,0x1
+  4dc546:	mov    DWORD PTR [rip+0x5861c0],eax        # a6270c <CritSectionCount>
+  4dc54c:	movzx  eax,BYTE PTR [rdi+0x2]
+  4dc550:	cmp    al,0x2
+  4dc552:	je     4dc590 <pgaio_io_perform_synchronously+0x70>
+  4dc554:	ja     4dc5f0 <pgaio_io_perform_synchronously+0xd0>
+  4dc55a:	test   al,al
+  4dc55c:	je     14d178 <pgaio_io_perform_synchronously.cold>
+  4dc562:	mov    rax,QWORD PTR [rip+0x550dbf]        # a2d328 <my_wait_event_info>
+  4dc569:	mov    DWORD PTR [rax],0xa000017
+  4dc56f:	movzx  edx,WORD PTR [rdi+0x6c]
+  4dc573:	mov    rcx,QWORD PTR [rdi+0x70]
+  4dc577:	mov    edi,DWORD PTR [rdi+0x68]
+  4dc57a:	cmp    edx,0x1
+  4dc57d:	jne    4dc5f8 <pgaio_io_perform_synchronously+0xd8>
+  4dc57f:	mov    rdx,QWORD PTR [rsi+0x8]
+  4dc583:	mov    rsi,QWORD PTR [rsi]
+  4dc586:	call   e7760 <pread@plt>
+  4dc58b:	mov    rsi,rax
+  4dc58e:	jmp    4dc5b5 <pgaio_io_perform_synchronously+0x95>
+  4dc590:	mov    rax,QWORD PTR [rip+0x550d91]        # a2d328 <my_wait_event_info>
+  4dc597:	mov    DWORD PTR [rax],0xa00001a
+  4dc59d:	movzx  edx,WORD PTR [rdi+0x6c]
+  4dc5a1:	mov    rcx,QWORD PTR [rdi+0x70]
+  4dc5a5:	mov    edi,DWORD PTR [rdi+0x68]
+  4dc5a8:	cmp    edx,0x1
+  4dc5ab:	je     4dc608 <pgaio_io_perform_synchronously+0xe8>
+  4dc5ad:	call   e7770 <pwritev@plt>
+  4dc5b2:	mov    rsi,rax
+  4dc5b5:	mov    rax,QWORD PTR [rip+0x550d6c]        # a2d328 <my_wait_event_info>
+  4dc5bc:	mov    DWORD PTR [rax],0x0
+  4dc5c2:	test   rsi,rsi
+  4dc5c5:	jns    4dc5d0 <pgaio_io_perform_synchronously+0xb0>
+  4dc5c7:	call   e7a30 <__errno_location@plt>
+  4dc5cc:	mov    esi,DWORD PTR [rax]
+  4dc5ce:	neg    esi
+  4dc5d0:	mov    DWORD PTR [rbx+0x14],esi
+  4dc5d3:	mov    rdi,rbx
+  4dc5d6:	call   4da000 <pgaio_io_process_completion>
+  4dc5db:	mov    eax,DWORD PTR [rip+0x58612b]        # a6270c <CritSectionCount>
+  4dc5e1:	pop    rbx
+  4dc5e2:	sub    eax,0x1
+  4dc5e5:	mov    DWORD PTR [rip+0x586121],eax        # a6270c <CritSectionCount>
+  4dc5eb:	ret
+  4dc5ec:	nop    DWORD PTR [rax+0x0]
+  4dc5f0:	xor    esi,esi
+  4dc5f2:	jmp    4dc5d0 <pgaio_io_perform_synchronously+0xb0>
+  4dc5f4:	nop    DWORD PTR [rax+0x0]
+  4dc5f8:	call   e7fa0 <preadv@plt>
+  4dc5fd:	mov    rsi,rax
+  4dc600:	jmp    4dc5b5 <pgaio_io_perform_synchronously+0x95>
+  4dc602:	nop    WORD PTR [rax+rax*1+0x0]
+  4dc608:	mov    rdx,QWORD PTR [rsi+0x8]
+  4dc60c:	mov    rsi,QWORD PTR [rsi]
+  4dc60f:	call   e70a0 <pwrite@plt>
+  4dc614:	mov    rsi,rax
+  4dc617:	jmp    4dc5b5 <pgaio_io_perform_synchronously+0x95>
+
+Disassembly of section .fini:

@@ -1,0 +1,9 @@
+=== readelf -S text sections ===
+--- master ---
+  [16] .text             PROGBITS         00000000000e7fb0  000e7fb0
+--- v11 ---
+  [16] .text             PROGBITS         00000000000e7fb0  000e7fb0
+--- v11-wpb ---
+  [16] .text             PROGBITS         00000000000e7fb0  000e7fb0
+--- control ---
+  [16] .text             PROGBITS         00000000000e7fb0  000e7fb0

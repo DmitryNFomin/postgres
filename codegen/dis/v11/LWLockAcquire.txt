@@ -1,0 +1,113 @@
+
+/root/codegen/bin/v11.postgres:     file format elf64-x86-64
+
+
+Disassembly of section .init:
+
+Disassembly of section .plt:
+
+Disassembly of section .plt.got:
+
+Disassembly of section .plt.sec:
+
+Disassembly of section .text:
+
+000000000050ed40 <LWLockAcquire>:
+  50ed40:	endbr64
+  50ed44:	cmp    DWORD PTR [rip+0x541572],0xc7        # a502c0 <num_held_lwlocks>
+  50ed4e:	push   r14
+  50ed50:	push   r13
+  50ed52:	push   r12
+  50ed54:	push   rbp
+  50ed55:	push   rbx
+  50ed56:	mov    rbx,QWORD PTR [rip+0x5416ab]        # a50408 <MyProc>
+  50ed5d:	jg     150dd6 <LWLockAcquire.cold>
+  50ed63:	mov    eax,DWORD PTR [rip+0x5569ab]        # a65714 <InterruptHoldoffCount>
+  50ed69:	mov    r12,rdi
+  50ed6c:	mov    r13d,esi
+  50ed6f:	xor    ebp,ebp
+  50ed71:	mov    esi,r13d
+  50ed74:	mov    rdi,r12
+  50ed77:	mov    r14d,0x1
+  50ed7d:	add    eax,0x1
+  50ed80:	mov    DWORD PTR [rip+0x55698e],eax        # a65714 <InterruptHoldoffCount>
+  50ed86:	call   50e280 <LWLockAttemptLock>
+  50ed8b:	test   al,al
+  50ed8d:	je     50ee72 <LWLockAcquire+0x132>
+  50ed93:	nop    DWORD PTR [rax+rax*1+0x0]
+  50ed98:	mov    rdi,r12
+  50ed9b:	call   50e6b0 <LWLockQueueSelf>
+  50eda0:	mov    esi,r13d
+  50eda3:	mov    rdi,r12
+  50eda6:	call   50e280 <LWLockAttemptLock>
+  50edab:	test   al,al
+  50edad:	je     50eec6 <LWLockAcquire+0x186>
+  50edb3:	movzx  edi,WORD PTR [r12]
+  50edb8:	mov    rax,QWORD PTR [rip+0x521569]        # a30328 <my_wait_event_info>
+  50edbf:	or     edi,0x1000000
+  50edc5:	mov    DWORD PTR [rax],edi
+  50edc7:	mov    rax,QWORD PTR [rip+0x551b72]        # a60940 <wait_event_begin_hook>
+  50edce:	test   rax,rax
+  50edd1:	je     50edfb <LWLockAcquire+0xbb>
+  50edd3:	mov    ecx,DWORD PTR [rip+0x551b57]        # a60930 <wait_event_hook_depth>
+  50edd9:	test   ecx,ecx
+  50eddb:	jne    50edfb <LWLockAcquire+0xbb>
+  50eddd:	mov    DWORD PTR [rip+0x551b49],0x1        # a60930 <wait_event_hook_depth>
+  50ede7:	call   rax
+  50ede9:	mov    DWORD PTR [rip+0x551b3d],0x0        # a60930 <wait_event_hook_depth>
+  50edf3:	jmp    50edfb <LWLockAcquire+0xbb>
+  50edf5:	nop    DWORD PTR [rax]
+  50edf8:	add    ebp,0x1
+  50edfb:	mov    rdi,QWORD PTR [rbx+0x158]
+  50ee02:	call   46c700 <PGSemaphoreLock>
+  50ee07:	cmp    BYTE PTR [rbx+0x168],0x0
+  50ee0e:	jne    50edf8 <LWLockAcquire+0xb8>
+  50ee10:	lock and DWORD PTR [r12+0x4],0xbfffffff
+  50ee1a:	mov    rax,QWORD PTR [rip+0x551b17]        # a60938 <wait_event_end_hook>
+  50ee21:	test   rax,rax
+  50ee24:	je     50ee4f <LWLockAcquire+0x10f>
+  50ee26:	mov    edx,DWORD PTR [rip+0x551b04]        # a60930 <wait_event_hook_depth>
+  50ee2c:	test   edx,edx
+  50ee2e:	jne    50ee4f <LWLockAcquire+0x10f>
+  50ee30:	mov    rdx,QWORD PTR [rip+0x5214f1]        # a30328 <my_wait_event_info>
+  50ee37:	mov    edi,DWORD PTR [rdx]
+  50ee39:	mov    DWORD PTR [rip+0x551aed],0x1        # a60930 <wait_event_hook_depth>
+  50ee43:	call   rax
+  50ee45:	mov    DWORD PTR [rip+0x551ae1],0x0        # a60930 <wait_event_hook_depth>
+  50ee4f:	mov    rax,QWORD PTR [rip+0x5214d2]        # a30328 <my_wait_event_info>
+  50ee56:	mov    esi,r13d
+  50ee59:	mov    rdi,r12
+  50ee5c:	xor    r14d,r14d
+  50ee5f:	mov    DWORD PTR [rax],0x0
+  50ee65:	call   50e280 <LWLockAttemptLock>
+  50ee6a:	test   al,al
+  50ee6c:	jne    50ed98 <LWLockAcquire+0x58>
+  50ee72:	movsxd rcx,DWORD PTR [rip+0x541447]        # a502c0 <num_held_lwlocks>
+  50ee79:	lea    rax,[rip+0x5407c0]        # a4f640 <held_lwlocks>
+  50ee80:	mov    rdx,rcx
+  50ee83:	shl    rcx,0x4
+  50ee87:	add    rax,rcx
+  50ee8a:	add    edx,0x1
+  50ee8d:	mov    QWORD PTR [rax],r12
+  50ee90:	lea    r12d,[rbp-0x1]
+  50ee94:	mov    DWORD PTR [rip+0x541426],edx        # a502c0 <num_held_lwlocks>
+  50ee9a:	mov    DWORD PTR [rax+0x8],r13d
+  50ee9e:	test   ebp,ebp
+  50eea0:	jle    50eeba <LWLockAcquire+0x17a>
+  50eea2:	nop    WORD PTR [rax+rax*1+0x0]
+  50eea8:	mov    rdi,QWORD PTR [rbx+0x158]
+  50eeaf:	call   46c760 <PGSemaphoreUnlock>
+  50eeb4:	sub    r12d,0x1
+  50eeb8:	jae    50eea8 <LWLockAcquire+0x168>
+  50eeba:	pop    rbx
+  50eebb:	mov    eax,r14d
+  50eebe:	pop    rbp
+  50eebf:	pop    r12
+  50eec1:	pop    r13
+  50eec3:	pop    r14
+  50eec5:	ret
+  50eec6:	mov    rdi,r12
+  50eec9:	call   50e520 <LWLockDequeueSelf>
+  50eece:	jmp    50ee72 <LWLockAcquire+0x132>
+
+Disassembly of section .fini:

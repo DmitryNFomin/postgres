@@ -1,0 +1,41 @@
+From 2f2715dd533695153c5f5e3145af0c6978238789 Mon Sep 17 00:00:00 2001
+From: Codegen Build <codegen@localhost>
+Date: Fri, 18 Sep 2026 10:54:53 +0000
+Subject: [PATCH] control: make timed wait-event pair bodies identical to the
+ ordinary pair
+
+For the layout control, strip the hook-pointer test and slow-path call
+out of pgstat_report_wait_start_timed()/pgstat_report_wait_end_timed(),
+leaving only the volatile store each ordinary function does. The slow
+functions in wait_event.c are left untouched (now unreferenced from
+these inlines). This isolates whatever codegen difference is due to
+compiling in the call sites at all, independent of branch hints or
+out-of-lining.
+---
+ src/include/utils/wait_event.h | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/src/include/utils/wait_event.h b/src/include/utils/wait_event.h
+index 6111b83d9e..36f0dc8037 100644
+--- a/src/include/utils/wait_event.h
++++ b/src/include/utils/wait_event.h
+@@ -131,16 +131,11 @@ static inline void
+ pgstat_report_wait_start_timed(uint32 wait_event_info)
+ {
+ 	*(volatile uint32 *) my_wait_event_info = wait_event_info;
+-
+-	if (unlikely(wait_event_begin_hook != NULL))
+-		pgstat_wait_event_hook_begin_slow(wait_event_info);
+ }
+ 
+ static inline void
+ pgstat_report_wait_end_timed(void)
+ {
+-	if (unlikely(wait_event_end_hook != NULL))
+-		pgstat_wait_event_hook_end_slow();
+ 	*(volatile uint32 *) my_wait_event_info = 0;
+ }
+ 
+-- 
+2.43.0
+

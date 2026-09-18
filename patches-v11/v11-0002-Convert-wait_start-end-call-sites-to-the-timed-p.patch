@@ -1,0 +1,1721 @@
+From 1a8fd426bd83f3a0020353f974803ae2b8766d87 Mon Sep 17 00:00:00 2001
+From: Dmitry Fomin <fomin.list@gmail.com>
+Date: Wed, 9 Sep 2026 15:13:26 +0000
+Subject: [PATCH v11 2/5] Convert wait_start/end call sites to the timed pair
+
+Route the existing direct wait annotations in src/backend and src/common
+(94 starts and their 111 end and cleanup calls) through the explicitly
+instrumented pair, so that the hooks cover every wait site the backend
+executes today.  The two src/common sites are the control file write and
+sync in update_controlfile(), inside the existing #ifndef FRONTEND
+guards; frontend builds of that file are unchanged.
+
+Discussion: https://postgr.es/m/CAPHG-0mAOn05ae6Kqx1wHXxzOk4E5W7ajjd=QBhgkR7a0uyQmw@mail.gmail.com
+---
+ src/backend/access/heap/rewriteheap.c         | 16 ++---
+ src/backend/access/transam/clog.c             |  4 +-
+ src/backend/access/transam/slru.c             | 22 +++----
+ src/backend/access/transam/timeline.c         | 28 ++++----
+ src/backend/access/transam/twophase.c         | 12 ++--
+ src/backend/access/transam/xact.c             |  4 +-
+ src/backend/access/transam/xlog.c             | 64 +++++++++----------
+ src/backend/access/transam/xlogarchive.c      |  8 +--
+ src/backend/access/transam/xlogreader.c       |  4 +-
+ src/backend/access/transam/xlogrecovery.c     |  6 +-
+ src/backend/archive/shell_archive.c           |  4 +-
+ src/backend/backup/basebackup.c               |  4 +-
+ src/backend/commands/copyfromparse.c          |  4 +-
+ src/backend/commands/copyto.c                 |  4 +-
+ src/backend/commands/dbcommands.c             |  8 +--
+ src/backend/commands/vacuum.c                 |  4 +-
+ src/backend/postmaster/autovacuum.c           |  2 +-
+ src/backend/postmaster/auxprocess.c           |  2 +-
+ src/backend/postmaster/bgwriter.c             |  2 +-
+ src/backend/postmaster/checkpointer.c         |  2 +-
+ src/backend/postmaster/pgarch.c               |  2 +-
+ src/backend/postmaster/walsummarizer.c        |  2 +-
+ src/backend/postmaster/walwriter.c            |  2 +-
+ .../replication/logical/reorderbuffer.c       |  8 +--
+ src/backend/replication/logical/snapbuild.c   | 12 ++--
+ src/backend/replication/slot.c                | 24 +++----
+ src/backend/replication/walreceiver.c         |  4 +-
+ src/backend/replication/walsender.c           |  6 +-
+ src/backend/storage/aio/aio_io.c              |  8 +--
+ src/backend/storage/aio/method_io_uring.c     |  8 +--
+ src/backend/storage/buffer/bufmgr.c           |  4 +-
+ src/backend/storage/file/copydir.c            | 12 ++--
+ src/backend/storage/file/fd.c                 | 36 +++++------
+ src/backend/storage/ipc/dsm_impl.c            |  8 +--
+ src/backend/storage/ipc/procarray.c           |  4 +-
+ src/backend/storage/ipc/standby.c             |  4 +-
+ src/backend/storage/ipc/waiteventset.c        |  4 +-
+ src/backend/storage/lmgr/lwlock.c             |  4 +-
+ src/backend/storage/lmgr/s_lock.c             |  4 +-
+ src/backend/utils/cache/relmapper.c           | 12 ++--
+ src/backend/utils/init/miscinit.c             | 30 ++++-----
+ src/common/controldata_utils.c                |  8 +--
+ 42 files changed, 205 insertions(+), 205 deletions(-)
+
+diff --git a/src/backend/access/heap/rewriteheap.c b/src/backend/access/heap/rewriteheap.c
+index 0648e433031..2eae18949f9 100644
+--- a/src/backend/access/heap/rewriteheap.c
++++ b/src/backend/access/heap/rewriteheap.c
+@@ -1104,13 +1104,13 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
+ 	 * Truncate all data that's not guaranteed to have been safely fsynced (by
+ 	 * previous record or by the last checkpoint).
+ 	 */
+-	pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE);
+ 	if (ftruncate(fd, xlrec->offset) != 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not truncate file \"%s\" to %lld: %m",
+ 						path, (long long int) xlrec->offset)));
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	data = XLogRecGetData(r) + sizeof(*xlrec);
+ 
+@@ -1118,7 +1118,7 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
+ 
+ 	/* write out tail end of mapping file (again) */
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE);
+ 	if (pg_pwrite(fd, data, len, xlrec->offset) != len)
+ 	{
+ 		/* if write didn't set errno, assume problem is no disk space */
+@@ -1128,19 +1128,19 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write to file \"%s\": %m", path)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	/*
+ 	 * Now fsync all previously written data. We could improve things and only
+ 	 * do this for the last write to a file, but the required bookkeeping
+ 	 * doesn't seem worth the trouble.
+ 	 */
+-	pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 		ereport(data_sync_elevel(ERROR),
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m", path)));
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (CloseTransientFile(fd) != 0)
+ 		ereport(ERROR,
+@@ -1240,12 +1240,12 @@ CheckPointLogicalRewriteHeap(void)
+ 			 * changed or have only been created since the checkpoint's start,
+ 			 * but it's currently not deemed worth the effort.
+ 			 */
+-			pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC);
++			pgstat_report_wait_start_timed(WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC);
+ 			if (pg_fsync(fd) != 0)
+ 				ereport(data_sync_elevel(ERROR),
+ 						(errcode_for_file_access(),
+ 						 errmsg("could not fsync file \"%s\": %m", path)));
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 
+ 			if (CloseTransientFile(fd) != 0)
+ 				ereport(ERROR,
+diff --git a/src/backend/access/transam/clog.c b/src/backend/access/transam/clog.c
+index 6f7f6b86eb6..88157674f0f 100644
+--- a/src/backend/access/transam/clog.c
++++ b/src/backend/access/transam/clog.c
+@@ -540,7 +540,7 @@ TransactionGroupUpdateXidStatus(TransactionId xid, XidStatus status,
+ 		int			extraWaits = 0;
+ 
+ 		/* Sleep until the leader updates our XID status. */
+-		pgstat_report_wait_start(WAIT_EVENT_XACT_GROUP_UPDATE);
++		pgstat_report_wait_start_timed(WAIT_EVENT_XACT_GROUP_UPDATE);
+ 		for (;;)
+ 		{
+ 			/* acts as a read barrier */
+@@ -549,7 +549,7 @@ TransactionGroupUpdateXidStatus(TransactionId xid, XidStatus status,
+ 				break;
+ 			extraWaits++;
+ 		}
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 
+ 		Assert(pg_atomic_read_u32(&proc->clogGroupNext) == INVALID_PROC_NUMBER);
+ 
+diff --git a/src/backend/access/transam/slru.c b/src/backend/access/transam/slru.c
+index 885fd068535..489493f4cf3 100644
+--- a/src/backend/access/transam/slru.c
++++ b/src/backend/access/transam/slru.c
+@@ -886,16 +886,16 @@ SlruPhysicalReadPage(SlruDesc *ctl, int64 pageno, int slotno)
+ 	}
+ 
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_SLRU_READ);
++	pgstat_report_wait_start_timed(WAIT_EVENT_SLRU_READ);
+ 	if (pg_pread(fd, shared->page_buffer[slotno], BLCKSZ, offset) != BLCKSZ)
+ 	{
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		slru_errcause = SLRU_READ_FAILED;
+ 		slru_errno = errno;
+ 		CloseTransientFile(fd);
+ 		return false;
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (CloseTransientFile(fd) != 0)
+ 	{
+@@ -1038,10 +1038,10 @@ SlruPhysicalWritePage(SlruDesc *ctl, int64 pageno, int slotno, SlruWriteAll fdat
+ 	}
+ 
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_SLRU_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_SLRU_WRITE);
+ 	if (pg_pwrite(fd, shared->page_buffer[slotno], BLCKSZ, offset) != BLCKSZ)
+ 	{
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		/* if write didn't set errno, assume problem is no disk space */
+ 		if (errno == 0)
+ 			errno = ENOSPC;
+@@ -1051,7 +1051,7 @@ SlruPhysicalWritePage(SlruDesc *ctl, int64 pageno, int slotno, SlruWriteAll fdat
+ 			CloseTransientFile(fd);
+ 		return false;
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	/* Queue up a sync request for the checkpointer. */
+ 	if (ctl->options.sync_handler != SYNC_HANDLER_NONE)
+@@ -1062,16 +1062,16 @@ SlruPhysicalWritePage(SlruDesc *ctl, int64 pageno, int slotno, SlruWriteAll fdat
+ 		if (!RegisterSyncRequest(&tag, SYNC_REQUEST, false))
+ 		{
+ 			/* No space to enqueue sync request.  Do it synchronously. */
+-			pgstat_report_wait_start(WAIT_EVENT_SLRU_SYNC);
++			pgstat_report_wait_start_timed(WAIT_EVENT_SLRU_SYNC);
+ 			if (pg_fsync(fd) != 0)
+ 			{
+-				pgstat_report_wait_end();
++				pgstat_report_wait_end_timed();
+ 				slru_errcause = SLRU_FSYNC_FAILED;
+ 				slru_errno = errno;
+ 				CloseTransientFile(fd);
+ 				return false;
+ 			}
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 		}
+ 	}
+ 
+@@ -1893,9 +1893,9 @@ SlruSyncFileTag(SlruDesc *ctl, const FileTag *ftag, char *path)
+ 	if (fd < 0)
+ 		return -1;
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_SLRU_FLUSH_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_SLRU_FLUSH_SYNC);
+ 	result = pg_fsync(fd);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 	save_errno = errno;
+ 
+ 	CloseTransientFile(fd);
+diff --git a/src/backend/access/transam/timeline.c b/src/backend/access/transam/timeline.c
+index d80c8ffe0a7..99a9e68fb0c 100644
+--- a/src/backend/access/transam/timeline.c
++++ b/src/backend/access/transam/timeline.c
+@@ -133,9 +133,9 @@ readTimeLineHistory(TimeLineID targetTLI)
+ 		uint32		switchpoint_lo;
+ 		int			nfields;
+ 
+-		pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_READ);
++		pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_READ);
+ 		res = fgets(fline, sizeof(fline), fd);
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		if (res == NULL)
+ 		{
+ 			if (ferror(fd))
+@@ -354,9 +354,9 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
+ 		for (;;)
+ 		{
+ 			errno = 0;
+-			pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_READ);
++			pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_READ);
+ 			nbytes = read(srcfd, buffer, sizeof(buffer));
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 			if (nbytes < 0 || errno != 0)
+ 				ereport(ERROR,
+ 						(errcode_for_file_access(),
+@@ -364,7 +364,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
+ 			if (nbytes == 0)
+ 				break;
+ 			errno = 0;
+-			pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_WRITE);
++			pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_WRITE);
+ 			if (write(fd, buffer, nbytes) != nbytes)
+ 			{
+ 				int			save_errno = errno;
+@@ -384,7 +384,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
+ 						(errcode_for_file_access(),
+ 						 errmsg("could not write to file \"%s\": %m", tmppath)));
+ 			}
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 		}
+ 
+ 		if (CloseTransientFile(srcfd) != 0)
+@@ -408,7 +408,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
+ 
+ 	nbytes = strlen(buffer);
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_WRITE);
+ 	if (write(fd, buffer, nbytes) != nbytes)
+ 	{
+ 		int			save_errno = errno;
+@@ -424,14 +424,14 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write to file \"%s\": %m", tmppath)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 		ereport(data_sync_elevel(ERROR),
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (CloseTransientFile(fd) != 0)
+ 		ereport(ERROR,
+@@ -482,7 +482,7 @@ writeTimeLineHistoryFile(TimeLineID tli, const char *content, size_t size)
+ 				 errmsg("could not create file \"%s\": %m", tmppath)));
+ 
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE);
+ 	if (write(fd, content, size) != size)
+ 	{
+ 		int			save_errno = errno;
+@@ -498,14 +498,14 @@ writeTimeLineHistoryFile(TimeLineID tli, const char *content, size_t size)
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write to file \"%s\": %m", tmppath)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_TIMELINE_HISTORY_FILE_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_TIMELINE_HISTORY_FILE_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 		ereport(data_sync_elevel(ERROR),
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (CloseTransientFile(fd) != 0)
+ 		ereport(ERROR,
+diff --git a/src/backend/access/transam/twophase.c b/src/backend/access/transam/twophase.c
+index 48e478a4ecb..2adc897879e 100644
+--- a/src/backend/access/transam/twophase.c
++++ b/src/backend/access/transam/twophase.c
+@@ -1359,7 +1359,7 @@ ReadTwoPhaseFile(FullTransactionId fxid, bool missing_ok)
+ 	buflen = stat.st_size;
+ 	buf = (char *) palloc(buflen);
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_TWOPHASE_FILE_READ);
++	pgstat_report_wait_start_timed(WAIT_EVENT_TWOPHASE_FILE_READ);
+ 	r = read(fd, buf, buflen);
+ 	if (r != buflen)
+ 	{
+@@ -1373,7 +1373,7 @@ ReadTwoPhaseFile(FullTransactionId fxid, bool missing_ok)
+ 							path, r, buflen)));
+ 	}
+ 
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (CloseTransientFile(fd) != 0)
+ 		ereport(ERROR,
+@@ -1769,7 +1769,7 @@ RecreateTwoPhaseFile(FullTransactionId fxid, const void *content, size_t len)
+ 
+ 	/* Write content and CRC */
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_TWOPHASE_FILE_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_TWOPHASE_FILE_WRITE);
+ 	if (write(fd, content, len) != len)
+ 	{
+ 		/* if write didn't set errno, assume problem is no disk space */
+@@ -1788,18 +1788,18 @@ RecreateTwoPhaseFile(FullTransactionId fxid, const void *content, size_t len)
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write file \"%s\": %m", path)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	/*
+ 	 * We must fsync the file because the end-of-replay checkpoint will not do
+ 	 * so, there being no GXACT in shared memory yet to tell it to.
+ 	 */
+-	pgstat_report_wait_start(WAIT_EVENT_TWOPHASE_FILE_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_TWOPHASE_FILE_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m", path)));
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (CloseTransientFile(fd) != 0)
+ 		ereport(ERROR,
+diff --git a/src/backend/access/transam/xact.c b/src/backend/access/transam/xact.c
+index ebb010853cf..21bdab2aba3 100644
+--- a/src/backend/access/transam/xact.c
++++ b/src/backend/access/transam/xact.c
+@@ -2882,7 +2882,7 @@ AbortTransaction(void)
+ 	WaitLSNCleanup();
+ 
+ 	/* Clear wait information and command progress indicator */
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 	pgstat_progress_end_command();
+ 
+ 	pgaio_error_cleanup();
+@@ -5299,7 +5299,7 @@ AbortSubTransaction(void)
+ 	 */
+ 	WaitLSNCleanup();
+ 
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 	pgstat_progress_end_command();
+ 
+ 	pgaio_error_cleanup();
+diff --git a/src/backend/access/transam/xlog.c b/src/backend/access/transam/xlog.c
+index 9ec0be77ca0..c120910e21d 100644
+--- a/src/backend/access/transam/xlog.c
++++ b/src/backend/access/transam/xlog.c
+@@ -2510,9 +2510,9 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
+ 				 */
+ 				start = pgstat_prepare_io_time(track_wal_io_timing);
+ 
+-				pgstat_report_wait_start(WAIT_EVENT_WAL_WRITE);
++				pgstat_report_wait_start_timed(WAIT_EVENT_WAL_WRITE);
+ 				written = pg_pwrite(openLogFile, from, nleft, startoffset);
+-				pgstat_report_wait_end();
++				pgstat_report_wait_end_timed();
+ 
+ 				if (written <= 0)
+ 				{
+@@ -2962,9 +2962,9 @@ XLogFlush(XLogRecPtr record)
+ 		if (CommitDelay > 0 && enableFsync &&
+ 			MinimumActiveBackends(CommitSiblings))
+ 		{
+-			pgstat_report_wait_start(WAIT_EVENT_COMMIT_DELAY);
++			pgstat_report_wait_start_timed(WAIT_EVENT_COMMIT_DELAY);
+ 			pg_usleep(CommitDelay);
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 
+ 			/*
+ 			 * Re-check how far we can now flush the WAL. It's generally not
+@@ -3357,7 +3357,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
+ 	/* Measure I/O timing when initializing segment */
+ 	io_start = pgstat_prepare_io_time(track_wal_io_timing);
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_WAL_INIT_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_WAL_INIT_WRITE);
+ 	save_errno = 0;
+ 	if (wal_init_zero)
+ 	{
+@@ -3390,7 +3390,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
+ 			save_errno = errno ? errno : ENOSPC;
+ 		}
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (save_errno)
+ 	{
+@@ -3419,7 +3419,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
+ 	/* Measure I/O timing when flushing segment */
+ 	io_start = pgstat_prepare_io_time(track_wal_io_timing);
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_WAL_INIT_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_WAL_INIT_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 	{
+ 		save_errno = errno;
+@@ -3429,7 +3429,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_INIT,
+ 							IOOP_FSYNC, io_start, 1, 0);
+@@ -3584,7 +3584,7 @@ XLogFileCopy(TimeLineID destTLI, XLogSegNo destsegno,
+ 
+ 			if (nread > sizeof(buffer))
+ 				nread = sizeof(buffer);
+-			pgstat_report_wait_start(WAIT_EVENT_WAL_COPY_READ);
++			pgstat_report_wait_start_timed(WAIT_EVENT_WAL_COPY_READ);
+ 			r = read(srcfd, buffer.data, nread);
+ 			if (r != nread)
+ 			{
+@@ -3599,10 +3599,10 @@ XLogFileCopy(TimeLineID destTLI, XLogSegNo destsegno,
+ 							 errmsg("could not read file \"%s\": read %zd of %zu",
+ 									path, r, nread)));
+ 			}
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 		}
+ 		errno = 0;
+-		pgstat_report_wait_start(WAIT_EVENT_WAL_COPY_WRITE);
++		pgstat_report_wait_start_timed(WAIT_EVENT_WAL_COPY_WRITE);
+ 		if (write(fd, buffer.data, sizeof(buffer)) != sizeof(buffer))
+ 		{
+ 			int			save_errno = errno;
+@@ -3618,15 +3618,15 @@ XLogFileCopy(TimeLineID destTLI, XLogSegNo destsegno,
+ 					(errcode_for_file_access(),
+ 					 errmsg("could not write to file \"%s\": %m", tmppath)));
+ 		}
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 	}
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_WAL_COPY_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_WAL_COPY_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 		ereport(data_sync_elevel(ERROR),
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (CloseTransientFile(fd) != 0)
+ 		ereport(ERROR,
+@@ -4438,7 +4438,7 @@ WriteControlFile(void)
+ 						XLOG_CONTROL_FILE)));
+ 
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_CONTROL_FILE_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_CONTROL_FILE_WRITE);
+ 	if (write(fd, buffer, PG_CONTROL_FILE_SIZE) != PG_CONTROL_FILE_SIZE)
+ 	{
+ 		/* if write didn't set errno, assume problem is no disk space */
+@@ -4449,15 +4449,15 @@ WriteControlFile(void)
+ 				 errmsg("could not write to file \"%s\": %m",
+ 						XLOG_CONTROL_FILE)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_CONTROL_FILE_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_CONTROL_FILE_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 		ereport(PANIC,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m",
+ 						XLOG_CONTROL_FILE)));
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (close(fd) != 0)
+ 		ereport(PANIC,
+@@ -4485,7 +4485,7 @@ ReadControlFile(void)
+ 				 errmsg("could not open file \"%s\": %m",
+ 						XLOG_CONTROL_FILE)));
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_CONTROL_FILE_READ);
++	pgstat_report_wait_start_timed(WAIT_EVENT_CONTROL_FILE_READ);
+ 	r = read(fd, ControlFile, sizeof(ControlFileData));
+ 	if (r != sizeof(ControlFileData))
+ 	{
+@@ -4500,7 +4500,7 @@ ReadControlFile(void)
+ 					 errmsg("could not read file \"%s\": read %zd of %zu",
+ 							XLOG_CONTROL_FILE, r, sizeof(ControlFileData))));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	close(fd);
+ 
+@@ -5789,7 +5789,7 @@ BootStrapXLOG(uint32 data_checksum_version)
+ 
+ 	/* Write the first page with the initial record */
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_WAL_BOOTSTRAP_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_WAL_BOOTSTRAP_WRITE);
+ 	if (write(openLogFile, &buffer, XLOG_BLCKSZ) != XLOG_BLCKSZ)
+ 	{
+ 		/* if write didn't set errno, assume problem is no disk space */
+@@ -5799,14 +5799,14 @@ BootStrapXLOG(uint32 data_checksum_version)
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write bootstrap write-ahead log file: %m")));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_WAL_BOOTSTRAP_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_WAL_BOOTSTRAP_SYNC);
+ 	if (pg_fsync(openLogFile) != 0)
+ 		ereport(PANIC,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync bootstrap write-ahead log file: %m")));
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (close(openLogFile) != 0)
+ 		ereport(PANIC,
+@@ -8005,9 +8005,9 @@ CreateCheckPoint(int flags)
+ 			 */
+ 			AbsorbSyncRequests();
+ 
+-			pgstat_report_wait_start(WAIT_EVENT_CHECKPOINT_DELAY_START);
++			pgstat_report_wait_start_timed(WAIT_EVENT_CHECKPOINT_DELAY_START);
+ 			pg_usleep(10000L);	/* wait for 10 msec */
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 		} while (HaveVirtualXIDsDelayingChkpt(vxids, nvxids,
+ 											  DELAY_CHKPT_START));
+ 	}
+@@ -8022,9 +8022,9 @@ CreateCheckPoint(int flags)
+ 		{
+ 			AbsorbSyncRequests();
+ 
+-			pgstat_report_wait_start(WAIT_EVENT_CHECKPOINT_DELAY_COMPLETE);
++			pgstat_report_wait_start_timed(WAIT_EVENT_CHECKPOINT_DELAY_COMPLETE);
+ 			pg_usleep(10000L);	/* wait for 10 msec */
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 		} while (HaveVirtualXIDsDelayingChkpt(vxids, nvxids,
+ 											  DELAY_CHKPT_COMPLETE));
+ 	}
+@@ -9844,7 +9844,7 @@ assign_wal_sync_method(int new_wal_sync_method, void *extra)
+ 		 */
+ 		if (openLogFile >= 0)
+ 		{
+-			pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC_METHOD_ASSIGN);
++			pgstat_report_wait_start_timed(WAIT_EVENT_WAL_SYNC_METHOD_ASSIGN);
+ 			if (pg_fsync(openLogFile) != 0)
+ 			{
+ 				char		xlogfname[MAXFNAMELEN];
+@@ -9859,7 +9859,7 @@ assign_wal_sync_method(int new_wal_sync_method, void *extra)
+ 						 errmsg("could not fsync file \"%s\": %m", xlogfname)));
+ 			}
+ 
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 			if (get_sync_bit(wal_sync_method) != get_sync_bit(new_wal_sync_method))
+ 				XLogFileClose();
+ 		}
+@@ -9895,7 +9895,7 @@ issue_xlog_fsync(int fd, XLogSegNo segno, TimeLineID tli)
+ 	 */
+ 	start = pgstat_prepare_io_time(track_wal_io_timing);
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_WAL_SYNC);
+ 	switch (wal_sync_method)
+ 	{
+ 		case WAL_SYNC_METHOD_FSYNC:
+@@ -9937,7 +9937,7 @@ issue_xlog_fsync(int fd, XLogSegNo segno, TimeLineID tli)
+ 				 errmsg(msg, xlogfname)));
+ 	}
+ 
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_FSYNC,
+ 							start, 1, 0);
+diff --git a/src/backend/access/transam/xlogarchive.c b/src/backend/access/transam/xlogarchive.c
+index 0d9ffc99726..38310a265d1 100644
+--- a/src/backend/access/transam/xlogarchive.c
++++ b/src/backend/access/transam/xlogarchive.c
+@@ -160,7 +160,7 @@ RestoreArchivedFile(char *path, const char *xlogfname,
+ 							 xlogRestoreCmd)));
+ 
+ 	fflush(NULL);
+-	pgstat_report_wait_start(WAIT_EVENT_RESTORE_COMMAND);
++	pgstat_report_wait_start_timed(WAIT_EVENT_RESTORE_COMMAND);
+ 
+ 	/*
+ 	 * PreRestoreCommand() informs the SIGTERM handler for the startup process
+@@ -179,7 +179,7 @@ RestoreArchivedFile(char *path, const char *xlogfname,
+ 
+ 	PostRestoreCommand();
+ 
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 	pfree(xlogRestoreCmd);
+ 
+ 	if (rc == 0)
+@@ -327,9 +327,9 @@ ExecuteRecoveryCommand(const char *command, const char *commandName,
+ 	 * execute the constructed command
+ 	 */
+ 	fflush(NULL);
+-	pgstat_report_wait_start(wait_event_info);
++	pgstat_report_wait_start_timed(wait_event_info);
+ 	rc = system(xlogRecoveryCmd);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	pfree(xlogRecoveryCmd);
+ 
+diff --git a/src/backend/access/transam/xlogreader.c b/src/backend/access/transam/xlogreader.c
+index 7db7c273b0c..d1f32671f23 100644
+--- a/src/backend/access/transam/xlogreader.c
++++ b/src/backend/access/transam/xlogreader.c
+@@ -1617,7 +1617,7 @@ WALRead(XLogReaderState *state,
+ 		/* Measure I/O timing when reading segment */
+ 		io_start = pgstat_prepare_io_time(track_wal_io_timing);
+ 
+-		pgstat_report_wait_start(WAIT_EVENT_WAL_READ);
++		pgstat_report_wait_start_timed(WAIT_EVENT_WAL_READ);
+ #endif
+ 
+ 		/* Reset errno first; eases reporting non-errno-affecting errors */
+@@ -1625,7 +1625,7 @@ WALRead(XLogReaderState *state,
+ 		readbytes = pg_pread(state->seg.ws_file, p, segbytes, (pgoff_t) startoff);
+ 
+ #ifndef FRONTEND
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ #endif
+ 
+ 		if (readbytes <= 0)
+diff --git a/src/backend/access/transam/xlogrecovery.c b/src/backend/access/transam/xlogrecovery.c
+index fff8d57ac61..442850e8911 100644
+--- a/src/backend/access/transam/xlogrecovery.c
++++ b/src/backend/access/transam/xlogrecovery.c
+@@ -3395,14 +3395,14 @@ retry:
+ 	/* Measure I/O timing when reading segment */
+ 	io_start = pgstat_prepare_io_time(track_wal_io_timing);
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_WAL_READ);
++	pgstat_report_wait_start_timed(WAIT_EVENT_WAL_READ);
+ 	r = pg_pread(readFile, readBuf, XLOG_BLCKSZ, (pgoff_t) readOff);
+ 	if (r != XLOG_BLCKSZ)
+ 	{
+ 		char		fname[MAXFNAMELEN];
+ 		int			save_errno = errno;
+ 
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 
+ 		/* Count I/O stats only for successful short reads */
+ 		if (r > 0)
+@@ -3427,7 +3427,7 @@ retry:
+ 							readOff, r, (Size) XLOG_BLCKSZ)));
+ 		goto next_record_is_invalid;
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ,
+ 							io_start, 1, r);
+diff --git a/src/backend/archive/shell_archive.c b/src/backend/archive/shell_archive.c
+index 0b427a68809..05975937c25 100644
+--- a/src/backend/archive/shell_archive.c
++++ b/src/backend/archive/shell_archive.c
+@@ -77,9 +77,9 @@ shell_archive_file(ArchiveModuleState *state, const char *file,
+ 							 xlogarchcmd)));
+ 
+ 	fflush(NULL);
+-	pgstat_report_wait_start(WAIT_EVENT_ARCHIVE_COMMAND);
++	pgstat_report_wait_start_timed(WAIT_EVENT_ARCHIVE_COMMAND);
+ 	rc = system(xlogarchcmd);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (rc != 0)
+ 	{
+diff --git a/src/backend/backup/basebackup.c b/src/backend/backup/basebackup.c
+index e3c04ecd810..791f4adf555 100644
+--- a/src/backend/backup/basebackup.c
++++ b/src/backend/backup/basebackup.c
+@@ -2189,9 +2189,9 @@ basebackup_read_file(int fd, char *buf, size_t nbytes, off_t offset,
+ {
+ 	ssize_t		rc;
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_BASEBACKUP_READ);
++	pgstat_report_wait_start_timed(WAIT_EVENT_BASEBACKUP_READ);
+ 	rc = pg_pread(fd, buf, nbytes, offset);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (rc < 0)
+ 		ereport(ERROR,
+diff --git a/src/backend/commands/copyfromparse.c b/src/backend/commands/copyfromparse.c
+index 06450535779..ab0f2d5b1aa 100644
+--- a/src/backend/commands/copyfromparse.c
++++ b/src/backend/commands/copyfromparse.c
+@@ -253,9 +253,9 @@ CopyGetData(CopyFromState cstate, void *databuf, int minread, int maxread)
+ 	switch (cstate->copy_src)
+ 	{
+ 		case COPY_FILE:
+-			pgstat_report_wait_start(WAIT_EVENT_COPY_FROM_READ);
++			pgstat_report_wait_start_timed(WAIT_EVENT_COPY_FROM_READ);
+ 			bytesread = fread(databuf, 1, maxread, cstate->copy_file);
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 			if (ferror(cstate->copy_file))
+ 				ereport(ERROR,
+ 						(errcode_for_file_access(),
+diff --git a/src/backend/commands/copyto.c b/src/backend/commands/copyto.c
+index 5850608a3fb..6c27fc157b7 100644
+--- a/src/backend/commands/copyto.c
++++ b/src/backend/commands/copyto.c
+@@ -607,7 +607,7 @@ CopySendEndOfRow(CopyToState cstate)
+ 	switch (cstate->copy_dest)
+ 	{
+ 		case COPY_FILE:
+-			pgstat_report_wait_start(WAIT_EVENT_COPY_TO_WRITE);
++			pgstat_report_wait_start_timed(WAIT_EVENT_COPY_TO_WRITE);
+ 			if (fwrite(fe_msgbuf->data, fe_msgbuf->len, 1,
+ 					   cstate->copy_file) != 1 ||
+ 				ferror(cstate->copy_file))
+@@ -640,7 +640,7 @@ CopySendEndOfRow(CopyToState cstate)
+ 							(errcode_for_file_access(),
+ 							 errmsg("could not write to COPY file: %m")));
+ 			}
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 			break;
+ 		case COPY_FRONTEND:
+ 			/* Dump the accumulated row as one CopyData message */
+diff --git a/src/backend/commands/dbcommands.c b/src/backend/commands/dbcommands.c
+index 7e3fc59eafd..6f9e67b267a 100644
+--- a/src/backend/commands/dbcommands.c
++++ b/src/backend/commands/dbcommands.c
+@@ -499,7 +499,7 @@ CreateDirAndVersionFile(char *dbpath, Oid dbid, Oid tsid, bool isRedo)
+ 				 errmsg("could not create file \"%s\": %m", versionfile)));
+ 
+ 	/* Write PG_MAJORVERSION in the PG_VERSION file. */
+-	pgstat_report_wait_start(WAIT_EVENT_VERSION_FILE_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_VERSION_FILE_WRITE);
+ 	errno = 0;
+ 	if (write(fd, buf, nbytes) != nbytes)
+ 	{
+@@ -510,15 +510,15 @@ CreateDirAndVersionFile(char *dbpath, Oid dbid, Oid tsid, bool isRedo)
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write to file \"%s\": %m", versionfile)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_VERSION_FILE_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_VERSION_FILE_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 		ereport(data_sync_elevel(ERROR),
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m", versionfile)));
+ 	fsync_fname(dbpath, true);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	/* Close the version file. */
+ 	CloseTransientFile(fd);
+diff --git a/src/backend/commands/vacuum.c b/src/backend/commands/vacuum.c
+index d8c2f33c615..ef996c27053 100644
+--- a/src/backend/commands/vacuum.c
++++ b/src/backend/commands/vacuum.c
+@@ -2547,9 +2547,9 @@ vacuum_delay_point(bool is_analyze)
+ 		if (track_cost_delay_timing)
+ 			INSTR_TIME_SET_CURRENT(delay_start);
+ 
+-		pgstat_report_wait_start(WAIT_EVENT_VACUUM_DELAY);
++		pgstat_report_wait_start_timed(WAIT_EVENT_VACUUM_DELAY);
+ 		pg_usleep(msec * 1000);
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 
+ 		if (track_cost_delay_timing)
+ 		{
+diff --git a/src/backend/postmaster/autovacuum.c b/src/backend/postmaster/autovacuum.c
+index 60ebe828900..4deb4e0c3b1 100644
+--- a/src/backend/postmaster/autovacuum.c
++++ b/src/backend/postmaster/autovacuum.c
+@@ -502,7 +502,7 @@ AutoVacLauncherMain(const void *startup_data, size_t startup_data_len)
+ 		 * transaction.
+ 		 */
+ 		LWLockReleaseAll();
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		pgaio_error_cleanup();
+ 		UnlockBuffers();
+ 		/* this is probably dead code, but let's be safe: */
+diff --git a/src/backend/postmaster/auxprocess.c b/src/backend/postmaster/auxprocess.c
+index ad4bf4bd2a8..80f446ac431 100644
+--- a/src/backend/postmaster/auxprocess.c
++++ b/src/backend/postmaster/auxprocess.c
+@@ -137,5 +137,5 @@ ShutdownAuxiliaryProcess(int code, Datum arg)
+ {
+ 	LWLockReleaseAll();
+ 	ConditionVariableCancelSleep();
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ }
+diff --git a/src/backend/postmaster/bgwriter.c b/src/backend/postmaster/bgwriter.c
+index d364382303a..be58b27e66e 100644
+--- a/src/backend/postmaster/bgwriter.c
++++ b/src/backend/postmaster/bgwriter.c
+@@ -201,7 +201,7 @@ BackgroundWriterMain(const void *startup_data, size_t startup_data_len)
+ 		pg_usleep(1000000L);
+ 
+ 		/* Report wait end here, when there is no further possibility of wait */
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 	}
+ 
+ 	/* We can now handle ereport(ERROR) */
+diff --git a/src/backend/postmaster/checkpointer.c b/src/backend/postmaster/checkpointer.c
+index 580c7944119..a0e8830bfc8 100644
+--- a/src/backend/postmaster/checkpointer.c
++++ b/src/backend/postmaster/checkpointer.c
+@@ -302,7 +302,7 @@ CheckpointerMain(const void *startup_data, size_t startup_data_len)
+ 		 */
+ 		LWLockReleaseAll();
+ 		ConditionVariableCancelSleep();
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		pgaio_error_cleanup();
+ 		UnlockBuffers();
+ 		ReleaseAuxProcessResources(false);
+diff --git a/src/backend/postmaster/pgarch.c b/src/backend/postmaster/pgarch.c
+index 0f207ac0356..b642abcc954 100644
+--- a/src/backend/postmaster/pgarch.c
++++ b/src/backend/postmaster/pgarch.c
+@@ -571,7 +571,7 @@ pgarch_archiveXlog(char *xlog)
+ 		disable_all_timeouts(false);
+ 		LWLockReleaseAll();
+ 		ConditionVariableCancelSleep();
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		pgaio_error_cleanup();
+ 		ReleaseAuxProcessResources(false);
+ 		AtEOXact_Files(false);
+diff --git a/src/backend/postmaster/walsummarizer.c b/src/backend/postmaster/walsummarizer.c
+index ff246b07a21..c8ddda776e1 100644
+--- a/src/backend/postmaster/walsummarizer.c
++++ b/src/backend/postmaster/walsummarizer.c
+@@ -298,7 +298,7 @@ WalSummarizerMain(const void *startup_data, size_t startup_data_len)
+ 		/* Release resources we might have acquired. */
+ 		LWLockReleaseAll();
+ 		ConditionVariableCancelSleep();
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		pgaio_error_cleanup();
+ 		ReleaseAuxProcessResources(false);
+ 		AtEOXact_Files(false);
+diff --git a/src/backend/postmaster/walwriter.c b/src/backend/postmaster/walwriter.c
+index 5e4e28f4540..875b3d7333f 100644
+--- a/src/backend/postmaster/walwriter.c
++++ b/src/backend/postmaster/walwriter.c
+@@ -162,7 +162,7 @@ WalWriterMain(const void *startup_data, size_t startup_data_len)
+ 		 */
+ 		LWLockReleaseAll();
+ 		ConditionVariableCancelSleep();
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		pgaio_error_cleanup();
+ 		UnlockBuffers();
+ 		ReleaseAuxProcessResources(false);
+diff --git a/src/backend/replication/logical/reorderbuffer.c b/src/backend/replication/logical/reorderbuffer.c
+index ede117d339e..e4a8295eef7 100644
+--- a/src/backend/replication/logical/reorderbuffer.c
++++ b/src/backend/replication/logical/reorderbuffer.c
+@@ -4304,7 +4304,7 @@ ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
+ 	ondisk->size = sz;
+ 
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_REORDER_BUFFER_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_REORDER_BUFFER_WRITE);
+ 	if (write(fd, rb->outbuf, ondisk->size) != ondisk->size)
+ 	{
+ 		int			save_errno = errno;
+@@ -4318,7 +4318,7 @@ ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
+ 				 errmsg("could not write to data file for XID %u: %m",
+ 						txn->xid)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	/*
+ 	 * Keep the transaction's final_lsn up to date with each change we send to
+@@ -5427,9 +5427,9 @@ ApplyLogicalMappingFile(HTAB *tuplecid_data, const char *fname)
+ 		memset(&key, 0, sizeof(ReorderBufferTupleCidKey));
+ 
+ 		/* read all mappings till the end of the file */
+-		pgstat_report_wait_start(WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ);
++		pgstat_report_wait_start_timed(WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ);
+ 		readBytes = read(fd, &map, sizeof(LogicalRewriteMappingData));
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 
+ 		if (readBytes < 0)
+ 			ereport(ERROR,
+diff --git a/src/backend/replication/logical/snapbuild.c b/src/backend/replication/logical/snapbuild.c
+index de491ea0c4b..db32d0700d2 100644
+--- a/src/backend/replication/logical/snapbuild.c
++++ b/src/backend/replication/logical/snapbuild.c
+@@ -1657,7 +1657,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
+ 				 errmsg("could not open file \"%s\": %m", tmppath)));
+ 
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_SNAPBUILD_WRITE);
+ 	if ((write(fd, ondisk, needed_length)) != needed_length)
+ 	{
+ 		int			save_errno = errno;
+@@ -1670,7 +1670,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write to file \"%s\": %m", tmppath)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	/*
+ 	 * fsync the file before renaming so that even if we crash after this we
+@@ -1683,7 +1683,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
+ 	 * some noticeable overhead since it's performed synchronously during
+ 	 * decoding?
+ 	 */
+-	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_SNAPBUILD_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 	{
+ 		int			save_errno = errno;
+@@ -1694,7 +1694,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (CloseTransientFile(fd) != 0)
+ 		ereport(ERROR,
+@@ -1940,9 +1940,9 @@ SnapBuildRestoreContents(int fd, void *dest, Size size, const char *path)
+ {
+ 	ssize_t		readBytes;
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_READ);
++	pgstat_report_wait_start_timed(WAIT_EVENT_SNAPBUILD_READ);
+ 	readBytes = read(fd, dest, size);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 	if (readBytes != size)
+ 	{
+ 		int			save_errno = errno;
+diff --git a/src/backend/replication/slot.c b/src/backend/replication/slot.c
+index 63ce6d27885..925d67d91e9 100644
+--- a/src/backend/replication/slot.c
++++ b/src/backend/replication/slot.c
+@@ -2582,12 +2582,12 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
+ 	FIN_CRC32C(cp.checksum);
+ 
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_REPLICATION_SLOT_WRITE);
+ 	if ((write(fd, &cp, sizeof(cp))) != sizeof(cp))
+ 	{
+ 		int			save_errno = errno;
+ 
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		CloseTransientFile(fd);
+ 		unlink(tmppath);
+ 		LWLockRelease(&slot->io_in_progress_lock);
+@@ -2600,15 +2600,15 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
+ 						tmppath)));
+ 		return;
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	/* fsync the temporary file */
+-	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_REPLICATION_SLOT_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 	{
+ 		int			save_errno = errno;
+ 
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		CloseTransientFile(fd);
+ 		unlink(tmppath);
+ 		LWLockRelease(&slot->io_in_progress_lock);
+@@ -2620,7 +2620,7 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
+ 						tmppath)));
+ 		return;
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (CloseTransientFile(fd) != 0)
+ 	{
+@@ -2724,13 +2724,13 @@ RestoreSlotFromDisk(const char *name)
+ 	 * Sync state file before we're reading from it. We might have crashed
+ 	 * while it wasn't synced yet and we shouldn't continue on that basis.
+ 	 */
+-	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 		ereport(PANIC,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m",
+ 						path)));
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	/* Also sync the parent directory */
+ 	START_CRIT_SECTION();
+@@ -2738,9 +2738,9 @@ RestoreSlotFromDisk(const char *name)
+ 	END_CRIT_SECTION();
+ 
+ 	/* read part of statefile that's guaranteed to be version independent */
+-	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_READ);
++	pgstat_report_wait_start_timed(WAIT_EVENT_REPLICATION_SLOT_READ);
+ 	readBytes = read(fd, &cp, ReplicationSlotOnDiskConstantSize);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 	if (readBytes != ReplicationSlotOnDiskConstantSize)
+ 	{
+ 		if (readBytes < 0)
+@@ -2777,11 +2777,11 @@ RestoreSlotFromDisk(const char *name)
+ 						path, cp.length)));
+ 
+ 	/* Now that we know the size, read the entire file */
+-	pgstat_report_wait_start(WAIT_EVENT_REPLICATION_SLOT_READ);
++	pgstat_report_wait_start_timed(WAIT_EVENT_REPLICATION_SLOT_READ);
+ 	readBytes = read(fd,
+ 					 (char *) &cp + ReplicationSlotOnDiskConstantSize,
+ 					 cp.length);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 	if (readBytes != cp.length)
+ 	{
+ 		if (readBytes < 0)
+diff --git a/src/backend/replication/walreceiver.c b/src/backend/replication/walreceiver.c
+index b93e699ba4b..e52c0544d6d 100644
+--- a/src/backend/replication/walreceiver.c
++++ b/src/backend/replication/walreceiver.c
+@@ -1029,9 +1029,9 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr, TimeLineID tli)
+ 		 */
+ 		start = pgstat_prepare_io_time(track_wal_io_timing);
+ 
+-		pgstat_report_wait_start(WAIT_EVENT_WAL_WRITE);
++		pgstat_report_wait_start_timed(WAIT_EVENT_WAL_WRITE);
+ 		byteswritten = pg_pwrite(recvFile, buf, segbytes, (pgoff_t) startoff);
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 
+ 		if (byteswritten <= 0)
+ 		{
+diff --git a/src/backend/replication/walsender.c b/src/backend/replication/walsender.c
+index e9331de3df5..8c925607f28 100644
+--- a/src/backend/replication/walsender.c
++++ b/src/backend/replication/walsender.c
+@@ -378,7 +378,7 @@ WalSndErrorCleanup(void)
+ {
+ 	LWLockReleaseAll();
+ 	ConditionVariableCancelSleep();
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 	pgaio_error_cleanup();
+ 
+ 	if (xlogreader != NULL && xlogreader->seg.ws_file >= 0)
+@@ -675,9 +675,9 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
+ 		PGAlignedBlock rbuf;
+ 		ssize_t		nread;
+ 
+-		pgstat_report_wait_start(WAIT_EVENT_WALSENDER_TIMELINE_HISTORY_READ);
++		pgstat_report_wait_start_timed(WAIT_EVENT_WALSENDER_TIMELINE_HISTORY_READ);
+ 		nread = read(fd, rbuf.data, sizeof(rbuf));
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		if (nread < 0)
+ 			ereport(ERROR,
+ 					(errcode_for_file_access(),
+diff --git a/src/backend/storage/aio/aio_io.c b/src/backend/storage/aio/aio_io.c
+index 132868130e7..81c141a59d3 100644
+--- a/src/backend/storage/aio/aio_io.c
++++ b/src/backend/storage/aio/aio_io.c
+@@ -124,18 +124,18 @@ pgaio_io_perform_synchronously(PgAioHandle *ioh)
+ 	switch ((PgAioOp) ioh->op)
+ 	{
+ 		case PGAIO_OP_READV:
+-			pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_READ);
++			pgstat_report_wait_start_timed(WAIT_EVENT_DATA_FILE_READ);
+ 			result = pg_preadv(ioh->op_data.read.fd, iov,
+ 							   ioh->op_data.read.iov_length,
+ 							   ioh->op_data.read.offset);
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 			break;
+ 		case PGAIO_OP_WRITEV:
+-			pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_WRITE);
++			pgstat_report_wait_start_timed(WAIT_EVENT_DATA_FILE_WRITE);
+ 			result = pg_pwritev(ioh->op_data.write.fd, iov,
+ 								ioh->op_data.write.iov_length,
+ 								ioh->op_data.write.offset);
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 			break;
+ 		case PGAIO_OP_INVALID:
+ 			elog(ERROR, "trying to execute invalid IO operation");
+diff --git a/src/backend/storage/aio/method_io_uring.c b/src/backend/storage/aio/method_io_uring.c
+index 3ffe5061a20..4e69be74e39 100644
+--- a/src/backend/storage/aio/method_io_uring.c
++++ b/src/backend/storage/aio/method_io_uring.c
+@@ -436,9 +436,9 @@ pgaio_uring_submit(uint16 num_staged_ios, PgAioHandle **staged_ios)
+ 	{
+ 		int			ret;
+ 
+-		pgstat_report_wait_start(WAIT_EVENT_AIO_IO_URING_SUBMIT);
++		pgstat_report_wait_start_timed(WAIT_EVENT_AIO_IO_URING_SUBMIT);
+ 		ret = io_uring_submit(uring_instance);
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 
+ 		if (ret == -EINTR)
+ 		{
+@@ -609,9 +609,9 @@ pgaio_uring_wait_one(PgAioHandle *ioh, uint64 ref_generation)
+ 			struct io_uring_cqe *cqes;
+ 
+ 			/* need to wait in the kernel */
+-			pgstat_report_wait_start(WAIT_EVENT_AIO_IO_URING_EXECUTION);
++			pgstat_report_wait_start_timed(WAIT_EVENT_AIO_IO_URING_EXECUTION);
+ 			ret = io_uring_wait_cqes(&owner_context->io_uring_ring, &cqes, 1, NULL, NULL);
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 
+ 			if (ret == -EINTR)
+ 			{
+diff --git a/src/backend/storage/buffer/bufmgr.c b/src/backend/storage/buffer/bufmgr.c
+index 5c82865a084..1070f72daf4 100644
+--- a/src/backend/storage/buffer/bufmgr.c
++++ b/src/backend/storage/buffer/bufmgr.c
+@@ -5996,7 +5996,7 @@ BufferLockAcquire(Buffer buffer, BufferDesc *buf_hdr, BufferLockMode mode)
+ 				pg_unreachable();
+ 
+ 		}
+-		pgstat_report_wait_start(wait_event);
++		pgstat_report_wait_start_timed(wait_event);
+ 
+ 		/*
+ 		 * Wait until awakened.
+@@ -6014,7 +6014,7 @@ BufferLockAcquire(Buffer buffer, BufferDesc *buf_hdr, BufferLockMode mode)
+ 			extraWaits++;
+ 		}
+ 
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 
+ 		/* Retrying, allow BufferLockReleaseSub to release waiters again. */
+ 		pg_atomic_fetch_and_u64(&buf_hdr->state, ~BM_LOCK_WAKE_IN_PROGRESS);
+diff --git a/src/backend/storage/file/copydir.c b/src/backend/storage/file/copydir.c
+index ee42c796f77..33a0d0dadd9 100644
+--- a/src/backend/storage/file/copydir.c
++++ b/src/backend/storage/file/copydir.c
+@@ -193,9 +193,9 @@ copy_file(const char *fromfile, const char *tofile)
+ 			flush_offset = offset;
+ 		}
+ 
+-		pgstat_report_wait_start(WAIT_EVENT_COPY_FILE_READ);
++		pgstat_report_wait_start_timed(WAIT_EVENT_COPY_FILE_READ);
+ 		nbytes = read(srcfd, buffer, COPY_BUF_SIZE);
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		if (nbytes < 0)
+ 			ereport(ERROR,
+ 					(errcode_for_file_access(),
+@@ -203,7 +203,7 @@ copy_file(const char *fromfile, const char *tofile)
+ 		if (nbytes == 0)
+ 			break;
+ 		errno = 0;
+-		pgstat_report_wait_start(WAIT_EVENT_COPY_FILE_WRITE);
++		pgstat_report_wait_start_timed(WAIT_EVENT_COPY_FILE_WRITE);
+ 		if (write(dstfd, buffer, nbytes) != nbytes)
+ 		{
+ 			/* if write didn't set errno, assume problem is no disk space */
+@@ -213,7 +213,7 @@ copy_file(const char *fromfile, const char *tofile)
+ 					(errcode_for_file_access(),
+ 					 errmsg("could not write to file \"%s\": %m", tofile)));
+ 		}
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 	}
+ 
+ 	if (offset > flush_offset)
+@@ -268,14 +268,14 @@ clone_file(const char *fromfile, const char *tofile)
+ 		 * time to time if it falls back to a slow copy.
+ 		 */
+ 		CHECK_FOR_INTERRUPTS();
+-		pgstat_report_wait_start(WAIT_EVENT_COPY_FILE_COPY);
++		pgstat_report_wait_start_timed(WAIT_EVENT_COPY_FILE_COPY);
+ 		nbytes = copy_file_range(srcfd, NULL, dstfd, NULL, 1024 * 1024, 0);
+ 		if (nbytes < 0 && errno != EINTR)
+ 			ereport(ERROR,
+ 					(errcode_for_file_access(),
+ 					 errmsg("could not clone file \"%s\" to \"%s\": %m",
+ 							fromfile, tofile)));
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 	}
+ 	while (nbytes != 0);
+ 
+diff --git a/src/backend/storage/file/fd.c b/src/backend/storage/file/fd.c
+index 190c9974494..4360f2f81e4 100644
+--- a/src/backend/storage/file/fd.c
++++ b/src/backend/storage/file/fd.c
+@@ -2081,10 +2081,10 @@ FilePrefetch(File file, pgoff_t offset, pgoff_t amount, uint32 wait_event_info)
+ 			return returnCode;
+ 
+ retry:
+-		pgstat_report_wait_start(wait_event_info);
++		pgstat_report_wait_start_timed(wait_event_info);
+ 		returnCode = posix_fadvise(VfdCache[file].fd, offset, amount,
+ 								   POSIX_FADV_WILLNEED);
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 
+ 		if (returnCode == EINTR)
+ 			goto retry;
+@@ -2106,9 +2106,9 @@ retry:
+ 
+ 		ra.ra_offset = offset;
+ 		ra.ra_count = amount;
+-		pgstat_report_wait_start(wait_event_info);
++		pgstat_report_wait_start_timed(wait_event_info);
+ 		returnCode = fcntl(VfdCache[file].fd, F_RDADVISE, &ra);
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		if (returnCode != -1)
+ 			return 0;
+ 		else
+@@ -2140,9 +2140,9 @@ FileWriteback(File file, pgoff_t offset, pgoff_t nbytes, uint32 wait_event_info)
+ 	if (returnCode < 0)
+ 		return;
+ 
+-	pgstat_report_wait_start(wait_event_info);
++	pgstat_report_wait_start_timed(wait_event_info);
+ 	pg_flush_data(VfdCache[file].fd, offset, nbytes);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ }
+ 
+ ssize_t
+@@ -2166,9 +2166,9 @@ FileReadV(File file, const struct iovec *iov, int iovcnt, pgoff_t offset,
+ 	vfdP = &VfdCache[file];
+ 
+ retry:
+-	pgstat_report_wait_start(wait_event_info);
++	pgstat_report_wait_start_timed(wait_event_info);
+ 	returnCode = pg_preadv(vfdP->fd, iov, iovcnt, offset);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (returnCode < 0)
+ 	{
+@@ -2276,9 +2276,9 @@ FileWriteV(File file, const struct iovec *iov, int iovcnt, pgoff_t offset,
+ 	}
+ 
+ retry:
+-	pgstat_report_wait_start(wait_event_info);
++	pgstat_report_wait_start_timed(wait_event_info);
+ 	returnCode = pg_pwritev(vfdP->fd, iov, iovcnt, offset);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (returnCode >= 0)
+ 	{
+@@ -2346,9 +2346,9 @@ FileSync(File file, uint32 wait_event_info)
+ 	if (returnCode < 0)
+ 		return returnCode;
+ 
+-	pgstat_report_wait_start(wait_event_info);
++	pgstat_report_wait_start_timed(wait_event_info);
+ 	returnCode = pg_fsync(VfdCache[file].fd);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	return returnCode;
+ }
+@@ -2375,9 +2375,9 @@ FileZero(File file, pgoff_t offset, pgoff_t amount, uint32 wait_event_info)
+ 	if (returnCode < 0)
+ 		return returnCode;
+ 
+-	pgstat_report_wait_start(wait_event_info);
++	pgstat_report_wait_start_timed(wait_event_info);
+ 	written = pg_pwrite_zeros(VfdCache[file].fd, amount, offset);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (written < 0)
+ 		return -1;
+@@ -2421,9 +2421,9 @@ FileFallocate(File file, pgoff_t offset, pgoff_t amount, uint32 wait_event_info)
+ 		return -1;
+ 
+ retry:
+-	pgstat_report_wait_start(wait_event_info);
++	pgstat_report_wait_start_timed(wait_event_info);
+ 	returnCode = posix_fallocate(VfdCache[file].fd, offset, amount);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (returnCode == 0)
+ 		return 0;
+@@ -2475,9 +2475,9 @@ FileTruncate(File file, pgoff_t offset, uint32 wait_event_info)
+ 	if (returnCode < 0)
+ 		return returnCode;
+ 
+-	pgstat_report_wait_start(wait_event_info);
++	pgstat_report_wait_start_timed(wait_event_info);
+ 	returnCode = pg_ftruncate(VfdCache[file].fd, offset);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (returnCode == 0 && VfdCache[file].fileSize > offset)
+ 	{
+diff --git a/src/backend/storage/ipc/dsm_impl.c b/src/backend/storage/ipc/dsm_impl.c
+index e8c07805f59..4a0270e0672 100644
+--- a/src/backend/storage/ipc/dsm_impl.c
++++ b/src/backend/storage/ipc/dsm_impl.c
+@@ -364,7 +364,7 @@ dsm_impl_posix_resize(int fd, off_t size)
+ 	if (IsUnderPostmaster)
+ 		sigprocmask(SIG_SETMASK, &BlockSig, &save_sigmask);
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_DSM_ALLOCATE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_DSM_ALLOCATE);
+ #if defined(HAVE_POSIX_FALLOCATE) && defined(__linux__)
+ 
+ 	/*
+@@ -397,7 +397,7 @@ dsm_impl_posix_resize(int fd, off_t size)
+ 		rc = ftruncate(fd, size);
+ 	} while (rc < 0 && errno == EINTR);
+ #endif
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (IsUnderPostmaster)
+ 	{
+@@ -889,12 +889,12 @@ dsm_impl_mmap(dsm_op op, dsm_handle handle, Size request_size,
+ 
+ 			if (goal > ZBUFFER_SIZE)
+ 				goal = ZBUFFER_SIZE;
+-			pgstat_report_wait_start(WAIT_EVENT_DSM_FILL_ZERO_WRITE);
++			pgstat_report_wait_start_timed(WAIT_EVENT_DSM_FILL_ZERO_WRITE);
+ 			if (write(fd, zbuffer, goal) == goal)
+ 				remaining -= goal;
+ 			else
+ 				success = false;
+-			pgstat_report_wait_end();
++			pgstat_report_wait_end_timed();
+ 		}
+ 
+ 		if (!success)
+diff --git a/src/backend/storage/ipc/procarray.c b/src/backend/storage/ipc/procarray.c
+index b7e03134ed8..a388d47d58d 100644
+--- a/src/backend/storage/ipc/procarray.c
++++ b/src/backend/storage/ipc/procarray.c
+@@ -816,7 +816,7 @@ ProcArrayGroupClearXid(PGPROC *proc, TransactionId latestXid)
+ 		int			extraWaits = 0;
+ 
+ 		/* Sleep until the leader clears our XID. */
+-		pgstat_report_wait_start(WAIT_EVENT_PROCARRAY_GROUP_UPDATE);
++		pgstat_report_wait_start_timed(WAIT_EVENT_PROCARRAY_GROUP_UPDATE);
+ 		for (;;)
+ 		{
+ 			/* acts as a read barrier */
+@@ -825,7 +825,7 @@ ProcArrayGroupClearXid(PGPROC *proc, TransactionId latestXid)
+ 				break;
+ 			extraWaits++;
+ 		}
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 
+ 		Assert(pg_atomic_read_u32(&proc->procArrayGroupNext) == INVALID_PROC_NUMBER);
+ 
+diff --git a/src/backend/storage/ipc/standby.c b/src/backend/storage/ipc/standby.c
+index 7f011e04990..d16d55ba8c3 100644
+--- a/src/backend/storage/ipc/standby.c
++++ b/src/backend/storage/ipc/standby.c
+@@ -246,9 +246,9 @@ WaitExceedsMaxStandbyDelay(uint32 wait_event_info)
+ 	/*
+ 	 * Sleep a bit (this is essential to avoid busy-waiting).
+ 	 */
+-	pgstat_report_wait_start(wait_event_info);
++	pgstat_report_wait_start_timed(wait_event_info);
+ 	pg_usleep(standbyWait_us);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	/*
+ 	 * Progressively increase the sleep times, but not to more than 1s, since
+diff --git a/src/backend/storage/ipc/waiteventset.c b/src/backend/storage/ipc/waiteventset.c
+index 5c807c3b274..b036e9764b8 100644
+--- a/src/backend/storage/ipc/waiteventset.c
++++ b/src/backend/storage/ipc/waiteventset.c
+@@ -1061,7 +1061,7 @@ WaitEventSetWait(WaitEventSet *set, long timeout,
+ 	else
+ 		INSTR_TIME_SET_ZERO(start_time);
+ 
+-	pgstat_report_wait_start(wait_event_info);
++	pgstat_report_wait_start_timed(wait_event_info);
+ 
+ #ifndef WIN32
+ 	waiting = true;
+@@ -1164,7 +1164,7 @@ WaitEventSetWait(WaitEventSet *set, long timeout,
+ 	waiting = false;
+ #endif
+ 
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	return returned_events;
+ }
+diff --git a/src/backend/storage/lmgr/lwlock.c b/src/backend/storage/lmgr/lwlock.c
+index 82a1d4d2e26..df4b82085e4 100644
+--- a/src/backend/storage/lmgr/lwlock.c
++++ b/src/backend/storage/lmgr/lwlock.c
+@@ -690,7 +690,7 @@ LWLockInitialize(LWLock *lock, int tranche_id)
+ static inline void
+ LWLockReportWaitStart(LWLock *lock)
+ {
+-	pgstat_report_wait_start(PG_WAIT_LWLOCK | lock->tranche);
++	pgstat_report_wait_start_timed(PG_WAIT_LWLOCK | lock->tranche);
+ }
+ 
+ /*
+@@ -699,7 +699,7 @@ LWLockReportWaitStart(LWLock *lock)
+ static inline void
+ LWLockReportWaitEnd(void)
+ {
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ }
+ 
+ /*
+diff --git a/src/backend/storage/lmgr/s_lock.c b/src/backend/storage/lmgr/s_lock.c
+index 6df568eccb3..96ad507c43e 100644
+--- a/src/backend/storage/lmgr/s_lock.c
++++ b/src/backend/storage/lmgr/s_lock.c
+@@ -145,9 +145,9 @@ perform_spin_delay(SpinDelayStatus *status)
+ 		 * We might want to report something more granular at some point, but
+ 		 * this is better than nothing.
+ 		 */
+-		pgstat_report_wait_start(WAIT_EVENT_SPIN_DELAY);
++		pgstat_report_wait_start_timed(WAIT_EVENT_SPIN_DELAY);
+ 		pg_usleep(status->cur_delay);
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 
+ #if defined(S_LOCK_TEST)
+ 		fprintf(stdout, "*");
+diff --git a/src/backend/utils/cache/relmapper.c b/src/backend/utils/cache/relmapper.c
+index ca7f1b69007..235c4da0ff8 100644
+--- a/src/backend/utils/cache/relmapper.c
++++ b/src/backend/utils/cache/relmapper.c
+@@ -820,7 +820,7 @@ read_relmap_file(RelMapFile *map, char *dbpath, bool lock_held, int elevel)
+ 						mapfilename)));
+ 
+ 	/* Now read the data. */
+-	pgstat_report_wait_start(WAIT_EVENT_RELATION_MAP_READ);
++	pgstat_report_wait_start_timed(WAIT_EVENT_RELATION_MAP_READ);
+ 	r = read(fd, map, sizeof(RelMapFile));
+ 	if (r != sizeof(RelMapFile))
+ 	{
+@@ -834,7 +834,7 @@ read_relmap_file(RelMapFile *map, char *dbpath, bool lock_held, int elevel)
+ 					 errmsg("could not read file \"%s\": read %zd of %zu",
+ 							mapfilename, r, sizeof(RelMapFile))));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	if (CloseTransientFile(fd) != 0)
+ 		ereport(elevel,
+@@ -937,7 +937,7 @@ write_relmap_file(RelMapFile *newmap, bool write_wal, bool send_sinval,
+ 						maptempfilename)));
+ 
+ 	/* Write new data to the file. */
+-	pgstat_report_wait_start(WAIT_EVENT_RELATION_MAP_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_RELATION_MAP_WRITE);
+ 	if (write(fd, newmap, sizeof(RelMapFile)) != sizeof(RelMapFile))
+ 	{
+ 		/* if write didn't set errno, assume problem is no disk space */
+@@ -948,7 +948,7 @@ write_relmap_file(RelMapFile *newmap, bool write_wal, bool send_sinval,
+ 				 errmsg("could not write file \"%s\": %m",
+ 						maptempfilename)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	/* And close the file. */
+ 	if (CloseTransientFile(fd) != 0)
+@@ -986,9 +986,9 @@ write_relmap_file(RelMapFile *newmap, bool write_wal, bool send_sinval,
+ 	 * NB: Although we instruct durable_rename() to use ERROR, we will often
+ 	 * be in a critical section at this point; if so, ERROR will become PANIC.
+ 	 */
+-	pgstat_report_wait_start(WAIT_EVENT_RELATION_MAP_REPLACE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_RELATION_MAP_REPLACE);
+ 	durable_rename(maptempfilename, mapfilename, ERROR);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+ 	/*
+ 	 * Now that the file is safely on disk, send sinval message to let other
+diff --git a/src/backend/utils/init/miscinit.c b/src/backend/utils/init/miscinit.c
+index eddce1ce33f..55ce9fdeaec 100644
+--- a/src/backend/utils/init/miscinit.c
++++ b/src/backend/utils/init/miscinit.c
+@@ -1250,13 +1250,13 @@ CreateLockFile(const char *filename, bool amPostmaster,
+ 					 errmsg("could not open lock file \"%s\": %m",
+ 							filename)));
+ 		}
+-		pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_CREATE_READ);
++		pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_CREATE_READ);
+ 		if ((len = read(fd, buffer, sizeof(buffer) - 1)) < 0)
+ 			ereport(FATAL,
+ 					(errcode_for_file_access(),
+ 					 errmsg("could not read lock file \"%s\": %m",
+ 							filename)));
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		close(fd);
+ 
+ 		if (len == 0)
+@@ -1398,7 +1398,7 @@ CreateLockFile(const char *filename, bool amPostmaster,
+ 		strlcat(buffer, "\n", sizeof(buffer));
+ 
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_CREATE_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_CREATE_WRITE);
+ 	if (write(fd, buffer, strlen(buffer)) != strlen(buffer))
+ 	{
+ 		int			save_errno = errno;
+@@ -1411,9 +1411,9 @@ CreateLockFile(const char *filename, bool amPostmaster,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write lock file \"%s\": %m", filename)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 
+-	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_CREATE_SYNC);
++	pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_CREATE_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 	{
+ 		int			save_errno = errno;
+@@ -1425,7 +1425,7 @@ CreateLockFile(const char *filename, bool amPostmaster,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write lock file \"%s\": %m", filename)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 	if (close(fd) != 0)
+ 	{
+ 		int			save_errno = errno;
+@@ -1539,9 +1539,9 @@ AddToDataDirLockFile(int target_line, const char *str)
+ 						DIRECTORY_LOCK_FILE)));
+ 		return;
+ 	}
+-	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_ADDTODATADIR_READ);
++	pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_ADDTODATADIR_READ);
+ 	nread = read(fd, srcbuffer, sizeof(srcbuffer) - 1);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 	if (nread < 0)
+ 	{
+ 		ereport(LOG,
+@@ -1601,10 +1601,10 @@ AddToDataDirLockFile(int target_line, const char *str)
+ 	 */
+ 	len = strlen(destbuffer);
+ 	errno = 0;
+-	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_ADDTODATADIR_WRITE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_ADDTODATADIR_WRITE);
+ 	if (pg_pwrite(fd, destbuffer, len, 0) != len)
+ 	{
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ 		/* if write didn't set errno, assume problem is no disk space */
+ 		if (errno == 0)
+ 			errno = ENOSPC;
+@@ -1615,8 +1615,8 @@ AddToDataDirLockFile(int target_line, const char *str)
+ 		close(fd);
+ 		return;
+ 	}
+-	pgstat_report_wait_end();
+-	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_ADDTODATADIR_SYNC);
++	pgstat_report_wait_end_timed();
++	pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_ADDTODATADIR_SYNC);
+ 	if (pg_fsync(fd) != 0)
+ 	{
+ 		ereport(LOG,
+@@ -1624,7 +1624,7 @@ AddToDataDirLockFile(int target_line, const char *str)
+ 				 errmsg("could not write to file \"%s\": %m",
+ 						DIRECTORY_LOCK_FILE)));
+ 	}
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 	if (close(fd) != 0)
+ 	{
+ 		ereport(LOG,
+@@ -1681,9 +1681,9 @@ RecheckDataDirLockFile(void)
+ 				return true;
+ 		}
+ 	}
+-	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_RECHECKDATADIR_READ);
++	pgstat_report_wait_start_timed(WAIT_EVENT_LOCK_FILE_RECHECKDATADIR_READ);
+ 	len = read(fd, buffer, sizeof(buffer) - 1);
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ 	if (len < 0)
+ 	{
+ 		ereport(LOG,
+diff --git a/src/common/controldata_utils.c b/src/common/controldata_utils.c
+index 0e8e03c566c..bed1fb9127d 100644
+--- a/src/common/controldata_utils.c
++++ b/src/common/controldata_utils.c
+@@ -233,7 +233,7 @@ update_controlfile(const char *DataDir,
+ 
+ 	errno = 0;
+ #ifndef FRONTEND
+-	pgstat_report_wait_start(WAIT_EVENT_CONTROL_FILE_WRITE_UPDATE);
++	pgstat_report_wait_start_timed(WAIT_EVENT_CONTROL_FILE_WRITE_UPDATE);
+ #endif
+ 	if (write(fd, buffer, PG_CONTROL_FILE_SIZE) != PG_CONTROL_FILE_SIZE)
+ 	{
+@@ -251,19 +251,19 @@ update_controlfile(const char *DataDir,
+ #endif
+ 	}
+ #ifndef FRONTEND
+-	pgstat_report_wait_end();
++	pgstat_report_wait_end_timed();
+ #endif
+ 
+ 	if (do_sync)
+ 	{
+ #ifndef FRONTEND
+-		pgstat_report_wait_start(WAIT_EVENT_CONTROL_FILE_SYNC_UPDATE);
++		pgstat_report_wait_start_timed(WAIT_EVENT_CONTROL_FILE_SYNC_UPDATE);
+ 		if (pg_fsync(fd) != 0)
+ 			ereport(PANIC,
+ 					(errcode_for_file_access(),
+ 					 errmsg("could not fsync file \"%s\": %m",
+ 							ControlFilePath)));
+-		pgstat_report_wait_end();
++		pgstat_report_wait_end_timed();
+ #else
+ 		if (fsync(fd) != 0)
+ 			pg_fatal("could not fsync file \"%s\": %m", ControlFilePath);
+-- 
+2.49.0
+

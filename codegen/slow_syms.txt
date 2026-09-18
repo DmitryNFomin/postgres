@@ -1,0 +1,11 @@
+=== symbol table: pgstat_wait_event_hook_*_slow ===
+--- master ---
+(not found)
+--- v11 ---
+(not found)
+--- v11-wpb ---
+000000000015600c g     F .text	0000000000000029              pgstat_wait_event_hook_begin_slow
+0000000000156035 g     F .text	0000000000000032              pgstat_wait_event_hook_end_slow
+--- control ---
+00000000001554a8 g     F .text	0000000000000029              pgstat_wait_event_hook_begin_slow
+00000000001554d1 g     F .text	0000000000000032              pgstat_wait_event_hook_end_slow

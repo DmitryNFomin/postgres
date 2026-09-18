@@ -1,0 +1,321 @@
+
+/root/codegen/bin/control.postgres:     file format elf64-x86-64
+
+
+Disassembly of section .init:
+
+Disassembly of section .plt:
+
+Disassembly of section .plt.got:
+
+Disassembly of section .plt.sec:
+
+Disassembly of section .text:
+
+0000000000502590 <WaitEventSetWait>:
+  502590:	endbr64
+  502594:	push   r15
+  502596:	push   r14
+  502598:	mov    r14,rdi
+  50259b:	push   r13
+  50259d:	push   r12
+  50259f:	push   rbp
+  5025a0:	push   rbx
+  5025a1:	sub    rsp,0x58
+  5025a5:	mov    QWORD PTR [rsp],rsi
+  5025a9:	mov    QWORD PTR [rsp+0x10],rdx
+  5025ae:	mov    DWORD PTR [rsp+0x28],ecx
+  5025b2:	mov    rax,QWORD PTR fs:0x28
+  5025bb:	mov    QWORD PTR [rsp+0x48],rax
+  5025c0:	xor    eax,eax
+  5025c2:	test   rsi,rsi
+  5025c5:	js     502a00 <WaitEventSetWait+0x470>
+  5025cb:	cmp    BYTE PTR [rip+0x561356],0x0        # a63928 <timing_tsc_enabled>
+  5025d2:	je     502a5d <WaitEventSetWait+0x4cd>
+  5025d8:	rdtscp
+  5025db:	shl    rdx,0x20
+  5025df:	mov    DWORD PTR [rsp+0x30],ecx
+  5025e3:	or     rax,rdx
+  5025e6:	mov    QWORD PTR [rsp+0x8],rsi
+  5025eb:	mov    QWORD PTR [rsp+0x20],rax
+  5025f0:	mov    rax,QWORD PTR [rip+0x52ad31]        # a2d328 <my_wait_event_info>
+  5025f7:	mov    DWORD PTR [rax],r8d
+  5025fa:	mov    eax,DWORD PTR [rsp+0x28]
+  5025fe:	mov    DWORD PTR [rip+0x548ef0],0x1        # a4b4f8 <waiting>
+  502608:	sub    eax,0x1
+  50260b:	mov    DWORD PTR [rsp+0x2c],eax
+  50260f:	nop
+  502610:	mov    rax,QWORD PTR [r14+0x18]
+  502614:	test   rax,rax
+  502617:	je     5029b8 <WaitEventSetWait+0x428>
+  50261d:	mov    r15d,DWORD PTR [rax]
+  502620:	test   r15d,r15d
+  502623:	je     502948 <WaitEventSetWait+0x3b8>
+  502629:	mov    rdi,QWORD PTR [rsp+0x10]
+  50262e:	mov    DWORD PTR [rdi+0x8],0xffffffff
+  502635:	movsxd rax,DWORD PTR [r14+0x20]
+  502639:	add    rdi,0x18
+  50263d:	mov    DWORD PTR [rdi-0x18],eax
+  502640:	mov    r10,QWORD PTR [r14+0x10]
+  502644:	lea    rax,[rax+rax*2]
+  502648:	lea    rax,[r10+rax*8]
+  50264c:	mov    rax,QWORD PTR [rax+0x10]
+  502650:	mov    DWORD PTR [rdi-0x14],0x1
+  502657:	mov    QWORD PTR [rdi-0x8],rax
+  50265b:	mov    rax,QWORD PTR [r14+0x18]
+  50265f:	cmp    DWORD PTR [rsp+0x28],0x1
+  502664:	mov    QWORD PTR [rsp+0x10],rdi
+  502669:	mov    DWORD PTR [rax+0x4],0x0
+  502670:	je     502a2c <WaitEventSetWait+0x49c>
+  502676:	mov    QWORD PTR [rsp+0x8],0x0
+  50267f:	mov    ebp,DWORD PTR [rsp+0x2c]
+  502683:	xor    ecx,ecx
+  502685:	mov    r15d,0x1
+  50268b:	mov    QWORD PTR [rsp],0x0
+  502693:	mov    edx,DWORD PTR [r14+0xc]
+  502697:	mov    rsi,QWORD PTR [r14+0x30]
+  50269b:	mov    edi,DWORD PTR [r14+0x28]
+  50269f:	cmp    ebp,edx
+  5026a1:	cmovle edx,ebp
+  5026a4:	call   e7b20 <epoll_wait@plt>
+  5026a9:	test   eax,eax
+  5026ab:	js     502980 <WaitEventSetWait+0x3f0>
+  5026b1:	je     502a37 <WaitEventSetWait+0x4a7>
+  5026b7:	cdqe
+  5026b9:	mov    rbx,QWORD PTR [r14+0x30]
+  5026bd:	lea    r10,[rax+rax*2]
+  5026c1:	shl    r10,0x2
+  5026c5:	lea    rax,[rbx+r10*1]
+  5026c9:	cmp    rbx,rax
+  5026cc:	jae    50298e <WaitEventSetWait+0x3fe>
+  5026d2:	test   ebp,ebp
+  5026d4:	jle    50298e <WaitEventSetWait+0x3fe>
+  5026da:	mov    DWORD PTR [rsp+0x1c],r15d
+  5026df:	mov    r12,QWORD PTR [rsp+0x10]
+  5026e4:	mov    r15d,ebp
+  5026e7:	xor    r13d,r13d
+  5026ea:	mov    rbp,r10
+  5026ed:	jmp    50271d <WaitEventSetWait+0x18d>
+  5026ef:	nop
+  5026f0:	cmp    eax,0x10
+  5026f3:	jne    502888 <WaitEventSetWait+0x2f8>
+  5026f9:	test   BYTE PTR [rbx],0x19
+  5026fc:	jne    502910 <WaitEventSetWait+0x380>
+  502702:	nop    WORD PTR [rax+rax*1+0x0]
+  502708:	mov    rax,QWORD PTR [r14+0x30]
+  50270c:	add    rbx,0xc
+  502710:	add    rax,rbp
+  502713:	cmp    rbx,rax
+  502716:	jae    502790 <WaitEventSetWait+0x200>
+  502718:	cmp    r13d,r15d
+  50271b:	jge    502790 <WaitEventSetWait+0x200>
+  50271d:	mov    rdx,QWORD PTR [rbx+0x4]
+  502721:	mov    eax,DWORD PTR [rdx]
+  502723:	mov    DWORD PTR [r12],eax
+  502727:	mov    rax,QWORD PTR [rdx+0x10]
+  50272b:	mov    DWORD PTR [r12+0x4],0x0
+  502734:	mov    QWORD PTR [r12+0x10],rax
+  502739:	mov    eax,DWORD PTR [rdx+0x4]
+  50273c:	cmp    eax,0x1
+  50273f:	jne    5026f0 <WaitEventSetWait+0x160>
+  502741:	test   BYTE PTR [rbx],0x19
+  502744:	je     502708 <WaitEventSetWait+0x178>
+  502746:	call   502020 <drain>
+  50274b:	mov    rax,QWORD PTR [r14+0x18]
+  50274f:	test   rax,rax
+  502752:	je     502708 <WaitEventSetWait+0x178>
+  502754:	mov    edi,DWORD PTR [rax+0x4]
+  502757:	test   edi,edi
+  502759:	je     502708 <WaitEventSetWait+0x178>
+  50275b:	mov    esi,DWORD PTR [rax]
+  50275d:	test   esi,esi
+  50275f:	je     502708 <WaitEventSetWait+0x178>
+  502761:	add    rbx,0xc
+  502765:	add    r12,0x18
+  502769:	add    r13d,0x1
+  50276d:	movabs rax,0xffffffff00000001
+  502777:	mov    QWORD PTR [r12-0x14],rax
+  50277c:	mov    rax,QWORD PTR [r14+0x30]
+  502780:	add    rax,rbp
+  502783:	cmp    rbx,rax
+  502786:	jb     502718 <WaitEventSetWait+0x188>
+  502788:	nop    DWORD PTR [rax+rax*1+0x0]
+  502790:	mov    rax,QWORD PTR [r14+0x18]
+  502794:	mov    r15d,DWORD PTR [rsp+0x1c]
+  502799:	test   rax,rax
+  50279c:	je     5027ac <WaitEventSetWait+0x21c>
+  50279e:	mov    edx,DWORD PTR [rax+0x4]
+  5027a1:	test   edx,edx
+  5027a3:	je     5027ac <WaitEventSetWait+0x21c>
+  5027a5:	mov    DWORD PTR [rax+0x4],0x0
+  5027ac:	cmp    r13d,0xffffffff
+  5027b0:	je     502848 <WaitEventSetWait+0x2b8>
+  5027b6:	add    r15d,r13d
+  5027b9:	test   r15d,r15d
+  5027bc:	jne    502848 <WaitEventSetWait+0x2b8>
+  5027c2:	cmp    QWORD PTR [rsp],0x0
+  5027c7:	js     5029d0 <WaitEventSetWait+0x440>
+  5027cd:	cmp    BYTE PTR [rip+0x561154],0x0        # a63928 <timing_tsc_enabled>
+  5027d4:	je     5029de <WaitEventSetWait+0x44e>
+  5027da:	rdtscp
+  5027dd:	mov    DWORD PTR [rsp+0x30],ecx
+  5027e1:	shl    rdx,0x20
+  5027e5:	or     rax,rdx
+  5027e8:	mov    rsi,QWORD PTR [rsp+0x20]
+  5027ed:	mov    rdx,QWORD PTR [rip+0x56114c]        # a63940 <ticks_per_ns_scaled>
+  5027f4:	sub    rax,rsi
+  5027f7:	test   rdx,rdx
+  5027fa:	je     502816 <WaitEventSetWait+0x286>
+  5027fc:	xor    ecx,ecx
+  5027fe:	cmp    rax,QWORD PTR [rip+0x561133]        # a63938 <max_ticks_no_overflow>
+  502805:	jg     502a17 <WaitEventSetWait+0x487>
+  50280b:	imul   rax,rdx
+  50280f:	shr    rax,0xe
+  502813:	add    rax,rcx
+  502816:	pxor   xmm0,xmm0
+  50281a:	mov    rsi,QWORD PTR [rsp]
+  50281e:	cvtsi2sd xmm0,rax
+  502823:	divsd  xmm0,QWORD PTR [rip+0x279675]        # 77bea0 <__func__.6+0x190>
+  50282b:	cvttsd2si rax,xmm0
+  502830:	sub    rsi,rax
+  502833:	mov    QWORD PTR [rsp+0x8],rsi
+  502838:	test   rsi,rsi
+  50283b:	jg     502610 <WaitEventSetWait+0x80>
+  502841:	xor    r15d,r15d
+  502844:	nop    DWORD PTR [rax+0x0]
+  502848:	mov    rax,QWORD PTR [rip+0x52aad9]        # a2d328 <my_wait_event_info>
+  50284f:	mov    DWORD PTR [rip+0x548c9f],0x0        # a4b4f8 <waiting>
+  502859:	mov    DWORD PTR [rax],0x0
+  50285f:	mov    rax,QWORD PTR [rsp+0x48]
+  502864:	sub    rax,QWORD PTR fs:0x28
+  50286d:	jne    502a97 <WaitEventSetWait+0x507>
+  502873:	add    rsp,0x58
+  502877:	mov    eax,r15d
+  50287a:	pop    rbx
+  50287b:	pop    rbp
+  50287c:	pop    r12
+  50287e:	pop    r13
+  502880:	pop    r14
+  502882:	pop    r15
+  502884:	ret
+  502885:	nop    DWORD PTR [rax]
+  502888:	test   al,0x86
+  50288a:	je     502708 <WaitEventSetWait+0x178>
+  502890:	mov    ecx,eax
+  502892:	and    ecx,0x2
+  502895:	je     5028af <WaitEventSetWait+0x31f>
+  502897:	mov    ecx,DWORD PTR [rbx]
+  502899:	and    ecx,0x19
+  50289c:	je     5028af <WaitEventSetWait+0x31f>
+  50289e:	mov    DWORD PTR [r12+0x4],0x2
+  5028a7:	mov    eax,DWORD PTR [rdx+0x4]
+  5028aa:	mov    ecx,0x2
+  5028af:	test   al,0x4
+  5028b1:	je     5028f0 <WaitEventSetWait+0x360>
+  5028b3:	test   BYTE PTR [rbx],0x1c
+  5028b6:	je     5028f0 <WaitEventSetWait+0x360>
+  5028b8:	or     ecx,0x4
+  5028bb:	mov    DWORD PTR [r12+0x4],ecx
+  5028c0:	test   BYTE PTR [rdx+0x4],0x80
+  5028c4:	je     5028d6 <WaitEventSetWait+0x346>
+  5028c6:	test   DWORD PTR [rbx],0x2018
+  5028cc:	je     5028d6 <WaitEventSetWait+0x346>
+  5028ce:	or     cl,0x80
+  5028d1:	mov    DWORD PTR [r12+0x4],ecx
+  5028d6:	mov    eax,DWORD PTR [rdx+0x8]
+  5028d9:	add    r12,0x18
+  5028dd:	add    r13d,0x1
+  5028e1:	mov    DWORD PTR [r12-0x10],eax
+  5028e6:	jmp    502708 <WaitEventSetWait+0x178>
+  5028eb:	nop    DWORD PTR [rax+rax*1+0x0]
+  5028f0:	test   al,0x80
+  5028f2:	je     5028fc <WaitEventSetWait+0x36c>
+  5028f4:	test   DWORD PTR [rbx],0x2018
+  5028fa:	jne    5028ce <WaitEventSetWait+0x33e>
+  5028fc:	test   ecx,ecx
+  5028fe:	je     502708 <WaitEventSetWait+0x178>
+  502904:	jmp    5028d6 <WaitEventSetWait+0x346>
+  502906:	cs nop WORD PTR [rax+rax*1+0x0]
+  502910:	call   4f6a30 <PostmasterIsAliveInternal>
+  502915:	test   al,al
+  502917:	jne    502708 <WaitEventSetWait+0x178>
+  50291d:	cmp    BYTE PTR [r14+0x24],0x0
+  502922:	jne    502a9c <WaitEventSetWait+0x50c>
+  502928:	movabs rax,0xffffffff00000010
+  502932:	add    r12,0x18
+  502936:	add    r13d,0x1
+  50293a:	mov    QWORD PTR [r12-0x14],rax
+  50293f:	jmp    502708 <WaitEventSetWait+0x178>
+  502944:	nop    DWORD PTR [rax+0x0]
+  502948:	mov    DWORD PTR [rax+0x4],0x1
+  50294f:	lock add DWORD PTR [rsp],0x0
+  502954:	mov    rax,QWORD PTR [r14+0x18]
+  502958:	test   rax,rax
+  50295b:	je     502969 <WaitEventSetWait+0x3d9>
+  50295d:	mov    r15d,DWORD PTR [rax]
+  502960:	test   r15d,r15d
+  502963:	jne    502629 <WaitEventSetWait+0x99>
+  502969:	mov    ecx,DWORD PTR [rsp+0x8]
+  50296d:	mov    ebp,DWORD PTR [rsp+0x28]
+  502971:	jmp    502693 <WaitEventSetWait+0x103>
+  502976:	cs nop WORD PTR [rax+rax*1+0x0]
+  502980:	call   e7a30 <__errno_location@plt>
+  502985:	cmp    DWORD PTR [rax],0x4
+  502988:	jne    14fdf3 <WaitEventSetWait.cold>
+  50298e:	mov    rax,QWORD PTR [r14+0x18]
+  502992:	test   rax,rax
+  502995:	je     5027b9 <WaitEventSetWait+0x229>
+  50299b:	mov    ecx,DWORD PTR [rax+0x4]
+  50299e:	test   ecx,ecx
+  5029a0:	je     5027b9 <WaitEventSetWait+0x229>
+  5029a6:	mov    DWORD PTR [rax+0x4],0x0
+  5029ad:	jmp    5027b9 <WaitEventSetWait+0x229>
+  5029b2:	nop    WORD PTR [rax+rax*1+0x0]
+  5029b8:	mov    ecx,DWORD PTR [rsp+0x8]
+  5029bc:	mov    ebp,DWORD PTR [rsp+0x28]
+  5029c0:	xor    r15d,r15d
+  5029c3:	jmp    502693 <WaitEventSetWait+0x103>
+  5029c8:	nop    DWORD PTR [rax+rax*1+0x0]
+  5029d0:	test   r15d,r15d
+  5029d3:	je     502610 <WaitEventSetWait+0x80>
+  5029d9:	jmp    502848 <WaitEventSetWait+0x2b8>
+  5029de:	lea    rsi,[rsp+0x30]
+  5029e3:	mov    edi,0x1
+  5029e8:	call   e7220 <clock_gettime@plt>
+  5029ed:	imul   rax,QWORD PTR [rsp+0x30],0x3b9aca00
+  5029f6:	add    rax,QWORD PTR [rsp+0x38]
+  5029fb:	jmp    5027e8 <WaitEventSetWait+0x258>
+  502a00:	mov    QWORD PTR [rsp+0x20],0x0
+  502a09:	mov    QWORD PTR [rsp+0x8],0xffffffffffffffff
+  502a12:	jmp    5025f0 <WaitEventSetWait+0x60>
+  502a17:	mov    rcx,rax
+  502a1a:	and    eax,0x3fff
+  502a1f:	sar    rcx,0xe
+  502a23:	imul   rcx,rdx
+  502a27:	jmp    50280b <WaitEventSetWait+0x27b>
+  502a2c:	mov    r15d,0x1
+  502a32:	jmp    502848 <WaitEventSetWait+0x2b8>
+  502a37:	mov    rax,QWORD PTR [r14+0x18]
+  502a3b:	test   rax,rax
+  502a3e:	je     502848 <WaitEventSetWait+0x2b8>
+  502a44:	mov    r8d,DWORD PTR [rax+0x4]
+  502a48:	test   r8d,r8d
+  502a4b:	je     502848 <WaitEventSetWait+0x2b8>
+  502a51:	mov    DWORD PTR [rax+0x4],0x0
+  502a58:	jmp    502848 <WaitEventSetWait+0x2b8>
+  502a5d:	lea    rsi,[rsp+0x30]
+  502a62:	mov    edi,0x1
+  502a67:	mov    DWORD PTR [rsp+0x1c],r8d
+  502a6c:	call   e7220 <clock_gettime@plt>
+  502a71:	mov    rax,QWORD PTR [rsp]
+  502a75:	mov    r8d,DWORD PTR [rsp+0x1c]
+  502a7a:	imul   r15,QWORD PTR [rsp+0x30],0x3b9aca00
+  502a83:	add    r15,QWORD PTR [rsp+0x38]
+  502a88:	mov    QWORD PTR [rsp+0x20],r15
+  502a8d:	mov    QWORD PTR [rsp+0x8],rax
+  502a92:	jmp    5025f0 <WaitEventSetWait+0x60>
+  502a97:	call   e7a70 <__stack_chk_fail@plt>
+  502a9c:	mov    edi,0x1
+  502aa1:	call   4f5d80 <proc_exit>
+
+Disassembly of section .fini:

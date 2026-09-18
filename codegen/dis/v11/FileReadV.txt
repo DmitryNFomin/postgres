@@ -1,0 +1,94 @@
+
+/root/codegen/bin/v11.postgres:     file format elf64-x86-64
+
+
+Disassembly of section .init:
+
+Disassembly of section .plt:
+
+Disassembly of section .plt.got:
+
+Disassembly of section .plt.sec:
+
+Disassembly of section .text:
+
+00000000004f03b0 <FileReadV>:
+  4f03b0:	endbr64
+  4f03b4:	push   r15
+  4f03b6:	movsxd r15,edi
+  4f03b9:	push   r14
+  4f03bb:	mov    edi,r15d
+  4f03be:	mov    r14,rcx
+  4f03c1:	push   r13
+  4f03c3:	mov    r13d,r8d
+  4f03c6:	push   r12
+  4f03c8:	mov    r12d,edx
+  4f03cb:	push   rbp
+  4f03cc:	mov    rbp,rsi
+  4f03cf:	push   rbx
+  4f03d0:	sub    rsp,0x8
+  4f03d4:	call   4ef2d0 <FileAccess>
+  4f03d9:	movsxd rbx,eax
+  4f03dc:	test   rbx,rbx
+  4f03df:	js     4f04c0 <FileReadV+0x110>
+  4f03e5:	lea    rax,[r15*8+0x0]
+  4f03ed:	mov    rdx,QWORD PTR [rip+0x55d8ec]        # a4dce0 <VfdCache>
+  4f03f4:	sub    rax,r15
+  4f03f7:	lea    r15,[rdx+rax*8]
+  4f03fb:	jmp    4f0464 <FileReadV+0xb4>
+  4f03fd:	nop    DWORD PTR [rax]
+  4f0400:	mov    rdx,QWORD PTR [rbp+0x8]
+  4f0404:	mov    rsi,QWORD PTR [rbp+0x0]
+  4f0408:	mov    rcx,r14
+  4f040b:	call   e7760 <pread@plt>
+  4f0410:	mov    rbx,rax
+  4f0413:	mov    rax,QWORD PTR [rip+0x57051e]        # a60938 <wait_event_end_hook>
+  4f041a:	test   rax,rax
+  4f041d:	je     4f0448 <FileReadV+0x98>
+  4f041f:	mov    edx,DWORD PTR [rip+0x57050b]        # a60930 <wait_event_hook_depth>
+  4f0425:	test   edx,edx
+  4f0427:	jne    4f0448 <FileReadV+0x98>
+  4f0429:	mov    rdx,QWORD PTR [rip+0x53fef8]        # a30328 <my_wait_event_info>
+  4f0430:	mov    edi,DWORD PTR [rdx]
+  4f0432:	mov    DWORD PTR [rip+0x5704f4],0x1        # a60930 <wait_event_hook_depth>
+  4f043c:	call   rax
+  4f043e:	mov    DWORD PTR [rip+0x5704e8],0x0        # a60930 <wait_event_hook_depth>
+  4f0448:	mov    rax,QWORD PTR [rip+0x53fed9]        # a30328 <my_wait_event_info>
+  4f044f:	mov    DWORD PTR [rax],0x0
+  4f0455:	test   rbx,rbx
+  4f0458:	jns    4f04c0 <FileReadV+0x110>
+  4f045a:	call   e7a30 <__errno_location@plt>
+  4f045f:	cmp    DWORD PTR [rax],0x4
+  4f0462:	jne    4f04c0 <FileReadV+0x110>
+  4f0464:	mov    rax,QWORD PTR [rip+0x53febd]        # a30328 <my_wait_event_info>
+  4f046b:	mov    DWORD PTR [rax],r13d
+  4f046e:	mov    rax,QWORD PTR [rip+0x5704cb]        # a60940 <wait_event_begin_hook>
+  4f0475:	test   rax,rax
+  4f0478:	je     4f049d <FileReadV+0xed>
+  4f047a:	mov    ecx,DWORD PTR [rip+0x5704b0]        # a60930 <wait_event_hook_depth>
+  4f0480:	test   ecx,ecx
+  4f0482:	jne    4f049d <FileReadV+0xed>
+  4f0484:	mov    DWORD PTR [rip+0x5704a2],0x1        # a60930 <wait_event_hook_depth>
+  4f048e:	mov    edi,r13d
+  4f0491:	call   rax
+  4f0493:	mov    DWORD PTR [rip+0x570493],0x0        # a60930 <wait_event_hook_depth>
+  4f049d:	mov    edi,DWORD PTR [r15]
+  4f04a0:	cmp    r12d,0x1
+  4f04a4:	je     4f0400 <FileReadV+0x50>
+  4f04aa:	mov    rcx,r14
+  4f04ad:	mov    edx,r12d
+  4f04b0:	mov    rsi,rbp
+  4f04b3:	call   e7fa0 <preadv@plt>
+  4f04b8:	mov    rbx,rax
+  4f04bb:	jmp    4f0413 <FileReadV+0x63>
+  4f04c0:	add    rsp,0x8
+  4f04c4:	mov    rax,rbx
+  4f04c7:	pop    rbx
+  4f04c8:	pop    rbp
+  4f04c9:	pop    r12
+  4f04cb:	pop    r13
+  4f04cd:	pop    r14
+  4f04cf:	pop    r15
+  4f04d1:	ret
+
+Disassembly of section .fini:

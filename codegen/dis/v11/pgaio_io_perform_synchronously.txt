@@ -1,0 +1,127 @@
+
+/root/codegen/bin/v11.postgres:     file format elf64-x86-64
+
+
+Disassembly of section .init:
+
+Disassembly of section .plt:
+
+Disassembly of section .plt.got:
+
+Disassembly of section .plt.sec:
+
+Disassembly of section .text:
+
+00000000004de470 <pgaio_io_perform_synchronously>:
+  4de470:	endbr64
+  4de474:	push   rbp
+  4de475:	push   rbx
+  4de476:	mov    rbx,rdi
+  4de479:	sub    rsp,0x8
+  4de47d:	mov    eax,DWORD PTR [rdi+0x5c]
+  4de480:	mov    rdx,QWORD PTR [rip+0x56e209]        # a4c690 <pgaio_ctl>
+  4de487:	shl    rax,0x4
+  4de48b:	add    rax,QWORD PTR [rdx+0x18]
+  4de48f:	mov    rbp,rax
+  4de492:	mov    eax,DWORD PTR [rip+0x587274]        # a6570c <CritSectionCount>
+  4de498:	add    eax,0x1
+  4de49b:	mov    DWORD PTR [rip+0x58726b],eax        # a6570c <CritSectionCount>
+  4de4a1:	movzx  eax,BYTE PTR [rdi+0x2]
+  4de4a5:	cmp    al,0x2
+  4de4a7:	je     4de520 <pgaio_io_perform_synchronously+0xb0>
+  4de4a9:	ja     4de5e0 <pgaio_io_perform_synchronously+0x170>
+  4de4af:	test   al,al
+  4de4b1:	je     14d12e <pgaio_io_perform_synchronously.cold>
+  4de4b7:	mov    rax,QWORD PTR [rip+0x551e6a]        # a30328 <my_wait_event_info>
+  4de4be:	mov    DWORD PTR [rax],0xa000017
+  4de4c4:	mov    rax,QWORD PTR [rip+0x582475]        # a60940 <wait_event_begin_hook>
+  4de4cb:	test   rax,rax
+  4de4ce:	je     4de4f5 <pgaio_io_perform_synchronously+0x85>
+  4de4d0:	mov    esi,DWORD PTR [rip+0x58245a]        # a60930 <wait_event_hook_depth>
+  4de4d6:	test   esi,esi
+  4de4d8:	jne    4de4f5 <pgaio_io_perform_synchronously+0x85>
+  4de4da:	mov    DWORD PTR [rip+0x58244c],0x1        # a60930 <wait_event_hook_depth>
+  4de4e4:	mov    edi,0xa000017
+  4de4e9:	call   rax
+  4de4eb:	mov    DWORD PTR [rip+0x58243b],0x0        # a60930 <wait_event_hook_depth>
+  4de4f5:	movzx  edx,WORD PTR [rbx+0x6c]
+  4de4f9:	mov    rcx,QWORD PTR [rbx+0x70]
+  4de4fd:	mov    edi,DWORD PTR [rbx+0x68]
+  4de500:	cmp    edx,0x1
+  4de503:	jne    4de5e8 <pgaio_io_perform_synchronously+0x178>
+  4de509:	mov    rdx,QWORD PTR [rbp+0x8]
+  4de50d:	mov    rsi,QWORD PTR [rbp+0x0]
+  4de511:	call   e7760 <pread@plt>
+  4de516:	mov    rbp,rax
+  4de519:	jmp    4de566 <pgaio_io_perform_synchronously+0xf6>
+  4de51b:	nop    DWORD PTR [rax+rax*1+0x0]
+  4de520:	mov    rax,QWORD PTR [rip+0x551e01]        # a30328 <my_wait_event_info>
+  4de527:	mov    DWORD PTR [rax],0xa00001a
+  4de52d:	mov    rax,QWORD PTR [rip+0x58240c]        # a60940 <wait_event_begin_hook>
+  4de534:	test   rax,rax
+  4de537:	je     4de547 <pgaio_io_perform_synchronously+0xd7>
+  4de539:	mov    ecx,DWORD PTR [rip+0x5823f1]        # a60930 <wait_event_hook_depth>
+  4de53f:	test   ecx,ecx
+  4de541:	je     4de600 <pgaio_io_perform_synchronously+0x190>
+  4de547:	movzx  edx,WORD PTR [rbx+0x6c]
+  4de54b:	mov    rcx,QWORD PTR [rbx+0x70]
+  4de54f:	mov    edi,DWORD PTR [rbx+0x68]
+  4de552:	cmp    edx,0x1
+  4de555:	je     4de62f <pgaio_io_perform_synchronously+0x1bf>
+  4de55b:	mov    rsi,rbp
+  4de55e:	call   e7770 <pwritev@plt>
+  4de563:	mov    rbp,rax
+  4de566:	mov    rax,QWORD PTR [rip+0x5823cb]        # a60938 <wait_event_end_hook>
+  4de56d:	test   rax,rax
+  4de570:	je     4de59b <pgaio_io_perform_synchronously+0x12b>
+  4de572:	mov    edx,DWORD PTR [rip+0x5823b8]        # a60930 <wait_event_hook_depth>
+  4de578:	test   edx,edx
+  4de57a:	jne    4de59b <pgaio_io_perform_synchronously+0x12b>
+  4de57c:	mov    rdx,QWORD PTR [rip+0x551da5]        # a30328 <my_wait_event_info>
+  4de583:	mov    edi,DWORD PTR [rdx]
+  4de585:	mov    DWORD PTR [rip+0x5823a1],0x1        # a60930 <wait_event_hook_depth>
+  4de58f:	call   rax
+  4de591:	mov    DWORD PTR [rip+0x582395],0x0        # a60930 <wait_event_hook_depth>
+  4de59b:	mov    rax,QWORD PTR [rip+0x551d86]        # a30328 <my_wait_event_info>
+  4de5a2:	mov    esi,ebp
+  4de5a4:	mov    DWORD PTR [rax],0x0
+  4de5aa:	test   rbp,rbp
+  4de5ad:	jns    4de5b8 <pgaio_io_perform_synchronously+0x148>
+  4de5af:	call   e7a30 <__errno_location@plt>
+  4de5b4:	mov    esi,DWORD PTR [rax]
+  4de5b6:	neg    esi
+  4de5b8:	mov    DWORD PTR [rbx+0x14],esi
+  4de5bb:	mov    rdi,rbx
+  4de5be:	call   4dbf50 <pgaio_io_process_completion>
+  4de5c3:	mov    eax,DWORD PTR [rip+0x587143]        # a6570c <CritSectionCount>
+  4de5c9:	sub    eax,0x1
+  4de5cc:	mov    DWORD PTR [rip+0x58713a],eax        # a6570c <CritSectionCount>
+  4de5d2:	add    rsp,0x8
+  4de5d6:	pop    rbx
+  4de5d7:	pop    rbp
+  4de5d8:	ret
+  4de5d9:	nop    DWORD PTR [rax+0x0]
+  4de5e0:	xor    esi,esi
+  4de5e2:	jmp    4de5b8 <pgaio_io_perform_synchronously+0x148>
+  4de5e4:	nop    DWORD PTR [rax+0x0]
+  4de5e8:	mov    rsi,rbp
+  4de5eb:	call   e7fa0 <preadv@plt>
+  4de5f0:	mov    rbp,rax
+  4de5f3:	jmp    4de566 <pgaio_io_perform_synchronously+0xf6>
+  4de5f8:	nop    DWORD PTR [rax+rax*1+0x0]
+  4de600:	mov    DWORD PTR [rip+0x582326],0x1        # a60930 <wait_event_hook_depth>
+  4de60a:	mov    edi,0xa00001a
+  4de60f:	call   rax
+  4de611:	movzx  edx,WORD PTR [rbx+0x6c]
+  4de615:	mov    rcx,QWORD PTR [rbx+0x70]
+  4de619:	mov    DWORD PTR [rip+0x58230d],0x0        # a60930 <wait_event_hook_depth>
+  4de623:	mov    edi,DWORD PTR [rbx+0x68]
+  4de626:	cmp    edx,0x1
+  4de629:	jne    4de55b <pgaio_io_perform_synchronously+0xeb>
+  4de62f:	mov    rdx,QWORD PTR [rbp+0x8]
+  4de633:	mov    rsi,QWORD PTR [rbp+0x0]
+  4de637:	call   e70a0 <pwrite@plt>
+  4de63c:	mov    rbp,rax
+  4de63f:	jmp    4de566 <pgaio_io_perform_synchronously+0xf6>
+
+Disassembly of section .fini:

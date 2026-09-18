@@ -1,0 +1,5 @@
+=== sha256 ===
+9314350300e4041b2ad121fd90e8a2da470b39c54541b138520dfc52b4df8b66  /root/codegen/bin/master.postgres
+d141ee06ab44b1055ae497bef52d51253903eb709696a01f02a4dee2c630a2b2  /root/codegen/bin/v11.postgres
+ffd283c4da05b1b953d161e15afe40261186944a24a53f98dc9af709307cca27  /root/codegen/bin/v11-wpb.postgres
+8c42db66dd134b193066a6a1480f564b60df507ebec5b0ca17c9b6e29f0cb5c5  /root/codegen/bin/control.postgres

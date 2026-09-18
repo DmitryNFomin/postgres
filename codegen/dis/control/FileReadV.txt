@@ -1,0 +1,74 @@
+
+/root/codegen/bin/control.postgres:     file format elf64-x86-64
+
+
+Disassembly of section .init:
+
+Disassembly of section .plt:
+
+Disassembly of section .plt.got:
+
+Disassembly of section .plt.sec:
+
+Disassembly of section .text:
+
+00000000004ee0d0 <FileReadV>:
+  4ee0d0:	endbr64
+  4ee0d4:	push   r15
+  4ee0d6:	movsxd r15,edi
+  4ee0d9:	push   r14
+  4ee0db:	mov    edi,r15d
+  4ee0de:	mov    r14,rcx
+  4ee0e1:	push   r13
+  4ee0e3:	mov    r13d,r8d
+  4ee0e6:	push   r12
+  4ee0e8:	mov    r12d,edx
+  4ee0eb:	push   rbp
+  4ee0ec:	mov    rbp,rsi
+  4ee0ef:	push   rbx
+  4ee0f0:	sub    rsp,0x8
+  4ee0f4:	call   4ed0c0 <FileAccess>
+  4ee0f9:	movsxd rbx,eax
+  4ee0fc:	test   rbx,rbx
+  4ee0ff:	js     4ee178 <FileReadV+0xa8>
+  4ee101:	lea    rax,[r15*8+0x0]
+  4ee109:	mov    rdx,QWORD PTR [rip+0x55cbd0]        # a4ace0 <VfdCache>
+  4ee110:	sub    rax,r15
+  4ee113:	lea    r15,[rdx+rax*8]
+  4ee117:	jmp    4ee14f <FileReadV+0x7f>
+  4ee119:	nop    DWORD PTR [rax+0x0]
+  4ee120:	mov    rdx,QWORD PTR [rbp+0x8]
+  4ee124:	mov    rsi,QWORD PTR [rbp+0x0]
+  4ee128:	mov    rcx,r14
+  4ee12b:	call   e7760 <pread@plt>
+  4ee130:	mov    rbx,rax
+  4ee133:	mov    rax,QWORD PTR [rip+0x53f1ee]        # a2d328 <my_wait_event_info>
+  4ee13a:	mov    DWORD PTR [rax],0x0
+  4ee140:	test   rbx,rbx
+  4ee143:	jns    4ee178 <FileReadV+0xa8>
+  4ee145:	call   e7a30 <__errno_location@plt>
+  4ee14a:	cmp    DWORD PTR [rax],0x4
+  4ee14d:	jne    4ee178 <FileReadV+0xa8>
+  4ee14f:	mov    rax,QWORD PTR [rip+0x53f1d2]        # a2d328 <my_wait_event_info>
+  4ee156:	mov    DWORD PTR [rax],r13d
+  4ee159:	mov    edi,DWORD PTR [r15]
+  4ee15c:	cmp    r12d,0x1
+  4ee160:	je     4ee120 <FileReadV+0x50>
+  4ee162:	mov    rcx,r14
+  4ee165:	mov    edx,r12d
+  4ee168:	mov    rsi,rbp
+  4ee16b:	call   e7fa0 <preadv@plt>
+  4ee170:	mov    rbx,rax
+  4ee173:	jmp    4ee133 <FileReadV+0x63>
+  4ee175:	nop    DWORD PTR [rax]
+  4ee178:	add    rsp,0x8
+  4ee17c:	mov    rax,rbx
+  4ee17f:	pop    rbx
+  4ee180:	pop    rbp
+  4ee181:	pop    r12
+  4ee183:	pop    r13
+  4ee185:	pop    r14
+  4ee187:	pop    r15
+  4ee189:	ret
+
+Disassembly of section .fini:

@@ -1,0 +1,151 @@
+
+/root/codegen/bin/control.postgres:     file format elf64-x86-64
+
+
+Disassembly of section .init:
+
+Disassembly of section .plt:
+
+Disassembly of section .plt.got:
+
+Disassembly of section .plt.sec:
+
+Disassembly of section .text:
+
+000000000020baa0 <SlruInternalWritePage>:
+  20baa0:	push   r15
+  20baa2:	movsxd rcx,esi
+  20baa5:	push   r14
+  20baa7:	mov    r14,rdi
+  20baaa:	push   r13
+  20baac:	push   r12
+  20baae:	push   rbp
+  20baaf:	lea    rbp,[rcx*4+0x0]
+  20bab7:	push   rbx
+  20bab8:	mov    rbx,rcx
+  20babb:	sub    rsp,0x18
+  20babf:	mov    r15,QWORD PTR [rdi+0x68]
+  20bac3:	mov    QWORD PTR [rsp],rdx
+  20bac7:	mov    rax,QWORD PTR [r15+0x20]
+  20bacb:	mov    QWORD PTR [rsp+0x8],rcx
+  20bad0:	mov    r12,QWORD PTR [rax+rcx*8]
+  20bad4:	mov    rax,QWORD PTR [r15+0x10]
+  20bad8:	add    rax,rbp
+  20badb:	mov    edx,DWORD PTR [rax]
+  20badd:	cmp    edx,0x3
+  20bae0:	jne    20bc37 <SlruInternalWritePage+0x197>
+  20bae6:	lea    r13,[rcx*8+0x0]
+  20baee:	xchg   ax,ax
+  20baf0:	mov    rdi,QWORD PTR [r14+0x68]
+  20baf4:	mov    esi,ebx
+  20baf6:	call   20b0f0 <SimpleLruWaitIO.isra.0>
+  20bafb:	mov    rax,QWORD PTR [r15+0x10]
+  20baff:	add    rax,rbp
+  20bb02:	mov    edx,DWORD PTR [rax]
+  20bb04:	cmp    edx,0x3
+  20bb07:	jne    20bb28 <SlruInternalWritePage+0x88>
+  20bb09:	mov    rax,QWORD PTR [r15+0x20]
+  20bb0d:	cmp    r12,QWORD PTR [rax+r13*1]
+  20bb11:	je     20baf0 <SlruInternalWritePage+0x50>
+  20bb13:	add    rsp,0x18
+  20bb17:	pop    rbx
+  20bb18:	pop    rbp
+  20bb19:	pop    r12
+  20bb1b:	pop    r13
+  20bb1d:	pop    r14
+  20bb1f:	pop    r15
+  20bb21:	ret
+  20bb22:	nop    WORD PTR [rax+rax*1+0x0]
+  20bb28:	mov    rcx,QWORD PTR [r15+0x18]
+  20bb2c:	mov    rsi,QWORD PTR [rsp+0x8]
+  20bb31:	cmp    BYTE PTR [rcx+rsi*1],0x1
+  20bb35:	jne    20bb13 <SlruInternalWritePage+0x73>
+  20bb37:	cmp    edx,0x2
+  20bb3a:	jne    20bb13 <SlruInternalWritePage+0x73>
+  20bb3c:	mov    rdx,QWORD PTR [r15+0x20]
+  20bb40:	mov    rsi,QWORD PTR [rsp+0x8]
+  20bb45:	cmp    QWORD PTR [rdx+rsi*8],r12
+  20bb49:	jne    20bb13 <SlruInternalWritePage+0x73>
+  20bb4b:	mov    DWORD PTR [rax],0x3
+  20bb51:	mov    rsi,QWORD PTR [rsp+0x8]
+  20bb56:	mov    ebp,ebx
+  20bb58:	mov    rax,QWORD PTR [r15+0x18]
+  20bb5c:	sar    ebp,0x4
+  20bb5f:	mov    r13,rsi
+  20bb62:	movsxd rbp,ebp
+  20bb65:	mov    BYTE PTR [rax+rsi*1],0x0
+  20bb69:	mov    rdi,QWORD PTR [r15+0x30]
+  20bb6d:	shl    r13,0x7
+  20bb71:	xor    esi,esi
+  20bb73:	shl    rbp,0x7
+  20bb77:	add    rdi,r13
+  20bb7a:	call   50c550 <LWLockAcquire>
+  20bb7f:	mov    rdi,QWORD PTR [r15+0x38]
+  20bb83:	add    rdi,rbp
+  20bb86:	call   50cc10 <LWLockRelease>
+  20bb8b:	mov    rcx,QWORD PTR [rsp]
+  20bb8f:	mov    edx,ebx
+  20bb91:	mov    rsi,r12
+  20bb94:	mov    rdi,r14
+  20bb97:	call   20b250 <SlruPhysicalWritePage>
+  20bb9c:	mov    ebx,eax
+  20bb9e:	cmp    al,0x1
+  20bba0:	je     20bc58 <SlruInternalWritePage+0x1b8>
+  20bba6:	cmp    QWORD PTR [rsp],0x0
+  20bbab:	je     20bc58 <SlruInternalWritePage+0x1b8>
+  20bbb1:	mov    rax,QWORD PTR [rsp]
+  20bbb5:	mov    eax,DWORD PTR [rax]
+  20bbb7:	test   eax,eax
+  20bbb9:	jle    20bbd9 <SlruInternalWritePage+0x139>
+  20bbbb:	xor    ebx,ebx
+  20bbbd:	nop    DWORD PTR [rax]
+  20bbc0:	mov    rax,QWORD PTR [rsp]
+  20bbc4:	mov    edi,DWORD PTR [rax+rbx*4+0x4]
+  20bbc8:	add    rbx,0x1
+  20bbcc:	call   4eeaa0 <CloseTransientFile>
+  20bbd1:	mov    rax,QWORD PTR [rsp]
+  20bbd5:	cmp    DWORD PTR [rax],ebx
+  20bbd7:	jg     20bbc0 <SlruInternalWritePage+0x120>
+  20bbd9:	mov    rdi,QWORD PTR [r15+0x38]
+  20bbdd:	xor    esi,esi
+  20bbdf:	add    rdi,rbp
+  20bbe2:	call   50c550 <LWLockAcquire>
+  20bbe7:	mov    rax,QWORD PTR [r15+0x18]
+  20bbeb:	mov    rbx,QWORD PTR [rsp+0x8]
+  20bbf0:	mov    BYTE PTR [rax+rbx*1],0x1
+  20bbf4:	mov    rax,QWORD PTR [r15+0x10]
+  20bbf8:	mov    DWORD PTR [rax+rbx*4],0x2
+  20bbff:	mov    rdi,QWORD PTR [r15+0x30]
+  20bc03:	add    rdi,r13
+  20bc06:	call   50cc10 <LWLockRelease>
+  20bc0b:	xor    edx,edx
+  20bc0d:	mov    rsi,r12
+  20bc10:	mov    rdi,r14
+  20bc13:	call   20b940 <SlruReportIOError>
+  20bc18:	cmp    QWORD PTR [rsp],0x0
+  20bc1d:	je     20bb13 <SlruInternalWritePage+0x73>
+  20bc23:	add    DWORD PTR [rip+0x838d42],0x1        # a4496c <CheckpointStats+0x2c>
+  20bc2a:	add    QWORD PTR [rip+0x850d96],0x1        # a5c9c8 <PendingCheckpointerStats+0x48>
+  20bc32:	jmp    20bb13 <SlruInternalWritePage+0x73>
+  20bc37:	mov    rcx,QWORD PTR [r15+0x18]
+  20bc3b:	mov    rsi,QWORD PTR [rsp+0x8]
+  20bc40:	cmp    BYTE PTR [rcx+rsi*1],0x1
+  20bc44:	jne    20bb13 <SlruInternalWritePage+0x73>
+  20bc4a:	cmp    edx,0x2
+  20bc4d:	jne    20bb13 <SlruInternalWritePage+0x73>
+  20bc53:	jmp    20bb4b <SlruInternalWritePage+0xab>
+  20bc58:	mov    rdi,QWORD PTR [r15+0x38]
+  20bc5c:	xor    esi,esi
+  20bc5e:	add    rdi,rbp
+  20bc61:	call   50c550 <LWLockAcquire>
+  20bc66:	test   bl,bl
+  20bc68:	je     20bbe7 <SlruInternalWritePage+0x147>
+  20bc6e:	mov    rax,QWORD PTR [r15+0x10]
+  20bc72:	mov    rbx,QWORD PTR [rsp+0x8]
+  20bc77:	mov    DWORD PTR [rax+rbx*4],0x2
+  20bc7e:	mov    rdi,QWORD PTR [r15+0x30]
+  20bc82:	add    rdi,r13
+  20bc85:	call   50cc10 <LWLockRelease>
+  20bc8a:	jmp    20bc18 <SlruInternalWritePage+0x178>
+
+Disassembly of section .fini:

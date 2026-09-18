@@ -1,0 +1,415 @@
+
+/root/codegen/bin/master.postgres:     file format elf64-x86-64
+
+
+Disassembly of section .init:
+
+Disassembly of section .plt:
+
+Disassembly of section .plt.got:
+
+Disassembly of section .plt.sec:
+
+Disassembly of section .text:
+
+000000000021a190 <XLogWrite>:
+  21a190:	push   r15
+  21a192:	push   r14
+  21a194:	push   r13
+  21a196:	push   r12
+  21a198:	push   rbp
+  21a199:	push   rbx
+  21a19a:	sub    rsp,0x98
+  21a1a1:	mov    QWORD PTR [rsp+0x8],rdi
+  21a1a6:	mov    QWORD PTR [rsp+0x30],rsi
+  21a1ab:	mov    DWORD PTR [rsp+0x14],edx
+  21a1af:	mov    BYTE PTR [rsp+0x2f],cl
+  21a1b3:	mov    rax,QWORD PTR fs:0x28
+  21a1bc:	mov    QWORD PTR [rsp+0x88],rax
+  21a1c4:	mov    rax,QWORD PTR [rip+0x82a915]        # a44ae0 <XLogCtl>
+  21a1cb:	mov    rax,QWORD PTR [rax+0x110]
+  21a1d2:	mov    QWORD PTR [rip+0x82a8df],rax        # a44ab8 <LogwrtResult+0x8>
+  21a1d9:	mov    rcx,QWORD PTR [rip+0x82a900]        # a44ae0 <XLogCtl>
+  21a1e0:	mov    r13,QWORD PTR [rip+0x82a8d1]        # a44ab8 <LogwrtResult+0x8>
+  21a1e7:	xor    r12d,r12d
+  21a1ea:	xor    ebx,ebx
+  21a1ec:	mov    DWORD PTR [rsp+0x18],0x0
+  21a1f4:	mov    rsi,QWORD PTR [rcx+0x108]
+  21a1fb:	mov    edx,DWORD PTR [rcx+0x130]
+  21a201:	mov    QWORD PTR [rsp+0x38],r13
+  21a206:	lea    edi,[rdx+0x1]
+  21a209:	mov    rax,rsi
+  21a20c:	xor    edx,edx
+  21a20e:	mov    QWORD PTR [rip+0x82a89b],rsi        # a44ab0 <LogwrtResult>
+  21a215:	shr    rax,0xd
+  21a219:	movsxd rdi,edi
+  21a21c:	div    rdi
+  21a21f:	mov    rax,QWORD PTR [rsp+0x8]
+  21a224:	mov    ebp,edx
+  21a226:	cmp    rsi,rax
+  21a229:	jae    21a4bb <XLogWrite+0x32b>
+  21a22f:	nop
+  21a230:	mov    rdx,QWORD PTR [rcx+0x128]
+  21a237:	movsxd rax,ebp
+  21a23a:	lea    rax,[rdx+rax*8]
+  21a23e:	mov    r13,QWORD PTR [rax]
+  21a241:	cmp    rsi,r13
+  21a244:	jae    f3c2e <XLogWrite.cold>
+  21a24a:	movsxd rcx,DWORD PTR [rip+0x81299f]        # a2cbf0 <wal_segment_size>
+  21a251:	xor    edx,edx
+  21a253:	lea    rax,[r13-0x1]
+  21a257:	mov    QWORD PTR [rip+0x82a852],r13        # a44ab0 <LogwrtResult>
+  21a25e:	div    rcx
+  21a261:	mov    rdx,r13
+  21a264:	cmp    rax,QWORD PTR [rip+0x82a82d]        # a44a98 <openLogSegNo>
+  21a26b:	je     21a2be <XLogWrite+0x12e>
+  21a26d:	mov    esi,DWORD PTR [rip+0x812971]        # a2cbe4 <openLogFile>
+  21a273:	test   esi,esi
+  21a275:	js     21a293 <XLogWrite+0x103>
+  21a277:	call   2184e0 <XLogFileClose>
+  21a27c:	mov    rax,QWORD PTR [rip+0x82a82d]        # a44ab0 <LogwrtResult>
+  21a283:	movsxd rcx,DWORD PTR [rip+0x812966]        # a2cbf0 <wal_segment_size>
+  21a28a:	xor    edx,edx
+  21a28c:	sub    rax,0x1
+  21a290:	div    rcx
+  21a293:	mov    esi,DWORD PTR [rsp+0x14]
+  21a297:	mov    QWORD PTR [rip+0x82a7fa],rax        # a44a98 <openLogSegNo>
+  21a29e:	mov    DWORD PTR [rip+0x82a7ec],esi        # a44a90 <openLogTLI>
+  21a2a4:	mov    rdi,rax
+  21a2a7:	call   21a060 <XLogFileInit>
+  21a2ac:	mov    DWORD PTR [rip+0x812932],eax        # a2cbe4 <openLogFile>
+  21a2b2:	call   4ed1d0 <ReserveExternalFD>
+  21a2b7:	mov    rdx,QWORD PTR [rip+0x82a7f2]        # a44ab0 <LogwrtResult>
+  21a2be:	mov    ecx,DWORD PTR [rip+0x812920]        # a2cbe4 <openLogFile>
+  21a2c4:	test   ecx,ecx
+  21a2c6:	js     21a5d0 <XLogWrite+0x440>
+  21a2cc:	test   ebx,ebx
+  21a2ce:	jne    21a2e7 <XLogWrite+0x157>
+  21a2d0:	mov    eax,DWORD PTR [rip+0x81291a]        # a2cbf0 <wal_segment_size>
+  21a2d6:	mov    DWORD PTR [rsp+0x18],ebp
+  21a2da:	lea    r12d,[rax-0x1]
+  21a2de:	lea    eax,[rdx-0x2000]
+  21a2e4:	and    r12d,eax
+  21a2e7:	mov    rax,QWORD PTR [rsp+0x8]
+  21a2ec:	mov    rcx,QWORD PTR [rip+0x82a7ed]        # a44ae0 <XLogCtl>
+  21a2f3:	add    ebx,0x1
+  21a2f6:	cmp    rax,r13
+  21a2f9:	jae    21a470 <XLogWrite+0x2e0>
+  21a2ff:	cmp    rdx,rax
+  21a302:	jae    21a4c8 <XLogWrite+0x338>
+  21a308:	cmp    ebp,DWORD PTR [rcx+0x130]
+  21a30e:	je     21a4c8 <XLogWrite+0x338>
+  21a314:	mov    rax,QWORD PTR [rsp+0x8]
+  21a319:	mov    r13,QWORD PTR [rsp+0x38]
+  21a31e:	mov    QWORD PTR [rip+0x82a78b],rax        # a44ab0 <LogwrtResult>
+  21a325:	mov    rdx,QWORD PTR [rip+0x82a78c]        # a44ab8 <LogwrtResult+0x8>
+  21a32c:	mov    rax,QWORD PTR [rsp+0x30]
+  21a331:	cmp    rdx,rax
+  21a334:	jae    21a3b3 <XLogWrite+0x223>
+  21a336:	mov    rax,QWORD PTR [rip+0x82a773]        # a44ab0 <LogwrtResult>
+  21a33d:	mov    rdi,rax
+  21a340:	cmp    rdx,rax
+  21a343:	jae    21a3b3 <XLogWrite+0x223>
+  21a345:	mov    edx,DWORD PTR [rip+0x8128bd]        # a2cc08 <wal_sync_method>
+  21a34b:	sub    edx,0x2
+  21a34e:	and    edx,0xfffffffd
+  21a351:	je     21a3a5 <XLogWrite+0x215>
+  21a353:	mov    r8d,DWORD PTR [rip+0x81288a]        # a2cbe4 <openLogFile>
+  21a35a:	mov    edx,DWORD PTR [rip+0x812890]        # a2cbf0 <wal_segment_size>
+  21a360:	test   r8d,r8d
+  21a363:	js     21a7f8 <XLogWrite+0x668>
+  21a369:	sub    rax,0x1
+  21a36d:	movsxd rcx,edx
+  21a370:	xor    edx,edx
+  21a372:	div    rcx
+  21a375:	cmp    QWORD PTR [rip+0x82a71c],rax        # a44a98 <openLogSegNo>
+  21a37c:	mov    rsi,rax
+  21a37f:	jne    21a788 <XLogWrite+0x5f8>
+  21a385:	cmp    BYTE PTR [rip+0x8130b0],0x0        # a2d43c <enableFsync>
+  21a38c:	je     21a7c6 <XLogWrite+0x636>
+  21a392:	mov    edx,DWORD PTR [rsp+0x14]
+  21a396:	mov    edi,r8d
+  21a399:	call   217f70 <issue_xlog_fsync.part.0>
+  21a39e:	mov    rax,QWORD PTR [rip+0x82a70b]        # a44ab0 <LogwrtResult>
+  21a3a5:	mov    BYTE PTR [rip+0x82f1a4],0x1        # a49550 <wake_wal_senders>
+  21a3ac:	mov    QWORD PTR [rip+0x82a705],rax        # a44ab8 <LogwrtResult+0x8>
+  21a3b3:	mov    rax,QWORD PTR [rip+0x82a726]        # a44ae0 <XLogCtl>
+  21a3ba:	lea    rdi,[rax+0x1d9]
+  21a3c1:	mov    eax,0x1
+  21a3c6:	lock xchg BYTE PTR [rdi],al
+  21a3c9:	test   al,al
+  21a3cb:	jne    21a76b <XLogWrite+0x5db>
+  21a3d1:	mov    rax,QWORD PTR [rip+0x82a708]        # a44ae0 <XLogCtl>
+  21a3d8:	mov    rdx,QWORD PTR [rip+0x82a6d1]        # a44ab0 <LogwrtResult>
+  21a3df:	cmp    QWORD PTR [rax+0xb8],rdx
+  21a3e6:	jae    21a3ef <XLogWrite+0x25f>
+  21a3e8:	mov    QWORD PTR [rax+0xb8],rdx
+  21a3ef:	mov    rdx,QWORD PTR [rip+0x82a6c2]        # a44ab8 <LogwrtResult+0x8>
+  21a3f6:	cmp    QWORD PTR [rax+0xc0],rdx
+  21a3fd:	jae    21a406 <XLogWrite+0x276>
+  21a3ff:	mov    QWORD PTR [rax+0xc0],rdx
+  21a406:	mov    rdx,QWORD PTR [rip+0x82a6a3]        # a44ab0 <LogwrtResult>
+  21a40d:	mov    BYTE PTR [rax+0x1d9],0x0
+  21a414:	mov    rax,QWORD PTR [rip+0x82a6c5]        # a44ae0 <XLogCtl>
+  21a41b:	mov    QWORD PTR [rax+0x108],rdx
+  21a422:	mov    rax,QWORD PTR [rip+0x82a68f]        # a44ab8 <LogwrtResult+0x8>
+  21a429:	mov    rdx,QWORD PTR [rip+0x82a6b0]        # a44ae0 <XLogCtl>
+  21a430:	mov    QWORD PTR [rdx+0x110],rax
+  21a437:	cmp    r13,rax
+  21a43a:	jb     21a75f <XLogWrite+0x5cf>
+  21a440:	mov    rax,QWORD PTR [rsp+0x88]
+  21a448:	sub    rax,QWORD PTR fs:0x28
+  21a451:	jne    21a8e4 <XLogWrite+0x754>
+  21a457:	add    rsp,0x98
+  21a45e:	pop    rbx
+  21a45f:	pop    rbp
+  21a460:	pop    r12
+  21a462:	pop    r13
+  21a464:	pop    r14
+  21a466:	pop    r15
+  21a468:	ret
+  21a469:	nop    DWORD PTR [rax+0x0]
+  21a470:	mov    eax,ebx
+  21a472:	shl    eax,0xd
+  21a475:	add    eax,r12d
+  21a478:	cmp    eax,DWORD PTR [rip+0x812772]        # a2cbf0 <wal_segment_size>
+  21a47e:	jae    21a610 <XLogWrite+0x480>
+  21a484:	mov    rax,QWORD PTR [rsp+0x8]
+  21a489:	cmp    rdx,rax
+  21a48c:	jae    21a4c8 <XLogWrite+0x338>
+  21a48e:	cmp    DWORD PTR [rcx+0x130],ebp
+  21a494:	je     21a4c8 <XLogWrite+0x338>
+  21a496:	test   ebx,ebx
+  21a498:	sete   al
+  21a49b:	and    al,BYTE PTR [rsp+0x2f]
+  21a49f:	add    ebp,0x1
+  21a4a2:	test   al,al
+  21a4a4:	jne    21a4bb <XLogWrite+0x32b>
+  21a4a6:	mov    rsi,QWORD PTR [rip+0x82a603]        # a44ab0 <LogwrtResult>
+  21a4ad:	mov    rax,QWORD PTR [rsp+0x8]
+  21a4b2:	cmp    rsi,rax
+  21a4b5:	jb     21a230 <XLogWrite+0xa0>
+  21a4bb:	mov    r13,QWORD PTR [rsp+0x38]
+  21a4c0:	jmp    21a325 <XLogWrite+0x195>
+  21a4c5:	nop    DWORD PTR [rax]
+  21a4c8:	mov    DWORD PTR [rsp+0x28],0x0
+  21a4d0:	movsxd r15,DWORD PTR [rsp+0x18]
+  21a4d5:	movsxd rbx,ebx
+  21a4d8:	shl    rbx,0xd
+  21a4dc:	shl    r15,0xd
+  21a4e0:	add    r15,QWORD PTR [rcx+0x120]
+  21a4e7:	call   e7a30 <__errno_location@plt>
+  21a4ec:	mov    DWORD PTR [rsp+0x1c],ebp
+  21a4f0:	mov    QWORD PTR [rsp+0x20],r13
+  21a4f5:	mov    r14,rax
+  21a4f8:	jmp    21a512 <XLogWrite+0x382>
+  21a4fa:	nop    WORD PTR [rax+rax*1+0x0]
+  21a500:	mov    r10d,DWORD PTR [r14]
+  21a503:	cmp    r10d,0x4
+  21a507:	jne    21a83b <XLogWrite+0x6ab>
+  21a50d:	test   rbx,rbx
+  21a510:	je     21a58c <XLogWrite+0x3fc>
+  21a512:	mov    DWORD PTR [r14],0x0
+  21a519:	movzx  edi,BYTE PTR [rip+0x82a474]        # a44994 <track_wal_io_timing>
+  21a520:	call   53b360 <pgstat_prepare_io_time>
+  21a525:	mov    ecx,r12d
+  21a528:	mov    rdx,rbx
+  21a52b:	mov    rsi,r15
+  21a52e:	mov    rbp,rax
+  21a531:	mov    rax,QWORD PTR [rip+0x812df0]        # a2d328 <my_wait_event_info>
+  21a538:	mov    edi,DWORD PTR [rip+0x8126a6]        # a2cbe4 <openLogFile>
+  21a53e:	mov    DWORD PTR [rax],0xa000052
+  21a544:	call   e70a0 <pwrite@plt>
+  21a549:	mov    r13,rax
+  21a54c:	mov    rax,QWORD PTR [rip+0x812dd5]        # a2d328 <my_wait_event_info>
+  21a553:	mov    DWORD PTR [rax],0x0
+  21a559:	test   r13,r13
+  21a55c:	jle    21a500 <XLogWrite+0x370>
+  21a55e:	mov    r9,r13
+  21a561:	mov    r8d,0x1
+  21a567:	mov    rcx,rbp
+  21a56a:	sub    rbx,r13
+  21a56d:	mov    edx,0x7
+  21a572:	mov    esi,0x3
+  21a577:	add    r15,r13
+  21a57a:	add    r12d,r13d
+  21a57d:	mov    edi,0x2
+  21a582:	call   53b3e0 <pgstat_count_io_op_time>
+  21a587:	test   rbx,rbx
+  21a58a:	jne    21a512 <XLogWrite+0x382>
+  21a58c:	mov    edx,DWORD PTR [rsp+0x28]
+  21a590:	mov    ebp,DWORD PTR [rsp+0x1c]
+  21a594:	mov    r13,QWORD PTR [rsp+0x20]
+  21a599:	test   edx,edx
+  21a59b:	jne    21a620 <XLogWrite+0x490>
+  21a5a1:	cmp    QWORD PTR [rsp+0x8],r13
+  21a5a6:	jb     21a314 <XLogWrite+0x184>
+  21a5ac:	mov    rcx,QWORD PTR [rip+0x82a52d]        # a44ae0 <XLogCtl>
+  21a5b3:	movzx  eax,BYTE PTR [rsp+0x2f]
+  21a5b8:	xor    ebx,ebx
+  21a5ba:	cmp    DWORD PTR [rcx+0x130],ebp
+  21a5c0:	jne    21a49f <XLogWrite+0x30f>
+  21a5c6:	xor    ebp,ebp
+  21a5c8:	jmp    21a4a2 <XLogWrite+0x312>
+  21a5cd:	nop    DWORD PTR [rax]
+  21a5d0:	movsxd rcx,DWORD PTR [rip+0x812619]        # a2cbf0 <wal_segment_size>
+  21a5d7:	lea    rax,[rdx-0x1]
+  21a5db:	xor    edx,edx
+  21a5dd:	mov    esi,DWORD PTR [rsp+0x14]
+  21a5e1:	div    rcx
+  21a5e4:	mov    DWORD PTR [rip+0x82a4a6],esi        # a44a90 <openLogTLI>
+  21a5ea:	mov    rdi,rax
+  21a5ed:	mov    QWORD PTR [rip+0x82a4a4],rax        # a44a98 <openLogSegNo>
+  21a5f4:	call   21a0e0 <XLogFileOpen>
+  21a5f9:	mov    DWORD PTR [rip+0x8125e5],eax        # a2cbe4 <openLogFile>
+  21a5ff:	call   4ed1d0 <ReserveExternalFD>
+  21a604:	mov    rdx,QWORD PTR [rip+0x82a4a5]        # a44ab0 <LogwrtResult>
+  21a60b:	jmp    21a2cc <XLogWrite+0x13c>
+  21a610:	mov    DWORD PTR [rsp+0x28],0x1
+  21a618:	jmp    21a4d0 <XLogWrite+0x340>
+  21a61d:	nop    DWORD PTR [rax]
+  21a620:	cmp    BYTE PTR [rip+0x812e15],0x0        # a2d43c <enableFsync>
+  21a627:	je     21a64d <XLogWrite+0x4bd>
+  21a629:	mov    eax,DWORD PTR [rip+0x8125d9]        # a2cc08 <wal_sync_method>
+  21a62f:	sub    eax,0x2
+  21a632:	and    eax,0xfffffffd
+  21a635:	je     21a64d <XLogWrite+0x4bd>
+  21a637:	mov    edx,DWORD PTR [rsp+0x14]
+  21a63b:	mov    rsi,QWORD PTR [rip+0x82a456]        # a44a98 <openLogSegNo>
+  21a642:	mov    edi,DWORD PTR [rip+0x81259c]        # a2cbe4 <openLogFile>
+  21a648:	call   217f70 <issue_xlog_fsync.part.0>
+  21a64d:	mov    rbx,QWORD PTR [rip+0x82a45c]        # a44ab0 <LogwrtResult>
+  21a654:	mov    eax,DWORD PTR [rip+0x82a366]        # a449c0 <XLogArchiveMode>
+  21a65a:	mov    BYTE PTR [rip+0x82eeef],0x1        # a49550 <wake_wal_senders>
+  21a661:	mov    QWORD PTR [rip+0x82a450],rbx        # a44ab8 <LogwrtResult+0x8>
+  21a668:	test   eax,eax
+  21a66a:	jle    21a683 <XLogWrite+0x4f3>
+  21a66c:	mov    esi,DWORD PTR [rsp+0x14]
+  21a670:	mov    rdi,QWORD PTR [rip+0x82a421]        # a44a98 <openLogSegNo>
+  21a677:	call   223450 <XLogArchiveNotifySeg>
+  21a67c:	mov    rbx,QWORD PTR [rip+0x82a435]        # a44ab8 <LogwrtResult+0x8>
+  21a683:	xor    edi,edi
+  21a685:	mov    r15,QWORD PTR [rip+0x82a454]        # a44ae0 <XLogCtl>
+  21a68c:	call   e7f20 <time@plt>
+  21a691:	mov    rcx,QWORD PTR [rip+0x82a448]        # a44ae0 <XLogCtl>
+  21a698:	cmp    BYTE PTR [rip+0x8473b3],0x0        # a61a52 <IsUnderPostmaster>
+  21a69f:	mov    QWORD PTR [r15+0xf0],rax
+  21a6a6:	mov    QWORD PTR [rcx+0xf8],rbx
+  21a6ad:	je     21a5a1 <XLogWrite+0x411>
+  21a6b3:	movsxd rsi,DWORD PTR [rip+0x812536]        # a2cbf0 <wal_segment_size>
+  21a6ba:	mov    rax,QWORD PTR [rip+0x82a42f]        # a44af0 <RedoRecPtr>
+  21a6c1:	xor    edx,edx
+  21a6c3:	div    rsi
+  21a6c6:	mov    edx,DWORD PTR [rip+0x82a2c4]        # a44990 <CheckPointSegments>
+  21a6cc:	sub    edx,0x1
+  21a6cf:	movsxd rdx,edx
+  21a6d2:	add    rax,rdx
+  21a6d5:	cmp    QWORD PTR [rip+0x82a3bc],rax        # a44a98 <openLogSegNo>
+  21a6dc:	jb     21a5a1 <XLogWrite+0x411>
+  21a6e2:	lea    rdi,[rcx+0x1d9]
+  21a6e9:	mov    eax,0x1
+  21a6ee:	lock xchg BYTE PTR [rcx+0x1d9],al
+  21a6f5:	test   al,al
+  21a6f7:	jne    21a7ce <XLogWrite+0x63e>
+  21a6fd:	mov    rax,QWORD PTR [rip+0x82a3dc]        # a44ae0 <XLogCtl>
+  21a704:	mov    rdx,QWORD PTR [rax+0xc8]
+  21a70b:	mov    BYTE PTR [rax+0x1d9],0x0
+  21a712:	mov    rax,QWORD PTR [rip+0x82a3d7]        # a44af0 <RedoRecPtr>
+  21a719:	cmp    rax,rdx
+  21a71c:	jae    21a728 <XLogWrite+0x598>
+  21a71e:	mov    QWORD PTR [rip+0x82a3cb],rdx        # a44af0 <RedoRecPtr>
+  21a725:	mov    rax,rdx
+  21a728:	movsxd rcx,DWORD PTR [rip+0x8124c1]        # a2cbf0 <wal_segment_size>
+  21a72f:	xor    edx,edx
+  21a731:	mov    esi,DWORD PTR [rip+0x82a259]        # a44990 <CheckPointSegments>
+  21a737:	div    rcx
+  21a73a:	lea    edx,[rsi-0x1]
+  21a73d:	movsxd rdx,edx
+  21a740:	add    rax,rdx
+  21a743:	cmp    QWORD PTR [rip+0x82a34e],rax        # a44a98 <openLogSegNo>
+  21a74a:	jb     21a5a1 <XLogWrite+0x411>
+  21a750:	mov    edi,0x80
+  21a755:	call   472930 <RequestCheckpoint>
+  21a75a:	jmp    21a5a1 <XLogWrite+0x411>
+  21a75f:	mov    BYTE PTR [rip+0x82a33a],0x1        # a44aa0 <primaryFlushWakeupPending>
+  21a766:	jmp    21a440 <XLogWrite+0x2b0>
+  21a76b:	lea    rcx,[rip+0x56750e]        # 781c80 <__func__.43>
+  21a772:	mov    edx,0x3a
+  21a777:	lea    rsi,[rip+0x4e712a]        # 7018a8 <_IO_stdin_used+0x2b8a8>
+  21a77e:	call   514a40 <s_lock>
+  21a783:	jmp    21a3d1 <XLogWrite+0x241>
+  21a788:	call   2184e0 <XLogFileClose>
+  21a78d:	mov    r8d,DWORD PTR [rip+0x812450]        # a2cbe4 <openLogFile>
+  21a794:	test   r8d,r8d
+  21a797:	js     21a7eb <XLogWrite+0x65b>
+  21a799:	mov    rsi,QWORD PTR [rip+0x82a2f8]        # a44a98 <openLogSegNo>
+  21a7a0:	cmp    BYTE PTR [rip+0x812c95],0x0        # a2d43c <enableFsync>
+  21a7a7:	je     21a8d8 <XLogWrite+0x748>
+  21a7ad:	mov    eax,DWORD PTR [rip+0x812455]        # a2cc08 <wal_sync_method>
+  21a7b3:	mov    rdi,QWORD PTR [rip+0x82a2f6]        # a44ab0 <LogwrtResult>
+  21a7ba:	sub    eax,0x2
+  21a7bd:	and    eax,0xfffffffd
+  21a7c0:	jne    21a392 <XLogWrite+0x202>
+  21a7c6:	mov    rax,rdi
+  21a7c9:	jmp    21a3a5 <XLogWrite+0x215>
+  21a7ce:	lea    rcx,[rip+0x5674ab]        # 781c80 <__func__.43>
+  21a7d5:	mov    edx,0x3a
+  21a7da:	lea    rsi,[rip+0x4e70c7]        # 7018a8 <_IO_stdin_used+0x2b8a8>
+  21a7e1:	call   514a40 <s_lock>
+  21a7e6:	jmp    21a6fd <XLogWrite+0x56d>
+  21a7eb:	mov    rax,QWORD PTR [rip+0x82a2be]        # a44ab0 <LogwrtResult>
+  21a7f2:	mov    edx,DWORD PTR [rip+0x8123f8]        # a2cbf0 <wal_segment_size>
+  21a7f8:	movsxd rcx,edx
+  21a7fb:	sub    rax,0x1
+  21a7ff:	xor    edx,edx
+  21a801:	mov    esi,DWORD PTR [rsp+0x14]
+  21a805:	div    rcx
+  21a808:	mov    DWORD PTR [rip+0x82a282],esi        # a44a90 <openLogTLI>
+  21a80e:	mov    rdi,rax
+  21a811:	mov    QWORD PTR [rip+0x82a280],rax        # a44a98 <openLogSegNo>
+  21a818:	call   21a0e0 <XLogFileOpen>
+  21a81d:	mov    DWORD PTR [rip+0x8123c1],eax        # a2cbe4 <openLogFile>
+  21a823:	call   4ed1d0 <ReserveExternalFD>
+  21a828:	mov    rsi,QWORD PTR [rip+0x82a269]        # a44a98 <openLogSegNo>
+  21a82f:	mov    r8d,DWORD PTR [rip+0x8123ae]        # a2cbe4 <openLogFile>
+  21a836:	jmp    21a7a0 <XLogWrite+0x610>
+  21a83b:	movsxd rcx,DWORD PTR [rip+0x8123ae]        # a2cbf0 <wal_segment_size>
+  21a842:	xor    edx,edx
+  21a844:	lea    rbp,[rsp+0x40]
+  21a849:	movabs rax,0x100000000
+  21a853:	mov    esi,0x40
+  21a858:	mov    rdi,rbp
+  21a85b:	mov    DWORD PTR [rsp+0x8],r10d
+  21a860:	div    rcx
+  21a863:	xor    edx,edx
+  21a865:	mov    rcx,rax
+  21a868:	mov    rax,QWORD PTR [rip+0x82a229]        # a44a98 <openLogSegNo>
+  21a86f:	div    rcx
+  21a872:	mov    ecx,DWORD PTR [rsp+0x14]
+  21a876:	mov    r9d,edx
+  21a879:	mov    r8d,eax
+  21a87c:	lea    rdx,[rip+0x4be12a]        # 6d89ad <_IO_stdin_used+0x29ad>
+  21a883:	xor    eax,eax
+  21a885:	call   6d4600 <pg_snprintf>
+  21a88a:	mov    r10d,DWORD PTR [rsp+0x8]
+  21a88f:	xor    esi,esi
+  21a891:	mov    edi,0x18
+  21a896:	mov    DWORD PTR [r14],r10d
+  21a899:	call   171903 <errstart_cold>
+  21a89e:	call   67e720 <errcode_for_file_access>
+  21a8a3:	mov    edx,r12d
+  21a8a6:	mov    rsi,rbp
+  21a8a9:	mov    rcx,rbx
+  21a8ac:	lea    rdi,[rip+0x4f1e35]        # 70c6e8 <_IO_stdin_used+0x366e8>
+  21a8b3:	xor    eax,eax
+  21a8b5:	call   67e890 <errmsg>
+  21a8ba:	lea    rdx,[rip+0x5673df]        # 781ca0 <__func__.45>
+  21a8c1:	mov    esi,0x9e1
+  21a8c6:	lea    rdi,[rip+0x4bd884]        # 6d8151 <_IO_stdin_used+0x2151>
+  21a8cd:	call   67de20 <errfinish>
+  21a8d2:	nop    WORD PTR [rax+rax*1+0x0]
+  21a8d8:	mov    rdi,QWORD PTR [rip+0x82a1d1]        # a44ab0 <LogwrtResult>
+  21a8df:	jmp    21a7c6 <XLogWrite+0x636>
+  21a8e4:	call   e7a70 <__stack_chk_fail@plt>
+
+Disassembly of section .fini:

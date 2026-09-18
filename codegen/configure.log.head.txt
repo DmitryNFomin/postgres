@@ -1,0 +1,40 @@
+checking build system type... x86_64-pc-linux-gnu
+checking host system type... x86_64-pc-linux-gnu
+checking which template to use... linux
+checking whether NLS is wanted... no
+checking for default port number... 5432
+checking for block size... 8kB
+checking for segment size... 1GB
+checking for WAL block size... 8kB
+checking for gcc... gcc
+checking whether the C compiler works... yes
+checking for C compiler default output file name... a.out
+checking for suffix of executables... 
+checking whether we are cross compiling... no
+checking for suffix of object files... o
+checking whether we are using the GNU C compiler... yes
+checking whether gcc accepts -g... yes
+checking for gcc option to accept ISO C89... none needed
+checking for gcc option to accept ISO C11... none needed
+checking for g++... g++
+checking whether we are using the GNU C++ compiler... yes
+checking whether g++ accepts -g... yes
+checking for g++ option to accept ISO C++11... none needed
+checking for gawk... gawk
+checking whether gcc supports -Wdeclaration-after-statement, for CFLAGS... yes
+checking whether gcc supports -Werror=vla, for CFLAGS... yes
+checking whether g++ supports -Werror=vla, for CXXFLAGS... yes
+checking whether gcc supports -Werror=unguarded-availability-new, for CFLAGS... no
+checking whether g++ supports -Werror=unguarded-availability-new, for CXXFLAGS... no
+checking whether gcc supports -Wmissing-format-attribute, for CFLAGS... yes
+checking whether g++ supports -Wmissing-format-attribute, for CXXFLAGS... yes
+checking whether gcc supports -Wold-style-declaration, for CFLAGS... yes
+checking whether gcc supports -Wimplicit-fallthrough=5, for CFLAGS... yes
+checking whether g++ supports -Wimplicit-fallthrough=5, for CXXFLAGS... yes
+checking whether gcc supports -Wcast-function-type, for CFLAGS... yes
+checking whether g++ supports -Wcast-function-type, for CXXFLAGS... yes
+checking whether gcc supports -Wshadow=compatible-local, for CFLAGS... yes
+checking whether g++ supports -Wshadow=compatible-local, for CXXFLAGS... yes
+checking whether gcc supports -Wformat-security, for CFLAGS... yes
+checking whether g++ supports -Wformat-security, for CXXFLAGS... yes
+checking whether gcc supports -Wmissing-variable-declarations, for CFLAGS... no
