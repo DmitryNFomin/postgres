@@ -5,8 +5,10 @@
 `96c24a28006fb6ff66264998c698f5230d32ad26` on branch `wet-v11`. It adds
 begin/end hooks for timed wait events, converts the wait_start/end call
 sites to the timed pair, and layers a `pg_wait_event_tracing` module
-(statistics level, then trace level) on top, plus a `test_wait_primitive`
-test module. A companion branch, `bench-v11-control`, carries a single
+(statistics level, then trace level) on top, plus a `test_wait_hook`
+test module that exercises the hook contract (patch 0003).
+`test_wait_primitive` is NOT part of the series; it is the W1 benchmark
+fixture carried inside the kit. A companion branch, `bench-v11-control`, carries a single
 extra commit that strips the hook-pointer test and slow-path call back
 out of the timed pair (leaving only the volatile store); it is the
 layout control used for the hook-null contrast in the benchmark and is
@@ -14,18 +16,29 @@ not part of the submitted series.
 
 ## What changed versus v8
 
-- Cold out-of-line hook path with the hint: the hook check now sits
-  behind an `unlikely()` branch hint and calls out to an out-of-line
-  slow-path function only when a hook is actually installed, instead of
-  inlining the hook-invocation logic at every wait_start/end site.
-- Lazy per-process hook install and a non-chaining variant: hooks are
-  installed lazily, once per backend, rather than eagerly at startup,
-  and the hook variable itself is a single non-chaining pointer rather
-  than a chain that every installer has to thread through.
-- Single recording gate and local in-flight state: there is one gate
-  that decides whether an event gets recorded at all, and the
-  in-flight/duration bookkeeping is kept in local (per-call) state
-  instead of shared mutable state touched on every call.
+- Cold out-of-line hook path with a branch hint (patch 0001): the inline
+  timed pair is one `unlikely()`-hinted pointer test per side; the
+  enabled path (depth guard, indirect call) lives in two cold, noinline
+  functions in wait_event.c. The hint is needed because GCC's static
+  predictor treats a pointer compared with NULL as non-NULL and would
+  otherwise lay out the enabled path as the fall-through. See
+  `reports/wpd-report.md` for the x86-64 GCC disassembly evidence.
+- Lazy per-process hook installation (patch 0004): the module installs
+  `wait_event_begin_hook`/`wait_event_end_hook` in a process only when
+  `pg_wait_event_tracing.capture` first becomes non-off in that process,
+  and never removes them, so backends that never enable capture run the
+  hook-null path. Chaining onto a previously installed consumer is
+  preserved; when there is no previous hook, a non-chaining wrapper
+  variant is installed so the hot path carries no previous-hook test.
+  Diagnostic: `pg_wait_event_tracing_hooks_installed()`.
+- Single recording gate and process-local in-flight state (patch 0004):
+  each level has one backend-local pointer that is non-NULL exactly when
+  recording is allowed, maintained at every site that changes its
+  inputs, replacing three tests per side on the hot path; the current
+  wait's start time and event code are process-local statics instead of
+  fields in the shared payload. The recorded data is identical to v8;
+  recording inside the capture assign hook is masked to what the stored
+  GUC value permitted, so the module's own attach waits are not counted.
 
 ## Producing the benchmark package
 
