@@ -1,5 +1,10 @@
 # Bare-metal measurement runbook, wait-event tracing v11
 
+<!-- This file is the source of truth. The top-level copy at
+     ../BAREMETAL-RUNBOOK-v11.md is generated from it (kept identical by
+     hand) so both the kit and the notes repo can each carry their own
+     copy without drifting; edit only this one. -->
+
 No SSH access or remote automation is required. Copy the two delivered files
 to the executor account on one otherwise-idle Linux bare-metal host:
 

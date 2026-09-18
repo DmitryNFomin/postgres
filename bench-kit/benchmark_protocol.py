@@ -1,6 +1,6 @@
 """Canonical constants for the v11 bare-metal benchmark protocol.
 
-See /Users/dmitryfomin/work/git/postgres_patch/v11/briefs/brief-v11-wpc-kit.md.
+See briefs/brief-v11-wpc-kit.md on the v11-notes branch.
 Unlike the v10 kit this comparison is a single seven-configuration matrix
 against vanilla PostgreSQL (there is no v9/v10 pair): master, master-aa,
 control, hook-null, module-off, stats, trace. CPU affinity is no longer

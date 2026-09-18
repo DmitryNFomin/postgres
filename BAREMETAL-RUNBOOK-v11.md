@@ -1,5 +1,10 @@
 # Bare-metal measurement runbook, wait-event tracing v11
 
+<!-- This file is the source of truth. The top-level copy at
+     ../BAREMETAL-RUNBOOK-v11.md is generated from it (kept identical by
+     hand) so both the kit and the notes repo can each carry their own
+     copy without drifting; edit only this one. -->
+
 No SSH access or remote automation is required. Copy the two delivered files
 to the executor account on one otherwise-idle Linux bare-metal host:
 
@@ -29,6 +34,94 @@ you tell it which CPUs to use for PostgreSQL and which for pgbench, and it
 verifies at runtime that both masks are non-empty, online, and share no
 physical core (see "CPU affinity" below).
 
+## Laptop workflow
+
+The full path from a coordinator's laptop (macOS or Linux) to a result back
+on that laptop. This kit never does its own SSH; you drive `scp`/`ssh` by
+hand:
+
+```sh
+# 1. On the laptop: get the sources and build the package.
+git clone git@github.com:DmitryNFomin/postgres.git pg && cd pg
+git fetch origin wet-v11 bench-v11-control
+git worktree add ../v11-notes origin/v11-notes   # or checkout
+cd ../v11-notes/bench-kit
+POSTGRES_REPO_PATH=/path/to/pg ./make-baremetal-package.sh ../dist
+
+# 2. Copy the two files to the Rocky Linux 8 host.
+scp ../dist/wet-v11-baremetal-r1.tar.gz \
+    ../dist/wet-v11-baremetal-r1.tar.gz.sha256 \
+    executor@HOST:~/
+
+# 3. Start the run under tmux on the host (see "Rocky Linux 8 preparation"
+#    below if the host is not set up yet).
+ssh executor@HOST
+tmux new -s v11-bench
+sha256sum -c wet-v11-baremetal-r1.tar.gz.sha256
+tar -xzf wet-v11-baremetal-r1.tar.gz
+cd wet-v11-baremetal-r1
+lscpu -e
+export SERVER_CPUS=...   # e.g. 1-31
+export PGBENCH_CPUS=...  # e.g. 32-39
+./run-benchmark.sh
+# detach with Ctrl-b d; reattach any time from a new ssh session with:
+#   tmux attach -t v11-bench
+
+# 4. After it finishes (8 to 10 hours later), from the laptop: fetch the
+#    two result archives run-benchmark.sh printed the paths for.
+scp executor@HOST:~/wet-v11-baremetal-r1/results-*.tar.gz \
+    executor@HOST:~/wet-v11-baremetal-r1/results-*.tar.gz.sha256 .
+scp "executor@HOST:/var/tmp/w6c-persistent-crossover-*.tar.gz" \
+    "executor@HOST:/var/tmp/w6c-persistent-crossover-*.tar.gz.sha256" .
+./analyze-raw-archive.sh results-*.tar.gz
+```
+
+The clone's remote name does not matter (`origin` above, or `fork`, or
+anything else you name it): `make-baremetal-package.sh` resolves
+`MASTER_SHA`/`V11_SHA`/`CONTROL_SHA` by commit hash via `git archive`, not
+by a branch/remote-qualified ref, and the `test_wait_primitive` fixture is
+packaged from the kit's own `fixture-src/` snapshot -- it is never read
+from any git ref, so no particular remote needs a particular name or a
+particular branch fetched for it. Only step 1's `git fetch origin wet-v11
+bench-v11-control` matters (substituting your remote's actual name for
+`origin`), so both branches the three commits above live on are present in
+the clone before packaging.
+
+## Rocky Linux 8 preparation
+
+One-time setup on a fresh Rocky Linux 8 executor host, as any user with
+`sudo`:
+
+```sh
+sudo dnf install -y gcc make bison flex perl-core python39 numactl util-linux tar gzip tmux
+```
+
+- `python39` installs as `python3.9`. The kit also accepts `python3.11`
+  (`sudo dnf install -y python3.11`, from the same base repos) if you
+  prefer it. `00-check-host.sh` and every other kit script try, in order,
+  `$PYTHON_BIN_OVERRIDE`, `python3.11`, `python3.9`, then the stock
+  `python3` (3.6 on Rocky 8, too old to use) and report which interpreter
+  they picked; if neither dnf package name matches what ends up installed,
+  set `PYTHON_BIN_OVERRIDE=/path/to/your/python3.9-or-newer/binary`.
+- `readline-devel` and `zlib-devel` are **not** needed: the kit's
+  `configure` invocation always passes `--without-readline --without-zlib`.
+  Only add them if you deliberately change that.
+- `gcc` 8.5 (Rocky 8's default) is fully supported. The host check only
+  warns on something older than gcc 8; it does not require anything newer.
+  `binutils` (which provides `objdump`, used by `01b-disassemble.sh`) is
+  pulled in automatically as a `gcc` dependency.
+- CPU governor, without `cpupower` (not installed by the line above):
+  ```sh
+  cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+  ```
+  Every line must read `performance`; if not, ask whoever administers the
+  host to set it -- `00-check-host.sh` only reads this file, it never
+  writes it.
+- SELinux does not matter for this kit: everything it does (build,
+  install, run PostgreSQL, write results) happens entirely under the
+  executor account's own `$HOME`, which is unconfined under Rocky 8's
+  stock targeted policy regardless of enforcing/permissive mode.
+
 ## What the launcher does
 
 The launcher is fail-closed and runs these phases in order:
@@ -44,17 +137,22 @@ The launcher is fail-closed and runs these phases in order:
 5. Build two independent vanilla baselines plus the patched (v11 series)
    and control sources with PostgreSQL's bundled `configure` script and
    GNU Make.
-6. Run the plateau probe (`plateau-probe.sh`): eight vanilla-only W6c
+6. Capture `objdump` disassembly of seven hot-path functions
+   (`01b-disassemble.sh`) from each of the four installed binaries, plus
+   the exact `gcc`/`objdump` versions used, as codegen evidence on the
+   actual benchmark toolchain (Rocky 8's gcc 8.5), for comparison against
+   `reports/wpd-report.md` (built with gcc 13).
+7. Run the plateau probe (`plateau-probe.sh`): eight vanilla-only W6c
    sessions (four with the dataset clone/initdb pinned to the server's
    NUMA node, four unpinned) and record which variant has the smaller
    session-to-session spread.
-7. Run a short smoke matrix covering all 35 configuration/workload cells.
-8. Wait automatically for one idle minute, then repeat the host check.
-9. Run the full 560-cell measurement matrix (7 configurations x 5
-   workloads x 16 repetitions).
-10. Run the second-stage persistent-backend crossover (`crossover/`) on the
+8. Run a short smoke matrix covering all 35 configuration/workload cells.
+9. Wait automatically for one idle minute, then repeat the host check.
+10. Run the full 560-cell measurement matrix (7 configurations x 5
+    workloads x 16 repetitions).
+11. Run the second-stage persistent-backend crossover (`crossover/`) on the
     patched installation.
-11. Package and checksum the raw evidence from both stages, without final
+12. Package and checksum the raw evidence from both stages, without final
     analysis.
 
 The package contains checksummed source snapshots for the three pinned
@@ -116,11 +214,13 @@ To check only package integrity, the self-test, and host readiness:
 - Two disjoint CPU sets for `SERVER_CPUS`/`PGBENCH_CPUS` that share no
   physical core (checked via `lscpu -p=CPU,CORE,SOCKET,NODE`).
 - At least 30 GB free under the extracted kit.
-- GCC, Python 3.9 or newer, Perl, Bison, Flex, GNU Make, `ar`, `ranlib`,
-  `tar`, `lscpu`, and `taskset`. `numactl` is recommended (used by the
-  plateau probe) but not required -- if it is absent and the host has more
-  than one NUMA node, the check warns but continues, and the probe falls
-  back to `taskset`-only pinning of the pinned variant.
+- GCC 8 or newer (Rocky Linux 8's stock gcc 8.5 is fine), a Python 3.9+
+  interpreter (the stock Rocky 8 `python3` is 3.6, too old -- see "Rocky
+  Linux 8 preparation" below), Perl, Bison, Flex, GNU Make, `ar`, `ranlib`,
+  `objdump`, `tar`, `lscpu`, and `taskset`. `numactl` is recommended (used
+  by the plateau probe) but not required -- if it is absent and the host
+  has more than one NUMA node, the check warns but continues, and the
+  probe falls back to `taskset`-only pinning of the pinned variant.
 - CPU frequency governor set to `performance`.
 - No active build, backup, or interactive workload. Existing low-activity
   PostgreSQL clusters are recorded as co-resident provenance and do not
@@ -175,7 +275,8 @@ Total: roughly 8 to 10 hours, matching the brief.
 
 On success, return these two files without editing or filtering them:
 
-1. `results-<hostname>-<date>.tar.gz` (matrix stage)
+1. `results-<hostname>-<date>.tar.gz` (matrix stage; includes
+   `results/disassembly/`, the gcc-8.5 codegen evidence from step 6 above)
 2. The crossover archive printed by its own launcher (second stage)
 
 Both sidecars use standard `sha256sum -c` format. Copy both result sets
