@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Minimal fake lscpu: only needs to exist so `command -v lscpu` checks
+# pass. Prints a small plausible single-socket, single-node topology if
+# actually invoked with -p (real cpu_affinity.py is bypassed entirely in
+# SELFTEST_FAKE_PREFIX mode, so this is not normally exercised).
+set -euo pipefail
+for arg in "$@"; do
+  case "$arg" in
+    -p=*|-p)
+      echo "# CPU,Core,Socket,Node"
+      for cpu in 0 1 2 3; do
+        echo "$cpu,$cpu,0,0"
+      done
+      exit 0
+      ;;
+  esac
+done
+echo "Architecture:        selftest-fakebin"
+echo "CPU(s):               4"
+echo "Socket(s):             1"
+echo "Core(s) per socket:    4"
+echo "Thread(s) per core:    1"
+exit 0

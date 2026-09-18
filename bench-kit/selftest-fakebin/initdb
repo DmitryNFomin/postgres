@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Fake initdb for the bench-kit fake-binaries self-test. Creates the data
+# directory the rest of the kit expects to append postgresql.conf lines
+# to, and prints initdb-shaped stdout. Never touches a real cluster.
+set -euo pipefail
+
+datadir=""
+args=("$@")
+i=0
+while [[ $i -lt ${#args[@]} ]]; do
+  case "${args[$i]}" in
+    -D)
+      i=$((i + 1))
+      datadir="${args[$i]}"
+      ;;
+  esac
+  i=$((i + 1))
+done
+
+[[ -n "$datadir" ]] || { echo "initdb: no data directory specified" >&2; exit 1; }
+
+mkdir -p "$datadir"
+: >"$datadir/postgresql.conf"
+echo "The files belonging to this database system will be owned by user \"$(id -un)\"."
+echo "The database cluster will be initialized with locale \"C\"."
+echo "creating directory $datadir ... ok"
+echo "creating subdirectories ... ok"
+echo "selecting default max_connections ... 100"
+echo "selecting default shared_buffers ... 128MB"
+echo "creating configuration files ... ok"
+echo "running bootstrap script ... ok"
+echo "syncing data to disk ... skipped"
+echo ""
+echo "Success. You can now start the database server using:"
+echo ""
+echo "    pg_ctl -D $datadir -l logfile start"
+echo ""

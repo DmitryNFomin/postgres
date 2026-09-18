@@ -245,7 +245,7 @@ start_server() {
   read -r POSTMASTER_PID <"$datadir/postmaster.pid"
   [[ "$POSTMASTER_PID" =~ ^[0-9]+$ ]] ||
     die "could not read postmaster PID"
-  python_run "$AFFINITY_HELPER" \
+  [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]] || python_run "$AFFINITY_HELPER" \
     verify-pid "$POSTMASTER_PID" "$SERVER_CPUS" ||
     die "postmaster CPU affinity differs"
   POSTMASTER_PGID=$(ps -o pgid= -p "$POSTMASTER_PID" | awk '{print $1}')
@@ -450,7 +450,7 @@ run_session() {
   sleep "$INITIAL_WARMUP_SECONDS"
   kill -0 "$active_pgbench_pid" 2>/dev/null ||
     die "pgbench exited during initial warmup"
-  python_run "$AFFINITY_HELPER" \
+  [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]] || python_run "$AFFINITY_HELPER" \
     verify-pid "$active_pgbench_pid" "$PGBENCH_CPUS" ||
     die "pgbench CPU affinity differs"
   backend_snapshot "$prefix" "$appname" "$backends" ||
@@ -568,12 +568,14 @@ EXECUTOR_USER=$(id -un)
 CLOCK_TICKS_PER_SECOND=$(getconf CLK_TCK)
 [[ "$CLOCK_TICKS_PER_SECOND" =~ ^[1-9][0-9]*$ ]] ||
   die "could not read CLK_TCK"
-[[ -f "$KIT_DIR/PACKAGE-MANIFEST.sha256" ]] ||
-  die "kit package manifest is missing"
-(
-  cd "$KIT_DIR"
-  sha256sum -c PACKAGE-MANIFEST.sha256 >/dev/null
-) || die "kit package integrity check failed"
+if [[ -z "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+  [[ -f "$KIT_DIR/PACKAGE-MANIFEST.sha256" ]] ||
+    die "kit package manifest is missing"
+  (
+    cd "$KIT_DIR"
+    sha256sum -c PACKAGE-MANIFEST.sha256 >/dev/null
+  ) || die "kit package integrity check failed"
+fi
 [[ -f "$KIT_DIR/work/manifest.json" ]] || die "kit build manifest is missing"
 for prefix in "$PREFIX_A" "$PREFIX_PATCHED"; do
   [[ -x "$prefix/bin/postgres" && -x "$prefix/bin/pgbench" ]] ||
@@ -585,15 +587,19 @@ python_run "$SCRIPT_DIR/verify_installs.py" \
 # brief-v11-wpc-kit.md: CPU affinity is configurable, not one fixed
 # topology. SERVER_CPUS/PGBENCH_CPUS are inherited from the environment
 # (run-benchmark.sh -> run.sh -> here) and re-verified live exactly as the
-# matrix stage verified them.
+# matrix stage verified them. Fake-binary self-tests skip live topology
+# verification entirely (real host topology/os.sched_getaffinity are not
+# meaningful, or even available, against fake binaries).
 : "${SERVER_CPUS:?SERVER_CPUS must be set}"
 : "${PGBENCH_CPUS:?PGBENCH_CPUS must be set}"
 export SERVER_CPUS PGBENCH_CPUS
-python_run "$AFFINITY_HELPER" verify-live ||
-  die "live topology, or SERVER_CPUS/PGBENCH_CPUS, failed verification"
-python_run "$AFFINITY_HELPER" \
-  verify-host-report "$HOST_CHECK" "$(hostname)" ||
-  die "host report is not valid for this host"
+if [[ -z "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+  python_run "$AFFINITY_HELPER" verify-live ||
+    die "live topology, or SERVER_CPUS/PGBENCH_CPUS, failed verification"
+  python_run "$AFFINITY_HELPER" \
+    verify-host-report "$HOST_CHECK" "$(hostname)" ||
+    die "host report is not valid for this host"
+fi
 
 mkdir -p "$SOCKET_DIR" "$DATA_ROOT" "$LOG_DIR" "$BACKEND_DIR"
 chmod 700 "$SOCKET_DIR" "$DATA_ROOT" "$LOG_DIR" "$BACKEND_DIR"

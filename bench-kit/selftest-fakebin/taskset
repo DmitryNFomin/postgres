@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fake taskset: this kit only ever calls it as `taskset -c LIST cmd args...`.
+# Drop the affinity flag (this host has no real affinity control to apply
+# in the self-test) and exec the wrapped command in place, so ps/pgrep
+# still see the right final process (comm, pid) for the fake binaries.
+set -euo pipefail
+if [[ "${1:-}" == "-c" ]]; then
+  shift 2
+fi
+exec "$@"

@@ -27,8 +27,10 @@ log() { printf '%s\n' "[$(date -u +%H:%M:%S)] $*"; }
 source "$SCRIPT_DIR/lib-python.sh"
 require_python
 
-"$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" check "$SCRIPT_DIR/sources.conf" ||
-  die "sources.conf is not filled in"
+if [[ -z "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+  "$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" check "$SCRIPT_DIR/sources.conf" ||
+    die "sources.conf is not filled in"
+fi
 
 : "${SERVER_CPUS:?SERVER_CPUS must be set}"
 : "${PGBENCH_CPUS:?PGBENCH_CPUS must be set}"
@@ -42,16 +44,24 @@ PREFIX_BASELINE_A="$WORK/install/base-a"
 [[ -x "$PREFIX_BASELINE_A/bin/postgres" ]] ||
   die "missing baseline-a build at $PREFIX_BASELINE_A -- run ./01-build-all.sh first"
 
-AFFINITY_JSON=$("$PYTHON_BIN" "$AFFINITY_HELPER" collect) ||
-  die "SERVER_CPUS/PGBENCH_CPUS failed verification"
-SERVER_NUMA_NODE=$("$PYTHON_BIN" -c "
+if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+  # Real host CPU topology is meaningless against fake binaries (and
+  # cpu_affinity.py's os.sched_getaffinity() is not even available on
+  # every self-test platform, e.g. macOS): skip live topology
+  # verification and use a fixed fake NUMA node.
+  SERVER_NUMA_NODE=0
+else
+  AFFINITY_JSON=$("$PYTHON_BIN" "$AFFINITY_HELPER" collect) ||
+    die "SERVER_CPUS/PGBENCH_CPUS failed verification"
+  SERVER_NUMA_NODE=$("$PYTHON_BIN" -c "
 import json, sys
 data = json.loads('''$AFFINITY_JSON''')
 nodes = data['server_numa_nodes']
 print(nodes[0] if nodes else '')
 ")
-[[ -n "$SERVER_NUMA_NODE" ]] ||
-  die "could not determine the server's NUMA node from SERVER_CPUS"
+  [[ -n "$SERVER_NUMA_NODE" ]] ||
+    die "could not determine the server's NUMA node from SERVER_CPUS"
+fi
 
 NUMACTL_AVAILABLE=0
 command -v numactl >/dev/null 2>&1 && NUMACTL_AVAILABLE=1
@@ -67,8 +77,13 @@ mkdir -p "$SOCKET_DIR" "$DATA_ROOT" "$LOG_DIR"
 # Full-protocol W6c shape (brief: shared_buffers per workload as in v10;
 # 16-repetition full matrix uses 30s window/10s warmup; the probe uses the
 # same window so it is diagnostic of the actual run, not the smoke profile).
-DURATION=30
-WARMUP_SECONDS=10
+if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+  DURATION=2
+  WARMUP_SECONDS=1
+else
+  DURATION=30
+  WARMUP_SECONDS=10
+fi
 PGBENCH_SCALE=100
 CLIENTS=32
 THREADS=8

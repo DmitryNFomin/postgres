@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Fake cc/gcc: answers --version realistically. SELFTEST_FAKE_PREFIX mode
+# never actually compiles anything (01-build-all.sh skips straight to
+# installing stub binaries), so this is only reached by version-probing
+# code (00-check-host.sh, 01b-disassemble.sh's PROVENANCE step).
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  echo "cc (selftest-fakebin GCC) 8.5.0 20210514 (Red Hat 8.5.0-20)"
+  echo "Copyright (C) 2018 Free Software Foundation, Inc."
+  exit 0
+fi
+echo "cc (selftest-fakebin): compilation is skipped under SELFTEST_FAKE_PREFIX" >&2
+exit 1

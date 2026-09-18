@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Fake postgres binary. Never actually run as a server (the fake pg_ctl
+# backgrounds a plain `sleep` instead of exec'ing this); exists so
+# `[[ -x "$prefix/bin/postgres" ]]` existence checks pass and so that
+# anything probing --version gets a plausible answer.
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  echo "postgres (PostgreSQL) 18devel (selftest-fakebin)"
+  exit 0
+fi
+echo "fake postgres (selftest-fakebin): not meant to be executed directly" >&2
+exit 1

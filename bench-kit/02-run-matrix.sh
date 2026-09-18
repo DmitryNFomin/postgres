@@ -57,8 +57,16 @@ case "$MODE" in
   smoke)
     RESULTS="$SCRIPT_DIR/smoke-results"
     RUNS=1
-    DURATION=6
-    WARMUP_SECONDS=3
+    if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+      DURATION=2
+      # The mode-proof queries (recording-proof.sql/w3-qualification.sql)
+      # need to complete strictly inside the warmup window even against
+      # the fake binaries' own process-startup overhead.
+      WARMUP_SECONDS=3
+    else
+      DURATION=6
+      WARMUP_SECONDS=3
+    fi
     PGBENCH_SCALE=1
     W1_ITERATIONS=100000
     QUIESCENCE_SECONDS=0
@@ -117,6 +125,7 @@ run_pgbench_from_prefix() {
 
 assert_process_affinity() {
   local pid=$1 expected=$2 role=$3
+  [[ -z "${SELFTEST_FAKE_PREFIX:-}" ]] || return 0
   "$PYTHON_BIN" "$AFFINITY_HELPER" verify-pid "$pid" "$expected" ||
     die "$role process does not have the required CPU affinity"
 }
@@ -191,8 +200,6 @@ $RESULTS aside (or remove it) if you want to start over, or run
 # (run-benchmark.sh reads them from the operator, see the runbook), and are
 # re-verified live here exactly as 00-check-host.sh verified them.
 # ---------------------------------------------------------------------------
-[[ -f "$AFFINITY_HELPER" && ! -L "$AFFINITY_HELPER" ]] ||
-  die "missing regular CPU-affinity helper: $AFFINITY_HELPER"
 : "${SERVER_CPUS:?SERVER_CPUS must be set (see the runbook)}"
 : "${PGBENCH_CPUS:?PGBENCH_CPUS must be set (see the runbook)}"
 export SERVER_CPUS PGBENCH_CPUS
@@ -200,13 +207,27 @@ export SERVER_CPUS PGBENCH_CPUS
 for tool in "$PYTHON_BIN" sha256sum awk ps taskset lscpu; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
 done
-AFFINITY_PROOF_JSON=$("$PYTHON_BIN" "$AFFINITY_HELPER" collect) ||
-  die "live CPU topology, or SERVER_CPUS/PGBENCH_CPUS, failed verification"
-[[ -f "$HOST_CHECK" ]] ||
-  die "missing $HOST_CHECK -- run ./00-check-host.sh first"
-"$PYTHON_BIN" "$AFFINITY_HELPER" \
-  verify-host-report "$HOST_CHECK" "$(hostname)" ||
-  die "host check is not a clean report for this host"
+if [[ -z "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+  [[ -f "$AFFINITY_HELPER" && ! -L "$AFFINITY_HELPER" ]] ||
+    die "missing regular CPU-affinity helper: $AFFINITY_HELPER"
+  AFFINITY_PROOF_JSON=$("$PYTHON_BIN" "$AFFINITY_HELPER" collect) ||
+    die "live CPU topology, or SERVER_CPUS/PGBENCH_CPUS, failed verification"
+  [[ -f "$HOST_CHECK" ]] ||
+    die "missing $HOST_CHECK -- run ./00-check-host.sh first"
+  "$PYTHON_BIN" "$AFFINITY_HELPER" \
+    verify-host-report "$HOST_CHECK" "$(hostname)" ||
+    die "host check is not a clean report for this host"
+else
+  AFFINITY_PROOF_JSON='{"selftest_fake_prefix": true}'
+  # The protocol.json provenance step below hashes host-check.txt/.json
+  # unconditionally; 00-check-host.sh is never run in fake-binary
+  # self-tests, so provide minimal stand-ins if real ones are not there.
+  [[ -f "$SCRIPT_DIR/host-check.txt" ]] ||
+    echo "selftest-fakebin: 00-check-host.sh was not run" >"$SCRIPT_DIR/host-check.txt"
+  [[ -f "$SCRIPT_DIR/host-check.json" ]] ||
+    echo '{"selftest_fake_prefix": true, "warning_count": 0}' \
+      >"$SCRIPT_DIR/host-check.json"
+fi
 [[ -r "$MANIFEST" ]] ||
   die "missing $MANIFEST -- run ./01-build-all.sh first"
 BUILD_MANIFEST_SHA256=$(sha256sum "$MANIFEST" | awk '{print $1}')
@@ -273,8 +294,11 @@ PORT=${PGBENCH_KIT_PORT:-55471}
 DBUSER=$(id -un)
 
 (( RUNS > 0 )) || die "RUNS must be greater than zero"
-(( DURATION >= 5 )) || die "DURATION must be at least 5 seconds"
-(( WARMUP_SECONDS >= 2 )) || die "WARMUP_SECONDS must be at least 2 seconds"
+MIN_DURATION=5
+MIN_WARMUP_SECONDS=2
+[[ -z "${SELFTEST_FAKE_PREFIX:-}" ]] || { MIN_DURATION=1; MIN_WARMUP_SECONDS=1; }
+(( DURATION >= MIN_DURATION )) || die "DURATION must be at least $MIN_DURATION seconds"
+(( WARMUP_SECONDS >= MIN_WARMUP_SECONDS )) || die "WARMUP_SECONDS must be at least $MIN_WARMUP_SECONDS seconds"
 (( PGBENCH_SCALE > 0 )) || die "PGBENCH_SCALE must be greater than zero"
 (( W1_ITERATIONS > 0 )) || die "W1_ITERATIONS must be greater than zero"
 (( QUIESCENCE_SECONDS >= 0 )) || die "QUIESCENCE_SECONDS must not be negative"
@@ -603,7 +627,7 @@ PY
 }
 
 meminfo_cached_kb() {
-  awk '/^Cached:/{print $2; exit}' /proc/meminfo
+  awk '/^Cached:/{print $2; exit}' /proc/meminfo 2>/dev/null || echo ""
 }
 
 numa_local_fraction() {
@@ -790,9 +814,11 @@ run_pgbench_measured() {
     die "pgbench exited before the warmup proof point; see $logfile"
   fi
   local pgbench_comm pgbench_cpu
-  pgbench_comm=$(ps -o comm= -p "$pgbench_pid" | awk '{print $1}')
-  [[ "${pgbench_comm##*/}" == pgbench ]] ||
-    die "background pid $pgbench_pid is '$pgbench_comm', not pgbench"
+  if [[ -z "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+    pgbench_comm=$(ps -o comm= -p "$pgbench_pid" | awk '{print $1}')
+    [[ "${pgbench_comm##*/}" == pgbench ]] ||
+      die "background pid $pgbench_pid is '$pgbench_comm', not pgbench"
+  fi
   assert_process_affinity "$pgbench_pid" "$PGBENCH_CPUS" "pgbench"
   pgbench_cpu=$(ps -o pcpu= -p "$pgbench_pid" | awk '{print $1}')
   [[ "$pgbench_cpu" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
@@ -837,6 +863,7 @@ PY
       local proof client_count clients_recording timing_calls trace_records
       proof=$(psql_for "$prefix" -qAt -F ',' \
         -v appname="$appname" -v expect_trace="$expect_trace" \
+        ${SELFTEST_FAKE_PREFIX:+-v selftest_clients="$clients"} \
         -f "$WORKLOAD_DIR/recording-proof.sql") ||
         die "could not prove client recording during warmup; see $logfile"
       printf '%s\n' \

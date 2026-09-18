@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+# Fake psql for the bench-kit fake-binaries self-test (see
+# selftest-fakebin/README.md). There is no real server anywhere in the
+# self-test, so this answers a small, pattern-matched set of queries the
+# kit actually issues -- driven by the SQL text, by the -f script's
+# basename, and by the postgresql.conf/state files the fake pg_ctl leaves
+# behind for the "active" data directory -- instead of connecting to
+# anything. Never touches a real PostgreSQL installation.
+set -euo pipefail
+
+sep="|"
+sql=""
+sqlfile=""
+declare -a vnames=()
+declare -a vvalues=()
+
+args=("$@")
+i=0
+n=${#args[@]}
+while [[ $i -lt $n ]]; do
+  arg="${args[$i]}"
+  case "$arg" in
+    -F)
+      i=$((i + 1)); sep="${args[$i]}" ;;
+    -c)
+      i=$((i + 1)); sql="${args[$i]}" ;;
+    -f)
+      i=$((i + 1)); sqlfile="${args[$i]}" ;;
+    -v)
+      i=$((i + 1))
+      kv="${args[$i]}"
+      vnames+=("${kv%%=*}")
+      vvalues+=("${kv#*=}")
+      ;;
+    -*[cC])
+      # Bundled short options ending in a value-taking 'c', e.g. -qAtc.
+      i=$((i + 1)); sql="${args[$i]}" ;;
+  esac
+  i=$((i + 1))
+done
+
+psql_var() {
+  local name=$1 idx
+  for idx in "${!vnames[@]}"; do
+    [[ "${vnames[$idx]}" == "$name" ]] && { printf '%s' "${vvalues[$idx]}"; return 0; }
+  done
+  return 1
+}
+
+datadir=""
+if [[ -n "${PGHOST:-}" && -f "$PGHOST/.active-datadir" ]]; then
+  datadir=$(cat "$PGHOST/.active-datadir")
+fi
+conf="$datadir/postgresql.conf"
+
+guc_value() {
+  # Prints the last `name = 'value'` line from postgresql.conf, if any.
+  local name=$1
+  [[ -f "$conf" ]] || return 1
+  local line
+  line=$(grep -E "^${name//./\\.}[[:space:]]*=" "$conf" | tail -n 1) || return 1
+  [[ -n "$line" ]] || return 1
+  line=${line#*=}
+  line=$(printf '%s' "$line" | sed -e "s/^[[:space:]']*//" -e "s/[[:space:]']*$//")
+  printf '%s' "$line"
+}
+
+extensions_file="$datadir/.selftest-extensions"
+capture_state_file="$datadir/.selftest-capture-state"
+
+capture_state_get() {
+  local key=$1 default=$2
+  [[ -f "$capture_state_file" ]] || { printf '%s' "$default"; return; }
+  local value
+  value=$( { grep "^${key}=" "$capture_state_file" || true; } | tail -n 1 | cut -d= -f2-)
+  [[ -n "$value" ]] && printf '%s' "$value" || printf '%s' "$default"
+}
+
+capture_state_set() {
+  local key=$1 value=$2
+  local tmp="$capture_state_file.tmp.$$"
+  { [[ -f "$capture_state_file" ]] && grep -v "^${key}=" "$capture_state_file"; true; } >"$tmp"
+  echo "${key}=${value}" >>"$tmp"
+  mv -- "$tmp" "$capture_state_file"
+}
+
+# ---------------------------------------------------------------------------
+# -f <file> dispatch: recognized by basename only (content is never real
+# SQL syntax the fake would evaluate).
+# ---------------------------------------------------------------------------
+if [[ -n "$sqlfile" ]]; then
+  base=$(basename -- "$sqlfile")
+  case "$base" in
+    recording-proof.sql)
+      expect_trace=$(psql_var expect_trace || echo false)
+      clients=$(psql_var selftest_clients || echo 32)
+      timing_calls=1000
+      trace_records=0
+      [[ "$expect_trace" == true ]] && trace_records=5
+      printf '%s%s%s%s%s%s%s\n' \
+        "$clients" "$sep" "$clients" "$sep" "$timing_calls" "$sep" "$trace_records"
+      exit 0
+      ;;
+    w3-qualification.sql)
+      # One synthetic LWLock/ProcArray row plus a negligible IO row, shaped
+      # to clear every w3_qualification.py threshold (see THRESHOLDS
+      # there): >=1000 lwlock calls/s, >=95% lwlock share, >=95% of that
+      # ProcArray, <=1% IO share, and small p50/p95 upper bounds.
+      hist_hot="20000,20000,10000,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+      hist_cold="0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1"
+      printf 'LWLock\tProcArray\t50000\t500\t50\t%s\n' "$hist_hot"
+      printf 'IO\tDataFileRead\t1\t1\t1\t%s\n' "$hist_cold"
+      exit 0
+      ;;
+    *)
+      exit 0
+      ;;
+  esac
+fi
+
+[[ -n "$sql" ]] || exit 0
+normalized=$(printf '%s' "$sql" | tr -s '[:space:]' ' ')
+upper=$(printf '%s' "$normalized" | tr '[:lower:]' '[:upper:]')
+
+case "$upper" in
+  "SHOW "*)
+    guc=$(printf '%s' "$normalized" | awk '{print $2}' | tr -d ';')
+    case "$guc" in
+      shared_preload_libraries)
+        val=$(guc_value shared_preload_libraries) || val=""
+        printf '%s\n' "$val"
+        exit 0
+        ;;
+      timing_clock_source)
+        printf 'clock_gettime\n'
+        exit 0
+        ;;
+      *)
+        val=$(guc_value "$guc") && { printf '%s\n' "$val"; exit 0; }
+        echo "psql: error: ERROR:  unrecognized configuration parameter \"$guc\"" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  "CHECKPOINT"*|"ALTER SYSTEM SET "*)
+    if [[ "$upper" == "ALTER SYSTEM SET "* ]]; then
+      # ALTER SYSTEM SET pg_wait_event_tracing.capture = 'MODE'
+      mode=$(printf '%s' "$normalized" | sed -nE "s/.*capture[[:space:]]*=[[:space:]]*'([a-z]+)'.*/\1/p")
+      [[ -n "$mode" ]] && capture_state_set mode "$mode"
+    fi
+    exit 0
+    ;;
+  "SELECT PG_RELOAD_CONF()"*)
+    printf 't\n'
+    exit 0
+    ;;
+  "SELECT SETTING FROM PG_FILE_SETTINGS"*)
+    capture_state_get mode stats
+    printf '\n'
+    exit 0
+    ;;
+  "CREATE EXTENSION"*)
+    ext=$(printf '%s' "$normalized" | sed -E 's/CREATE EXTENSION( IF NOT EXISTS)? //I; s/;.*//' | awk '{print $1}')
+    mkdir -p "$(dirname "$extensions_file")" 2>/dev/null || true
+    echo "$ext" >>"$extensions_file"
+    exit 0
+    ;;
+  "SELECT COUNT(*) FROM PG_EXTENSION"*)
+    ext=$(printf '%s' "$normalized" | sed -nE "s/.*extname[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p")
+    if [[ -f "$extensions_file" ]] && grep -qx "$ext" "$extensions_file"; then
+      printf '1\n'
+    else
+      printf '0\n'
+    fi
+    exit 0
+    ;;
+  "SELECT COUNT(*) FROM PGBENCH_ACCOUNTS"*)
+    printf '100000\n'
+    exit 0
+    ;;
+  "SELECT PID FROM PG_STAT_ACTIVITY"*)
+    # Fixed, stable set of 32 fake client-backend pids: real backend_type
+    # filtering has nothing to key off in the self-test, so the same 32
+    # values are returned on every call for every appname, which is all
+    # assert_same_backends()/backend_snapshot() require (a stable set).
+    for n in $(seq 20001 20032); do printf '%s\n' "$n"; done
+    exit 0
+    ;;
+  "WITH CLIENTS AS MATERIALIZED"*)
+    # crossover/run-worker.sh's capture_snapshot(): client_count,
+    # clients_recording, calls, trace_records. Calls strictly increase
+    # every time capture is on, which is what append_mode_proof()/
+    # set_capture_mode() require to prove recording is live.
+    mode=$(capture_state_get mode stats)
+    if [[ "$mode" == off ]]; then
+      printf '32%s0%s0%s0\n' "$sep" "$sep" "$sep"
+    else
+      prev=$(capture_state_get calls 0)
+      next=$((prev + 137 + RANDOM % 50))
+      capture_state_set calls "$next"
+      trace=0
+      [[ "$mode" == trace ]] && trace=$((next / 3 + 1))
+      printf '32%s32%s%s%s%s\n' "$sep" "$sep" "$next" "$sep" "$trace"
+    fi
+    exit 0
+    ;;
+  *)
+    if [[ -n "$(psql_var hooks_installed 2>/dev/null || true)" ]]; then :; fi
+    if printf '%s' "$normalized" | grep -qi 'hooks_installed'; then
+      printf 'f\n'
+      exit 0
+    fi
+    # Generic fallback for scalar/tuple SELECTs made of top-level
+    # comma-separated expressions (e.g. 02-run-matrix.sh's combined W1
+    # measurement query): echo back any expression that is already a bare
+    # integer literal (the kit itself passes literal "0" for
+    # recorded/trace fields it wants to stay at zero), and fabricate a
+    # small positive number for anything else, using the expression text
+    # itself to keep results reasonably distinguishable.
+    body=$(printf '%s' "$normalized" | sed -E 's/^SELECT //I')
+    "${PYTHON_BIN:-python3}" - "$body" "$sep" <<'PY'
+import re
+import sys
+
+body, sep = sys.argv[1], sys.argv[2]
+fields = []
+depth = 0
+current = ""
+for ch in body:
+    if ch == "(":
+        depth += 1
+    elif ch == ")":
+        depth -= 1
+    if ch == "," and depth == 0:
+        fields.append(current)
+        current = ""
+    else:
+        current += ch
+if current.strip():
+    fields.append(current)
+
+out = []
+for field in fields:
+    text = field.strip()
+    if re.fullmatch(r"[0-9]+", text):
+        out.append(text)
+        continue
+    if re.fullmatch(r"[0-9]+\.[0-9]+", text):
+        out.append(text)
+        continue
+    seed = sum(ord(c) for c in text) or 1
+    if "pg_get_wait_event_trace" in text or "pg_backend_wait_event_trace" in text:
+        out.append(str(seed % 50 + 1))
+    elif "pg_stat_get_wait_event_timing" in text or "coalesce" in text.lower():
+        out.append(str(seed % 5000 + 100))
+    else:
+        # Looks like a W1 fixture function call: a plausible ns/iteration.
+        out.append(f"{(seed % 5000) / 100.0 + 1:.6g}")
+print(sep.join(out))
+PY
+    exit 0
+    ;;
+esac

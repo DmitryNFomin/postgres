@@ -8,16 +8,16 @@
 No SSH access or remote automation is required. Copy the two delivered files
 to the executor account on one otherwise-idle Linux bare-metal host:
 
-- `wet-v11-baremetal-r1.tar.gz`
-- `wet-v11-baremetal-r1.tar.gz.sha256`
+- `wet-v11-baremetal-r2.tar.gz`
+- `wet-v11-baremetal-r2.tar.gz.sha256`
 
 Put them directly under the executor account's home directory. Then verify,
 extract, set this host's CPU masks, and start the complete run:
 
 ```sh
-sha256sum -c wet-v11-baremetal-r1.tar.gz.sha256
-tar -xzf wet-v11-baremetal-r1.tar.gz
-cd wet-v11-baremetal-r1
+sha256sum -c wet-v11-baremetal-r2.tar.gz.sha256
+tar -xzf wet-v11-baremetal-r2.tar.gz
+cd wet-v11-baremetal-r2
 lscpu -e                      # find two disjoint CPU sets on separate cores
 export SERVER_CPUS=...        # e.g. 1-31 (PostgreSQL)
 export PGBENCH_CPUS=...       # e.g. 32-39 (pgbench), no shared physical core
@@ -49,17 +49,17 @@ cd ../v11-notes/bench-kit
 POSTGRES_REPO_PATH=/path/to/pg ./make-baremetal-package.sh ../dist
 
 # 2. Copy the two files to the Rocky Linux 8 host.
-scp ../dist/wet-v11-baremetal-r1.tar.gz \
-    ../dist/wet-v11-baremetal-r1.tar.gz.sha256 \
+scp ../dist/wet-v11-baremetal-r2.tar.gz \
+    ../dist/wet-v11-baremetal-r2.tar.gz.sha256 \
     executor@HOST:~/
 
 # 3. Start the run under tmux on the host (see "Rocky Linux 8 preparation"
 #    below if the host is not set up yet).
 ssh executor@HOST
 tmux new -s v11-bench
-sha256sum -c wet-v11-baremetal-r1.tar.gz.sha256
-tar -xzf wet-v11-baremetal-r1.tar.gz
-cd wet-v11-baremetal-r1
+sha256sum -c wet-v11-baremetal-r2.tar.gz.sha256
+tar -xzf wet-v11-baremetal-r2.tar.gz
+cd wet-v11-baremetal-r2
 lscpu -e
 export SERVER_CPUS=...   # e.g. 1-31
 export PGBENCH_CPUS=...  # e.g. 32-39
@@ -69,12 +69,64 @@ export PGBENCH_CPUS=...  # e.g. 32-39
 
 # 4. After it finishes (8 to 10 hours later), from the laptop: fetch the
 #    two result archives run-benchmark.sh printed the paths for.
-scp executor@HOST:~/wet-v11-baremetal-r1/results-*.tar.gz \
-    executor@HOST:~/wet-v11-baremetal-r1/results-*.tar.gz.sha256 .
+scp executor@HOST:~/wet-v11-baremetal-r2/results-*.tar.gz \
+    executor@HOST:~/wet-v11-baremetal-r2/results-*.tar.gz.sha256 .
 scp "executor@HOST:/var/tmp/w6c-persistent-crossover-*.tar.gz" \
     "executor@HOST:/var/tmp/w6c-persistent-crossover-*.tar.gz.sha256" .
 ./analyze-raw-archive.sh results-*.tar.gz
 ```
+
+## Restarting after a failure
+
+If the run dies partway through (for example, a plateau-probe crash), fix
+the problem on the laptop, then get a fixed package back onto the host
+without a fresh `git clone`:
+
+```sh
+# 1. On the laptop, in the notes checkout: pull the fix.
+cd v11-notes && git pull
+
+# 2. Rebuild the package (same command as the laptop workflow above).
+cd bench-kit
+POSTGRES_REPO_PATH=/path/to/pg ./make-baremetal-package.sh ../dist
+
+# 3. Copy it to the host, same as before.
+scp ../dist/wet-v11-baremetal-r2.tar.gz \
+    ../dist/wet-v11-baremetal-r2.tar.gz.sha256 \
+    executor@HOST:~/
+
+# 4. On the host: extract into a NEW directory (or delete the old one
+#    first) -- never extract a new package on top of an old one.
+ssh executor@HOST
+sha256sum -c wet-v11-baremetal-r2.tar.gz.sha256
+tar -xzf wet-v11-baremetal-r2.tar.gz
+cd wet-v11-baremetal-r2
+```
+
+The four builds from the failed run took 20 to 40 minutes and are still
+good if nothing about the build changed (only e.g. a benchmarking-script
+fix, not a source/patch change). Reuse them instead of paying for a
+rebuild by copying the OLD extraction's `work/` directory into the new
+one, then passing `--reuse-builds`:
+
+```sh
+cp -a ../wet-v11-baremetal-r1/work .   # the failed run's build output
+export SERVER_CPUS=...
+export PGBENCH_CPUS=...
+./run-benchmark.sh --reuse-builds
+```
+
+`--reuse-builds` recomputes the SHA-256 of every bundled source archive and
+every installed `postgres`/`pgbench`/`psql`/`initdb`/`pg_ctl` binary under
+`work/install/` and compares them against `work/manifest.json`; it only
+skips `01-build-all.sh`/`01b-disassemble.sh` if every one of those still
+matches byte-for-byte, and refuses to run at all otherwise (it never
+silently rebuilds or reuses something that no longer matches). A
+pre-existing `results`/`smoke-results` directory is always refused, with
+or without this flag -- a partial matrix can never be resumed or merged,
+only a restart *before* the matrix phase can skip the build.
+
+Changelog: r1 crashed in the plateau probe; r2 fixes it.
 
 The clone's remote name does not matter (`origin` above, or `fork`, or
 anything else you name it): `make-baremetal-package.sh` resolves
@@ -131,8 +183,17 @@ The launcher is fail-closed and runs these phases in order:
    archive.
 2. Check the Linux host and prerequisites, including the CPU-affinity
    masks above.
-3. Run the synthetic self-test (`self-test.py`) -- no PostgreSQL server is
-   started for this step; it uses generated data only.
+3. Run the self-test (`self-test.py`): synthetic-data tampering checks
+   against `analyze-results.py`, plus a fake-binaries self-test
+   (`selftest-fakebin/run-selftest.sh`) that drives `01-build-all.sh`
+   (`SELFTEST_FAKE_PREFIX`), `plateau-probe.sh`, `01b-disassemble.sh`, a
+   35-cell `02-run-matrix.sh` smoke matrix, and `03-collect.sh` through
+   their real shell control flow against stub `pg_ctl`/`initdb`/
+   `pgbench`/`psql` binaries -- catching bugs like a `pg_ctl stop` message
+   leaking into a captured value (the cause of the plateau-probe crash
+   r2 fixes) before a real server is ever started. No PostgreSQL server
+   is started for this step; it also runs on the coordinator's laptop via
+   `./run-benchmark.sh --preflight-only`.
 4. Wait for one idle minute.
 5. Build two independent vanilla baselines plus the patched (v11 series)
    and control sources with PostgreSQL's bundled `configure` script and

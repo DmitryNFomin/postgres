@@ -21,6 +21,124 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/lib-python.sh"
 require_python
 
+# ---------------------------------------------------------------------------
+# SELFTEST_FAKE_PREFIX: fake-binaries self-test mode (selftest-fakebin/,
+# driven by selftest-fakebin/run-selftest.sh via self-test.py). Skips real
+# compilation entirely and installs the stub pg_ctl/initdb/pgbench/psql/
+# postgres/pg_test_timing binaries at every runtime prefix the rest of the
+# kit expects, plus a manifest.json whose hashes genuinely match what got
+# installed, so 02-run-matrix.sh's binary-vs-manifest check still means
+# something. Never used for a real benchmark run.
+# ---------------------------------------------------------------------------
+if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+  [[ -d "$SELFTEST_FAKE_PREFIX" ]] ||
+    die "SELFTEST_FAKE_PREFIX does not exist: $SELFTEST_FAKE_PREFIX"
+  WORK="$SCRIPT_DIR/work"
+  INSTALL_ROOT="$WORK/install"
+  MANIFEST="$WORK/manifest.json"
+  RECORDS="$WORK/.build-records.jsonl"
+  hash_file() { sha256sum "$1" | awk '{print $1}'; }
+
+  install_fake_prefix() {
+    local runtime_leaf=$1 build_module=$2
+    local prefix="$INSTALL_ROOT/$runtime_leaf"
+    rm -rf -- "$prefix"
+    mkdir -p "$prefix/bin" "$prefix/lib"
+    local bin
+    for bin in postgres pg_ctl initdb pgbench psql pg_test_timing; do
+      cp "$SELFTEST_FAKE_PREFIX/$bin" "$prefix/bin/$bin"
+      chmod +x "$prefix/bin/$bin"
+    done
+    echo "fake test_wait_primitive shared object (selftest-fakebin)" \
+      >"$prefix/lib/test_wait_primitive.so"
+    local module_sha=none
+    if [[ "$build_module" == yes ]]; then
+      echo "fake pg_wait_event_tracing shared object (selftest-fakebin)" \
+        >"$prefix/lib/pg_wait_event_tracing.so"
+      module_sha=$(hash_file "$prefix/lib/pg_wait_event_tracing.so")
+    fi
+    "$PYTHON_BIN" - "$RECORDS" "$name_for_leaf" "$runtime_leaf" "$prefix" \
+      "$(hash_file "$prefix/bin/postgres")" \
+      "$(hash_file "$prefix/bin/pgbench")" \
+      "$(hash_file "$prefix/bin/psql")" \
+      "$(hash_file "$prefix/bin/initdb")" \
+      "$(hash_file "$prefix/bin/pg_ctl")" \
+      "$(hash_file "$prefix/lib/test_wait_primitive.so")" \
+      "$module_sha" <<'PY'
+import json
+import sys
+(out, name, leaf, prefix, postgres_sha, pgbench_sha, psql_sha, initdb_sha,
+ pg_ctl_sha, fixture_sha, module_sha) = sys.argv[1:]
+record = {
+    "name": name,
+    "commit": "selftest-fake",
+    "runtime_prefix": prefix,
+    "compile_prefix": prefix,
+    "compiler": {"c": {"command": "cc", "path": "selftest-fakebin/cc",
+                        "sha256": "0" * 64, "version": "selftest-fakebin"}},
+    "install_tree": {},
+    "fixture_tree": "selftest-fake",
+    "provenance_sha256": {"build_log": "0" * 64, "compiler_json": "0" * 64,
+                           "install_tree_json": "0" * 64},
+    "sha256": {
+        "postgres": postgres_sha, "pgbench": pgbench_sha, "psql": psql_sha,
+        "initdb": initdb_sha, "pg_ctl": pg_ctl_sha,
+        "test_wait_primitive": fixture_sha, "pg_wait_event_tracing": module_sha,
+    },
+}
+with open(out, "a", encoding="utf-8") as f:
+    json.dump(record, f, sort_keys=True)
+    f.write("\n")
+PY
+  }
+
+  mkdir -p "$WORK" "$WORK/build-logs"
+  echo '{"schema_version": 11, "selftest_fake_prefix": true}' \
+    >"$WORK/source-manifest.json"
+  : >"$RECORDS"
+  for pair in "baseline-a=base-a=no" "baseline-b=base-b=no" \
+              "patched=patchd=yes" "control=ctrlop=no"; do
+    name_for_leaf=${pair%%=*}
+    rest=${pair#*=}
+    leaf=${rest%%=*}
+    module=${rest#*=}
+    install_fake_prefix "$leaf" "$module"
+  done
+
+  "$PYTHON_BIN" - "$MANIFEST" "$RECORDS" <<'PY'
+import datetime
+import json
+import sys
+
+out, records_path = sys.argv[1:]
+with open(records_path, encoding="utf-8") as f:
+    builds = [json.loads(line) for line in f if line.strip()]
+manifest = {
+    "schema_version": 11,
+    "benchmark_series": "wet-v11",
+    "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "build_host": "selftest-fakebin",
+    "repo_url": "selftest-fakebin",
+    "source_date_epoch": 0,
+    "build_system": "selftest-fake (SELFTEST_FAKE_PREFIX, no compilation)",
+    "optimization": "n/a",
+    "parallel_jobs": 1,
+    "environment": {},
+    "compiler_cache": "disabled",
+    "bundled_source": {},
+    "path_control": {"runtime_prefix_leaf_bytes": 6},
+    "builds": builds,
+}
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(manifest, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+
+  log "SELFTEST_FAKE_PREFIX mode: installed fake binaries at $INSTALL_ROOT/{base-a,base-b,patchd,ctrlop}"
+  log "Build manifest (fake): $MANIFEST"
+  exit 0
+fi
+
 "$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" check "$SCRIPT_DIR/sources.conf" ||
   die "sources.conf is not filled in (see the brief's Launch note)"
 

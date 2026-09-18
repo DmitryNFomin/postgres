@@ -70,7 +70,7 @@ from git. The only thing that must happen first is `git fetch origin
 wet-v11 bench-v11-control` (substituting your remote's actual name), so
 both branches the three pinned commits live on are present in the clone.
 
-Then copy `dist/wet-v11-baremetal-r1.tar.gz` and its `.sha256` sidecar to
+Then copy `dist/wet-v11-baremetal-r2.tar.gz` and its `.sha256` sidecar to
 the bare-metal host and follow `BAREMETAL-RUNBOOK-v11.md` (also present
 in this repo at the top level, and inside the package itself) -- see its
 "Laptop workflow" section for the full clone-to-scp-to-ssh-to-tmux path,
@@ -97,11 +97,11 @@ second-stage crossover). When it finishes, send back the two archives
 crossover archive/checksum, unedited.
 
 The package produced from this exact tree, with `sources.conf` pinned
-to the three SHAs above, has this SHA-256 (`wet-v11-baremetal-r1.tar.gz`,
-92904220 bytes):
+to the three SHAs above, has this SHA-256 (`wet-v11-baremetal-r2.tar.gz`,
+92921312 bytes):
 
 ```
-8c4063c1314bbcb14d0fb6aec7f5d522d02b60e27f9c1082b7cea05888f3a334
+06082d2c6e74b024f7e02cab8b46fd5a8d2022962016f19e7002db63ba25b0c7
 ```
 
 The outer `.tar.gz` embeds each file's mtime and is not byte-for-byte

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Fake pg_ctl for the bench-kit fake-binaries self-test
+# (selftest-fakebin/README.md). Prints the exact control messages real
+# pg_ctl prints on start/stop, so a bug like "run_session()'s stdout
+# capture gets polluted by pg_ctl stop" reproduces faithfully -- without
+# ever starting a real PostgreSQL server.
+set -euo pipefail
+set -m # each backgrounded fake server gets its own process group
+
+datadir=""
+mode=""
+postgres_opts=""
+args=("$@")
+i=0
+while [[ $i -lt ${#args[@]} ]]; do
+  case "${args[$i]}" in
+    -D)
+      i=$((i + 1))
+      datadir="${args[$i]}"
+      ;;
+    -o)
+      i=$((i + 1))
+      postgres_opts="${args[$i]}"
+      ;;
+    start|stop|status|restart|reload)
+      mode="${args[$i]}"
+      ;;
+  esac
+  i=$((i + 1))
+done
+
+[[ -n "$datadir" ]] || { echo "pg_ctl: no data directory specified" >&2; exit 1; }
+
+pidfile="$datadir/postmaster.pid"
+# Parsed out of "-o '-p PORT -k SOCKETDIR'" so the fake psql can find the
+# postgresql.conf for whichever data directory is "active" on this socket.
+socket_dir=$(printf '%s' "$postgres_opts" | sed -nE 's/.*-k[[:space:]]+([^ ]+).*/\1/p')
+
+seed_selftest_state() {
+  [[ -n "$socket_dir" ]] || return 0
+  mkdir -p "$socket_dir"
+  printf '%s\n' "$datadir" >"$socket_dir/.active-datadir"
+  local conf="$datadir/postgresql.conf"
+  local mode_line
+  mode_line=$( { grep -E '\.capture[[:space:]]*=' "$conf" 2>/dev/null || true; } | tail -n 1 | \
+    sed -nE "s/.*=[[:space:]]*'([a-z]+)'.*/\1/p" || true)
+  : >"$datadir/.selftest-capture-state"
+  echo "mode=${mode_line:-stats}" >>"$datadir/.selftest-capture-state"
+  echo "calls=0" >>"$datadir/.selftest-capture-state"
+  : >"$datadir/.selftest-extensions"
+}
+
+case "$mode" in
+  start)
+    mkdir -p "$datadir"
+    seed_selftest_state
+    sleep 100000 &
+    server_pid=$!
+    disown "$server_pid" 2>/dev/null || true
+    {
+      printf '%s\n' "$server_pid"
+      printf '%s\n' "$datadir"
+      printf '%s\n' "$(date +%s)"
+      printf '%s\n' "55471"
+      printf '%s\n' "${socket_dir:-/tmp}"
+    } >"$pidfile"
+    echo "waiting for server to start.... done"
+    echo "server started"
+    ;;
+  stop)
+    if [[ -f "$pidfile" ]]; then
+      server_pid=$(head -n 1 "$pidfile")
+      kill "$server_pid" 2>/dev/null || true
+      wait "$server_pid" 2>/dev/null || true
+      rm -f -- "$pidfile"
+    fi
+    [[ -z "$socket_dir" ]] || rm -f -- "$socket_dir/.active-datadir"
+    echo "waiting for server to shut down.... done"
+    echo "server stopped"
+    ;;
+  status)
+    if [[ -f "$pidfile" ]]; then
+      echo "pg_ctl: server is running (PID: $(head -n 1 "$pidfile"))"
+    else
+      echo "pg_ctl: no server running"
+      exit 3
+    fi
+    ;;
+  *)
+    echo "fake pg_ctl (selftest-fakebin): unsupported mode '$mode'" >&2
+    exit 1
+    ;;
+esac

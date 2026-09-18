@@ -15,9 +15,9 @@ if [[ ${1:-} == --smoke ]]; then
   RUN_MODE=smoke
   shift
 fi
-KIT_DIR=${1:?usage: ./run.sh /path/to/wet-v11-baremetal-r1}
+KIT_DIR=${1:?usage: ./run.sh /path/to/wet-v11-baremetal-r2}
 [[ $# -eq 1 ]] || {
-  echo "usage: ./run.sh [--smoke] /path/to/wet-v11-baremetal-r1" >&2
+  echo "usage: ./run.sh [--smoke] /path/to/wet-v11-baremetal-r2" >&2
   exit 1
 }
 KIT_DIR=$(cd "$KIT_DIR" && pwd -P)

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Fake numactl: drops recognized --xxx=value NUMA flags and execs the
+# wrapped command in place. This kit only ever calls it as
+# `numactl --cpunodebind=N --membind=N cmd args...` (no `--` separator).
+set -euo pipefail
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cpunodebind=*|--membind=*|--physcpubind=*|--interleave=*|--preferred=*)
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+exec "$@"

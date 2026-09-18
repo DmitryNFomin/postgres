@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Fake objdump: answers --version realistically (01b-disassemble.sh
+# records it in disassembly/PROVENANCE.json); any disassembly attempt on
+# a fake (non-ELF) binary fails, which 01b-disassemble.sh already treats
+# as a normal, recorded outcome (not every function need resolve).
+set -euo pipefail
+for arg in "$@"; do
+  if [[ "$arg" == "--version" ]]; then
+    echo "GNU objdump (selftest-fakebin) 2.30-115"
+    echo "Copyright (C) 2018 Free Software Foundation, Inc."
+    exit 0
+  fi
+done
+echo "objdump: fake binary is not in a recognized object file format" >&2
+exit 1

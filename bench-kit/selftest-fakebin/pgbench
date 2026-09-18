@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Fake pgbench for the bench-kit fake-binaries self-test. Two modes:
+#   -i                dataset init: prints init-shaped stdout, exits 0.
+#   -T <seconds>       timed run: emits "progress: ... tps ..." lines once
+#                      per second (matching real pgbench -P 1 output) for
+#                      the requested duration, then a summary including
+#                      "number of failed transactions: 0 (0.000%)" (the
+#                      exact line 02-run-matrix.sh/run-worker.sh grep
+#                      for). Understands SIGALRM early-stop the same way
+#                      real pgbench's -T timer does (crossover/run-worker.sh
+#                      sends it to end a persistent-backend session early).
+# Never connects to a real server.
+set -euo pipefail
+
+init_mode=0
+duration=0
+clients=1
+seed=1
+args=("$@")
+i=0
+while [[ $i -lt ${#args[@]} ]]; do
+  arg="${args[$i]}"
+  case "$arg" in
+    -i) init_mode=1 ;;
+    -T)
+      i=$((i + 1))
+      duration="${args[$i]}"
+      ;;
+    -c)
+      i=$((i + 1))
+      clients="${args[$i]}"
+      ;;
+    --random-seed=*) seed="${arg#*=}" ;;
+  esac
+  i=$((i + 1))
+done
+
+if [[ "$init_mode" -eq 1 ]]; then
+  echo "dropping old tables..."
+  echo "creating tables..."
+  echo "generating data (client-side)..."
+  echo "vacuuming..."
+  echo "creating primary keys..."
+  echo "done in 0.05 s (drop tables 0.00 s, create tables 0.00 s, client-side generate 0.03 s, vacuum 0.01 s, primary keys 0.01 s)."
+  exit 0
+fi
+
+stop_requested=0
+trap 'stop_requested=1' ALRM TERM
+
+# Deterministic-ish pseudo-tps derived from the seed, just so different
+# sessions/cells do not all print byte-identical numbers.
+base_tps=$(( 4000 + (seed * 37) % 500 ))
+
+total_xacts=0
+elapsed=0
+while [[ "$elapsed" -lt "$duration" && "$stop_requested" -eq 0 ]]; do
+  sleep 1 &
+  wait $! 2>/dev/null || true
+  [[ "$stop_requested" -eq 0 ]] || break
+  elapsed=$((elapsed + 1))
+  tps=$((base_tps + (elapsed * 13) % 97))
+  total_xacts=$((total_xacts + tps))
+  printf 'progress: %d.0 s, %d.0 tps, lat %d.%03d ms stddev %d.%03d, 0 failed\n' \
+    "$elapsed" "$tps" 1 $((elapsed % 100)) 1 200
+done
+
+echo "transaction type: <builtin: select only>"
+echo "scaling factor: 1"
+echo "query mode: simple"
+echo "number of clients: $clients"
+echo "number of threads: 1"
+echo "duration: $duration s"
+echo "number of transactions actually processed: $total_xacts"
+echo "number of failed transactions: 0 (0.000%)"
+printf 'latency average = %d.%03d ms\n' 1 200
+printf 'tps = %d.000000 (without initial connection time)\n' "$base_tps"
+exit 0

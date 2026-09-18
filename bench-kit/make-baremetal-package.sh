@@ -14,7 +14,7 @@ export COPYFILE_DISABLE=1  # macOS: avoid AppleDouble (._*) sidecar files in tar
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 V11_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-PACKAGE_NAME=wet-v11-baremetal-r1
+PACKAGE_NAME=wet-v11-baremetal-r2
 
 DRY_RUN=0
 DIST_DIR=""
@@ -83,6 +83,7 @@ KIT_FILES=(
   sources_conf.py
   self-test.py
   run-benchmark.sh
+  verify_reusable_builds.py
   README.md
 )
 WORKLOAD_FILES=(
@@ -107,6 +108,8 @@ done
   die "missing $SCRIPT_DIR/fixture-src/MANIFEST.json"
 [[ -d "$SCRIPT_DIR/crossover" ]] ||
   die "missing crossover/ (second-stage persistent-backend harness)"
+[[ -d "$SCRIPT_DIR/selftest-fakebin" ]] ||
+  die "missing selftest-fakebin/ (fake-binaries self-test, run by self-test.py)"
 
 # The test_wait_primitive fixture (W1) is carried as a snapshot committed
 # in the kit (fixture-src/), not read from any git ref -- the ref it was
@@ -191,6 +194,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   for name in "${WORKLOAD_FILES[@]}"; do log "  kit/workloads/$name"; done
   log "Runbook: kit/BAREMETAL-RUNBOOK-v11.md"
   log "Crossover second-stage harness: kit/crossover/ ($(find "$SCRIPT_DIR/crossover" -type f | wc -l | tr -d ' ') files)"
+  log "Fake-binaries self-test: kit/selftest-fakebin/ ($(find "$SCRIPT_DIR/selftest-fakebin" -type f | wc -l | tr -d ' ') files)"
   log ""
   log "Control patch(es) matching $CONTROL_PATCH_GLOB (${#CONTROL_PATCHES[@]}):"
   for p in "${CONTROL_PATCHES[@]}"; do log "  $p"; done
@@ -242,7 +246,8 @@ trap cleanup EXIT
   die "refusing to overwrite existing package: $ARCHIVE"
 OUTPUTS_OWNED=1
 mkdir -p "$DIST_DIR" "$STAGE/$PACKAGE_NAME/source" \
-  "$STAGE/$PACKAGE_NAME/workloads" "$STAGE/$PACKAGE_NAME/crossover"
+  "$STAGE/$PACKAGE_NAME/workloads" "$STAGE/$PACKAGE_NAME/crossover" \
+  "$STAGE/$PACKAGE_NAME/selftest-fakebin"
 
 for name in "${KIT_FILES[@]}"; do
   cp "$SCRIPT_DIR/$name" "$STAGE/$PACKAGE_NAME/"
@@ -251,6 +256,7 @@ for name in "${WORKLOAD_FILES[@]}"; do
   cp "$SCRIPT_DIR/workloads/$name" "$STAGE/$PACKAGE_NAME/workloads/"
 done
 cp -a "$SCRIPT_DIR/crossover/." "$STAGE/$PACKAGE_NAME/crossover/"
+cp -a "$SCRIPT_DIR/selftest-fakebin/." "$STAGE/$PACKAGE_NAME/selftest-fakebin/"
 cp "$V11_ROOT/bench-kit/BAREMETAL-RUNBOOK-v11.md" "$STAGE/$PACKAGE_NAME/"
 
 MASTER_ARCHIVE="$STAGE/$PACKAGE_NAME/source/postgres-master.tar.gz"

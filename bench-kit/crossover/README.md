@@ -65,8 +65,8 @@ This second stage is started automatically by the main kit's
 (e.g. to retry just this stage):
 
 ```sh
-./run.sh --smoke /path/to/wet-v11-baremetal-r1
-./run.sh /path/to/wet-v11-baremetal-r1
+./run.sh --smoke /path/to/wet-v11-baremetal-r2
+./run.sh /path/to/wet-v11-baremetal-r2
 ```
 
 The mandatory smoke run takes approximately 1-2 minutes. It starts the

@@ -673,6 +673,23 @@ def main() -> int:
     # --- the plateau scenario itself (both a unit check and end-to-end) ---
     test_plateau_scenario_end_to_end(source_kit, analyzer)
 
+    # --- fake-binaries self-test: real shell control flow (01-build-all.sh
+    # -> plateau-probe.sh -> 01b-disassemble.sh -> 02-run-matrix.sh smoke ->
+    # 03-collect.sh) against stub pg_ctl/initdb/pgbench/psql binaries, plus
+    # a standing regression check that reverting plateau-probe.sh's
+    # run_session() pg_ctl-stop fix reproduces the exact
+    # "ValueError: could not convert string to float" this self-test exists
+    # for. Still no real PostgreSQL server anywhere. ------------------------
+    run_selftest = source_kit / "selftest-fakebin" / "run-selftest.sh"
+    print("self-test: running fake-binaries self-test "
+          f"({run_selftest.relative_to(source_kit)})...")
+    result = subprocess.run([str(run_selftest)], cwd=source_kit)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "fake-binaries self-test failed (see output above); "
+            "run selftest-fakebin/run-selftest.sh directly for details"
+        )
+
     print(
         "self-test: PASS "
         f"({len(CONFIGS) * len(WORKLOADS) * RUNS} valid synthetic cells and "

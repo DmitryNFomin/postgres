@@ -17,6 +17,16 @@ Usage:
                               smoke, run, crossover, collect
   ./run-benchmark.sh --status show current status and recent log output
   ./run-benchmark.sh --preflight-only
+  SERVER_CPUS=... PGBENCH_CPUS=... ./run-benchmark.sh --reuse-builds
+                              same as the default command, but skips
+                              01-build-all.sh/01b-disassemble.sh if
+                              work/manifest.json's recorded source-archive
+                              and installed-binary SHA-256 hashes still
+                              match what is on disk (see "Restarting
+                              after a failure" in BAREMETAL-RUNBOOK-v11.md);
+                              refuses to run otherwise. A pre-existing
+                              results/smoke-results directory is always
+                              refused, with or without this flag.
 
 Run the default command inside tmux or screen on the idle Linux host.
 SERVER_CPUS and PGBENCH_CPUS must be set to two disjoint CPU lists (Linux
@@ -50,6 +60,7 @@ show_status() {
   fi
 }
 
+REUSE_BUILDS=0
 case "${1:-}" in
   "")
     ;;
@@ -59,6 +70,9 @@ case "${1:-}" in
     ;;
   --preflight-only)
     PREFLIGHT_ONLY=1
+    ;;
+  --reuse-builds)
+    REUSE_BUILDS=1
     ;;
   -h|--help)
     usage
@@ -291,16 +305,48 @@ fi
   fail "results already exists; preserving it for inspection"
 [[ ! -e "$SCRIPT_DIR/smoke-results" ]] ||
   fail "smoke-results already exists; preserving it for inspection"
-[[ ! -e "$SCRIPT_DIR/disassembly" ]] ||
-  fail "disassembly already exists; preserving it for inspection"
+if [[ "$REUSE_BUILDS" -eq 0 ]]; then
+  [[ ! -e "$SCRIPT_DIR/disassembly" ]] ||
+    fail "disassembly already exists; preserving it for inspection"
+fi
 if find "$SCRIPT_DIR" -maxdepth 1 \
   \( -name 'results-*.tar.gz' -o -name 'results-*.tar.gz.sha256' \) \
   -print -quit | grep -q .; then
   fail "a prior result archive exists; move it out of the kit before starting"
 fi
 
-run_phase build "20 to 40 minutes" "$SCRIPT_DIR/01-build-all.sh"
-run_phase disassembly "a few minutes" "$SCRIPT_DIR/01b-disassemble.sh"
+# ---------------------------------------------------------------------------
+# --reuse-builds: restart after a failure (e.g. a plateau-probe crash) that
+# happened after 01-build-all.sh already produced good, verified binaries,
+# without paying the 20-to-40-minute build again. Only ever SKIPS work that
+# is re-verified byte-for-byte first; any mismatch refuses to run rather
+# than silently reusing something stale (see BAREMETAL-RUNBOOK-v11.md,
+# "Restarting after a failure").
+# ---------------------------------------------------------------------------
+BUILDS_REUSED=0
+if [[ "$REUSE_BUILDS" -eq 1 ]]; then
+  CURRENT_PHASE=reuse-builds-verify
+  log "Verifying existing builds are reusable (--reuse-builds)..."
+  if "$PYTHON_BIN" "$SCRIPT_DIR/verify_reusable_builds.py" "$SCRIPT_DIR"; then
+    log "Existing builds verified byte-for-byte; skipping 01-build-all.sh."
+    BUILDS_REUSED=1
+  else
+    fail "--reuse-builds was given, but work/manifest.json is missing or no longer matches the bundled sources / installed binaries on disk (see the diagnostic above). Remove work/ and omit --reuse-builds to rebuild from scratch, or restore the exact build this kit's package produced."
+  fi
+fi
+
+if [[ "$BUILDS_REUSED" -eq 1 ]]; then
+  log "Reusing verified builds; skipped 01-build-all.sh (--reuse-builds)."
+else
+  run_phase build "20 to 40 minutes" "$SCRIPT_DIR/01-build-all.sh"
+fi
+if [[ "$BUILDS_REUSED" -eq 1 && -e "$SCRIPT_DIR/disassembly" ]]; then
+  log "Reusing existing disassembly evidence (--reuse-builds)."
+else
+  [[ ! -e "$SCRIPT_DIR/disassembly" ]] ||
+    fail "disassembly already exists; preserving it for inspection"
+  run_phase disassembly "a few minutes" "$SCRIPT_DIR/01b-disassemble.sh"
+fi
 run_phase plateau-probe "10 to 20 minutes" "$SCRIPT_DIR/plateau-probe.sh"
 run_phase smoke "about 10 to 25 minutes" \
   env BENCHMARK_MODE=smoke "$SCRIPT_DIR/02-run-matrix.sh"
