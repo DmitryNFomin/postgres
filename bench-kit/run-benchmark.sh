@@ -4,6 +4,8 @@ set -Eeuo pipefail
 export LC_ALL=C
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib-python.sh
+source "$SCRIPT_DIR/lib-python.sh"
 STATUS_FILE="$SCRIPT_DIR/status.json"
 LOG_DIR="$SCRIPT_DIR/run-logs"
 
@@ -102,7 +104,7 @@ write_status() {
   now=$(date +%s)
   elapsed=$((now - START_EPOCH))
   phase_elapsed=$((now - PHASE_START_EPOCH))
-  python3 - "$STATUS_FILE" "$state" "$CURRENT_PHASE" "$message" \
+  "$PYTHON_BIN" - "$STATUS_FILE" "$state" "$CURRENT_PHASE" "$message" \
     "$elapsed" "$phase_elapsed" "$MAIN_LOG" "$$" <<'PY'
 import datetime
 import json
@@ -184,6 +186,8 @@ trap on_error ERR
 trap 'on_signal 130 INT' INT
 trap 'on_signal 143 TERM' TERM
 
+require_python fail
+
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
 run_phase() {
@@ -252,7 +256,7 @@ PGBENCH_CPUS=$SAVED_PGBENCH_CPUS
 
 # brief-v11-wpc-kit.md, "Launch note": refuse to run while any sources.conf
 # placeholder remains.
-python3 "$SCRIPT_DIR/sources_conf.py" check "$SCRIPT_DIR/sources.conf" ||
+"$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" check "$SCRIPT_DIR/sources.conf" ||
   fail "sources.conf still has placeholder commit hash(es); the coordinator must fill these in first"
 
 if [[ -f "$SCRIPT_DIR/PACKAGE-MANIFEST.sha256" ]]; then
@@ -273,7 +277,7 @@ export SERVER_CPUS PGBENCH_CPUS
 log "Configured CPU affinity: PostgreSQL=$SERVER_CPUS pgbench=$PGBENCH_CPUS"
 
 run_phase preflight "under 1 minute" "$SCRIPT_DIR/00-check-host.sh"
-run_phase kit-self-test "under 1 minute" "$SCRIPT_DIR/self-test.py"
+run_phase kit-self-test "under 1 minute" "$PYTHON_BIN" "$SCRIPT_DIR/self-test.py"
 run_phase initial-idle-check "1 to 20 minutes" "$SCRIPT_DIR/wait-for-idle.sh"
 
 if [[ "${PREFLIGHT_ONLY:-0}" -eq 1 ]]; then
@@ -287,6 +291,8 @@ fi
   fail "results already exists; preserving it for inspection"
 [[ ! -e "$SCRIPT_DIR/smoke-results" ]] ||
   fail "smoke-results already exists; preserving it for inspection"
+[[ ! -e "$SCRIPT_DIR/disassembly" ]] ||
+  fail "disassembly already exists; preserving it for inspection"
 if find "$SCRIPT_DIR" -maxdepth 1 \
   \( -name 'results-*.tar.gz' -o -name 'results-*.tar.gz.sha256' \) \
   -print -quit | grep -q .; then
@@ -294,11 +300,12 @@ if find "$SCRIPT_DIR" -maxdepth 1 \
 fi
 
 run_phase build "20 to 40 minutes" "$SCRIPT_DIR/01-build-all.sh"
+run_phase disassembly "a few minutes" "$SCRIPT_DIR/01b-disassemble.sh"
 run_phase plateau-probe "10 to 20 minutes" "$SCRIPT_DIR/plateau-probe.sh"
 run_phase smoke "about 10 to 25 minutes" \
   env BENCHMARK_MODE=smoke "$SCRIPT_DIR/02-run-matrix.sh"
 run_phase smoke-verification "under 1 minute" \
-  python3 "$SCRIPT_DIR/analyze-results.py" "$SCRIPT_DIR/smoke-results" \
+  "$PYTHON_BIN" "$SCRIPT_DIR/analyze-results.py" "$SCRIPT_DIR/smoke-results" \
   --output-json "$SCRIPT_DIR/smoke-results/analysis.json" \
   --output-markdown "$SCRIPT_DIR/smoke-results/analysis.md"
 

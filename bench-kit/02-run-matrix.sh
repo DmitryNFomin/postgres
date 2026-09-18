@@ -33,7 +33,14 @@ export LC_ALL=C
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORK="$SCRIPT_DIR/work"
 
-python3 "$SCRIPT_DIR/sources_conf.py" check "$SCRIPT_DIR/sources.conf" ||
+# shellcheck source=lib-python.sh
+source "$SCRIPT_DIR/lib-python.sh"
+if ! resolve_python; then
+  echo "02-run-matrix.sh: ERROR: no Python 3.9+ interpreter found (tried \$PYTHON_BIN_OVERRIDE, python3.11, python3.9, python3); on Rocky Linux 8 install one with: sudo dnf install -y python3.11 (or: sudo dnf install -y python39)" >&2
+  exit 1
+fi
+
+"$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" check "$SCRIPT_DIR/sources.conf" ||
   { echo "02-run-matrix.sh: ERROR: sources.conf is not filled in" >&2; exit 1; }
 
 MODE=${BENCHMARK_MODE:-full}
@@ -110,7 +117,7 @@ run_pgbench_from_prefix() {
 
 assert_process_affinity() {
   local pid=$1 expected=$2 role=$3
-  python3 "$AFFINITY_HELPER" verify-pid "$pid" "$expected" ||
+  "$PYTHON_BIN" "$AFFINITY_HELPER" verify-pid "$pid" "$expected" ||
     die "$role process does not have the required CPU affinity"
 }
 
@@ -190,14 +197,14 @@ $RESULTS aside (or remove it) if you want to start over, or run
 : "${PGBENCH_CPUS:?PGBENCH_CPUS must be set (see the runbook)}"
 export SERVER_CPUS PGBENCH_CPUS
 
-for tool in python3 sha256sum awk ps taskset lscpu; do
+for tool in "$PYTHON_BIN" sha256sum awk ps taskset lscpu; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
 done
-AFFINITY_PROOF_JSON=$(python3 "$AFFINITY_HELPER" collect) ||
+AFFINITY_PROOF_JSON=$("$PYTHON_BIN" "$AFFINITY_HELPER" collect) ||
   die "live CPU topology, or SERVER_CPUS/PGBENCH_CPUS, failed verification"
 [[ -f "$HOST_CHECK" ]] ||
   die "missing $HOST_CHECK -- run ./00-check-host.sh first"
-python3 "$AFFINITY_HELPER" \
+"$PYTHON_BIN" "$AFFINITY_HELPER" \
   verify-host-report "$HOST_CHECK" "$(hostname)" ||
   die "host check is not a clean report for this host"
 [[ -r "$MANIFEST" ]] ||
@@ -212,7 +219,7 @@ for p in "$PREFIX_BASELINE_A" "$PREFIX_BASELINE_B" "$PREFIX_PATCHED" "$PREFIX_CO
   [[ -x "$p/bin/postgres" ]] || die "missing build at $p -- run ./01-build-all.sh first"
 done
 
-python3 - "$MANIFEST" \
+"$PYTHON_BIN" - "$MANIFEST" \
   "baseline-a=$PREFIX_BASELINE_A" "baseline-b=$PREFIX_BASELINE_B" \
   "patched=$PREFIX_PATCHED" "control=$PREFIX_CONTROL" <<'PY' ||
 import hashlib
@@ -256,8 +263,8 @@ for name, prefix_text in prefixes.items():
 PY
   die "installed binaries do not match $MANIFEST; rebuild before running"
 
-MODULE_NAME=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SCRIPT_DIR/sources.conf" MODULE_NAME)
-HOOKS_INSTALLED_FUNCTION=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SCRIPT_DIR/sources.conf" HOOKS_INSTALLED_FUNCTION)
+MODULE_NAME=$("$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" get "$SCRIPT_DIR/sources.conf" MODULE_NAME)
+HOOKS_INSTALLED_FUNCTION=$("$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" get "$SCRIPT_DIR/sources.conf" HOOKS_INSTALLED_FUNCTION)
 GUC_CAPTURE="$MODULE_NAME.capture"
 GUC_MAX_TRANCHES="$MODULE_NAME.max_tranches"
 GUC_TRACE_RING_SIZE="$MODULE_NAME.trace_ring_size"
@@ -272,11 +279,11 @@ DBUSER=$(id -un)
 (( W1_ITERATIONS > 0 )) || die "W1_ITERATIONS must be greater than zero"
 (( QUIESCENCE_SECONDS >= 0 )) || die "QUIESCENCE_SECONDS must not be negative"
 
-mapfile -t CONFIGS < <(python3 -c \
+mapfile -t CONFIGS < <("$PYTHON_BIN" -c \
   "from benchmark_protocol import CONFIGS; print('\n'.join(CONFIGS))")
-mapfile -t WORKLOADS < <(python3 -c \
+mapfile -t WORKLOADS < <("$PYTHON_BIN" -c \
   "from benchmark_protocol import WORKLOADS; print('\n'.join(WORKLOADS))")
-mapfile -t W1_FUNCTIONS < <(python3 -c \
+mapfile -t W1_FUNCTIONS < <("$PYTHON_BIN" -c \
   "from benchmark_protocol import W1_FUNCTIONS; print('\n'.join(W1_FUNCTIONS))")
 CELLS_PER_REPETITION=$(( ${#CONFIGS[@]} * ${#WORKLOADS[@]} ))
 TOTAL_CELLS=$(( ${#CONFIGS[@]} * ${#WORKLOADS[@]} * RUNS ))
@@ -329,7 +336,7 @@ fi
 # ---------------------------------------------------------------------------
 NUMA_WRAP=()
 if [[ -f "$PLATEAU_PROBE_RESULT" ]]; then
-  read -r NUMA_DECISION NUMA_NODE < <(python3 -c "
+  read -r NUMA_DECISION NUMA_NODE < <("$PYTHON_BIN" -c "
 import json
 data = json.load(open('$PLATEAU_PROBE_RESULT', encoding='utf-8'))
 print(data['selected_variant'], data.get('server_numa_node', ''))
@@ -557,7 +564,7 @@ start_freq_sampler() {
   : >"$outfile"
   (
     while true; do
-      python3 - <<'PY'
+      "$PYTHON_BIN" - <<'PY'
 import glob
 vals = []
 for path in glob.glob(
@@ -577,7 +584,7 @@ PY
 
 summarize_freq_sampler() {
   local infile=$1
-  python3 - "$infile" <<'PY'
+  "$PYTHON_BIN" - "$infile" <<'PY'
 import sys
 values = []
 try:
@@ -603,7 +610,7 @@ numa_local_fraction() {
   local pid=$1
   local node_list=$2
   [[ -r "/proc/$pid/numa_maps" ]] || { echo ""; return; }
-  python3 - "/proc/$pid/numa_maps" "$node_list" <<'PY'
+  "$PYTHON_BIN" - "/proc/$pid/numa_maps" "$node_list" <<'PY'
 import re
 import sys
 
@@ -650,7 +657,7 @@ write_progress() {
       eta=$((elapsed * (TOTAL_CELLS - CELLS_COMPLETED) / CELLS_COMPLETED))
     fi
   fi
-  python3 - "$PROGRESS" "$state" "$message" "${CURRENT_CELL:-}" \
+  "$PYTHON_BIN" - "$PROGRESS" "$state" "$message" "${CURRENT_CELL:-}" \
     "$CELLS_COMPLETED" "$TOTAL_CELLS" "$elapsed" "$eta" "$MODE" <<'PY'
 import datetime
 import json
@@ -687,7 +694,7 @@ PY
 # ---------------------------------------------------------------------------
 check_early_aa() {
   local repetitions=$1
-  python3 - "$CSV" "$AA_EARLY" "$repetitions" <<'PY'
+  "$PYTHON_BIN" - "$CSV" "$AA_EARLY" "$repetitions" <<'PY'
 import csv
 import datetime
 import json
@@ -791,13 +798,13 @@ run_pgbench_measured() {
   [[ "$pgbench_cpu" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
     die "could not read pgbench CPU utilization for pid $pgbench_pid"
   local pgbench_capacity
-  pgbench_capacity=$(python3 - "$pgbench_cpu" "$threads" <<'PY'
+  pgbench_capacity=$("$PYTHON_BIN" - "$pgbench_cpu" "$threads" <<'PY'
 import sys
 value, threads = float(sys.argv[1]), int(sys.argv[2])
 print(f"{value / (threads * 100.0):.12g}")
 PY
   )
-  python3 - "$pgbench_capacity" <<'PY' ||
+  "$PYTHON_BIN" - "$pgbench_capacity" <<'PY' ||
 import sys
 
 capacity = float(sys.argv[1])
@@ -808,7 +815,7 @@ if capacity >= 0.90:
     )
 PY
     die "pgbench client saturation invalidates $CURRENT_CELL; see $logfile"
-  python3 - "$CLIENT_LOAD_DIR/cell-$run_index.json" \
+  "$PYTHON_BIN" - "$CLIENT_LOAD_DIR/cell-$run_index.json" \
     "$pgbench_cpu" "$pgbench_capacity" "$threads" "$pgbench_pid" <<'PY'
 import json
 import sys
@@ -866,7 +873,7 @@ PY
         w3_elapsed=$((SECONDS - proof_start))
         (( w3_elapsed > 0 && w3_elapsed < WARMUP_SECONDS )) ||
           die "W3 qualification consumed the warmup window"
-        if ! python3 "$SCRIPT_DIR/w3_qualification.py" \
+        if ! "$PYTHON_BIN" "$SCRIPT_DIR/w3_qualification.py" \
           "$w3_raw" "$w3_summary" "$w3_elapsed"; then
           die "W3 did not qualify as short ProcArray LWLock contention; see $w3_summary"
         fi
@@ -884,7 +891,7 @@ PY
   active_pgbench_pid=""
 
   local parsed
-  parsed=$(python3 - "$logfile" "$WARMUP_SECONDS" "$DURATION" <<'PY'
+  parsed=$("$PYTHON_BIN" - "$logfile" "$WARMUP_SECONDS" "$DURATION" <<'PY'
 import re
 import sys
 path, warmup_s, duration_s = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
@@ -1050,7 +1057,7 @@ run_cell() {
       local n_fns=${#W1_FUNCTIONS[@]}
       local recorded=${w1_values[$n_fns]}
       local trace_records=${w1_values[$((n_fns + 1))]}
-      python3 - "$W1_DETAIL_DIR/cell-$run_index.json" \
+      "$PYTHON_BIN" - "$W1_DETAIL_DIR/cell-$run_index.json" \
         "${W1_FUNCTIONS[@]}" -- "${w1_values[@]:0:$n_fns}" <<'PY'
 import json
 import sys
@@ -1064,7 +1071,7 @@ with open(out, "x", encoding="utf-8") as f:
     json.dump(data, f, indent=2, sort_keys=True)
     f.write("\n")
 PY
-      ns_per_iteration=$(python3 - "${w1_values[@]:0:$n_fns}" <<'PY'
+      ns_per_iteration=$("$PYTHON_BIN" - "${w1_values[@]:0:$n_fns}" <<'PY'
 import sys
 values = [float(v) for v in sys.argv[1:]]
 print(f"{sum(values) / len(values):.12g}")
@@ -1130,8 +1137,8 @@ PY
   freq_stats=$(summarize_freq_sampler "$freq_log")
   cached_after=$(meminfo_cached_kb)
   local numa_node_list
-  numa_node_list=$(python3 "$AFFINITY_HELPER" collect 2>/dev/null |
-    python3 -c "import json,sys; print(','.join(str(n) for n in json.load(sys.stdin)['server_numa_nodes']))" 2>/dev/null || echo "")
+  numa_node_list=$("$PYTHON_BIN" "$AFFINITY_HELPER" collect 2>/dev/null |
+    "$PYTHON_BIN" -c "import json,sys; print(','.join(str(n) for n in json.load(sys.stdin)['server_numa_nodes']))" 2>/dev/null || echo "")
   numa_fraction=$(numa_local_fraction "$ACTIVE_POSTMASTER_PID" "$numa_node_list")
 
   stop_server_checked "$CURRENT_CELL"
@@ -1175,7 +1182,7 @@ SEED=${RUN_SEED:-$(od -An -N8 -tu8 /dev/urandom | tr -d ' \n')}
 echo "$SEED" >"$SEED_FILE"
 log "Random seed for this run's schedule: $SEED (saved to $SEED_FILE)"
 
-python3 - "$SCHEDULE_CSV" "$SEED" "$RUNS" "$MODE" "${#CONFIGS[@]}" \
+"$PYTHON_BIN" - "$SCHEDULE_CSV" "$SEED" "$RUNS" "$MODE" "${#CONFIGS[@]}" \
   "${#WORKLOADS[@]}" "${CONFIGS[@]}" "${WORKLOADS[@]}" <<'PY'
 import random
 import sys
@@ -1220,7 +1227,7 @@ with open(path, "x", encoding="utf-8") as f:
         f.write(f"{i},{config},{workload},{repetition},{block},{position}\n")
 PY
 
-python3 - "$PROTOCOL" "$SEED" "$RUNS" "$DURATION" "$WARMUP_SECONDS" \
+"$PYTHON_BIN" - "$PROTOCOL" "$SEED" "$RUNS" "$DURATION" "$WARMUP_SECONDS" \
   "$PGBENCH_SCALE" "$W1_ITERATIONS" "$MODULE_NAME" "$GUC_CAPTURE" \
   "$GUC_MAX_TRANCHES" "$GUC_TRACE_RING_SIZE" \
   "$QUIESCENCE_SECONDS" "$TOTAL_CELLS" "$SCRIPT_DIR" \
@@ -1371,7 +1378,7 @@ for line in "${SCHEDULE_LINES[@]}"; do
 done
 
 write_progress complete "all matrix cells completed"
-python3 - "$RESULTS/matrix-complete.json" "$CSV" "$SCHEDULE_CSV" \
+"$PYTHON_BIN" - "$RESULTS/matrix-complete.json" "$CSV" "$SCHEDULE_CSV" \
   "$PROTOCOL" "$PROGRESS" "$AA_EARLY" "$TOTAL_CELLS" <<'PY'
 import csv
 import datetime

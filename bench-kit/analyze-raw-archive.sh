@@ -4,6 +4,12 @@ set -Eeuo pipefail
 export LC_ALL=C
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib-python.sh
+source "$SCRIPT_DIR/lib-python.sh"
+if ! resolve_python; then
+  echo "analyze-raw-archive.sh: ERROR: no Python 3.9+ interpreter found (tried \$PYTHON_BIN_OVERRIDE, python3.11, python3.9, python3)" >&2
+  exit 1
+fi
 ARCHIVE=${1:-}
 if [[ -z "$ARCHIVE" || "$ARCHIVE" == -h || "$ARCHIVE" == --help ]]; then
   cat <<'EOF'
@@ -32,7 +38,7 @@ SIDECAR="$ARCHIVE.sha256"
 BASE=$(basename "$ARCHIVE" .tar.gz)
 OUTPUT=${2:-"$PWD/$BASE-local-analysis"}
 
-python3 - "$ARCHIVE" "$SIDECAR" "$OUTPUT" "$SCRIPT_DIR" <<'PY'
+"$PYTHON_BIN" - "$ARCHIVE" "$SIDECAR" "$OUTPUT" "$SCRIPT_DIR" <<'PY'
 import hashlib
 import os
 import subprocess

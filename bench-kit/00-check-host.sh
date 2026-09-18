@@ -15,6 +15,8 @@ set -Eeuo pipefail
 export LC_ALL=C
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib-python.sh
+source "$SCRIPT_DIR/lib-python.sh"
 OUT_TXT="$SCRIPT_DIR/host-check.txt"
 OUT_JSON="$SCRIPT_DIR/host-check.json"
 WARNINGS=0
@@ -42,7 +44,7 @@ fi
 # ---------------------------------------------------------------------------
 section "Required tools"
 REQUIRED_TOOLS=(
-  python3 perl bison flex make cc ar ranlib sha256sum tar
+  python3 perl bison flex make cc ar ranlib objdump sha256sum tar
   awk sed grep find ps pgrep df hostname systemd-detect-virt
   sort wc tr paste lscpu taskset
 )
@@ -53,12 +55,30 @@ for tool in "${REQUIRED_TOOLS[@]}"; do
     warn "required tool is not installed: $tool"
   fi
 done
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON_VERSION=$(python3 -c \
+
+# The kit needs Python 3.9+; Rocky Linux 8's stock python3 is 3.6. Try, in
+# order, $PYTHON_BIN_OVERRIDE, python3.11, python3.9, then plain python3,
+# and report whichever one qualifies (see lib-python.sh).
+if resolve_python; then
+  PYTHON_VERSION=$("$PYTHON_BIN" -c \
     'import sys; print(".".join(map(str, sys.version_info[:3])))')
-  log "python3 version: $PYTHON_VERSION"
-  python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 9))' ||
-    warn "Python 3.9 or newer is required"
+  log "Selected Python interpreter: $PYTHON_BIN (version $PYTHON_VERSION)"
+else
+  PYTHON_VERSION="unknown"
+  warn "no Python 3.9+ interpreter found (tried \$PYTHON_BIN_OVERRIDE, python3.11, python3.9, python3); on Rocky Linux 8 install one with: sudo dnf install -y python3.11 (or: sudo dnf install -y python39), or set PYTHON_BIN_OVERRIDE"
+fi
+
+CC_VERSION_LINE="unknown"
+if command -v cc >/dev/null 2>&1; then
+  CC_VERSION_LINE=$(cc --version 2>&1 | head -n 1)
+  log "C compiler:              $CC_VERSION_LINE"
+  # gcc 8.5 (Rocky Linux 8's default) is a supported, accepted compiler;
+  # this only flags something clearly too old to build a modern
+  # PostgreSQL tree, it does not raise the floor above gcc 8.
+  if [[ "$CC_VERSION_LINE" =~ gcc.*\ ([0-9]+)\.[0-9]+ ]] &&
+     [[ "${BASH_REMATCH[1]}" -lt 8 ]]; then
+    warn "C compiler is gcc ${BASH_REMATCH[1]}.x, older than the gcc 8 floor"
+  fi
 fi
 # ---------------------------------------------------------------------------
 section "CPU"
@@ -153,7 +173,7 @@ if [[ "$NUMA_NODE_COUNT" -gt 1 ]] && ! command -v numactl >/dev/null 2>&1; then
 fi
 
 if [[ "$TOPOLOGY_OK" -eq 1 ]]; then
-  if AFFINITY_PROOF_JSON=$(python3 "$AFFINITY_HELPER" collect); then
+  if AFFINITY_PROOF_JSON=$("${PYTHON_BIN:-python3}" "$AFFINITY_HELPER" collect); then
     AFFINITY_TOPOLOGY_VERIFIED=1
     log "Affinity topology:      verified (masks disjoint, no shared physical core, taskset confirmed)"
   else
@@ -306,16 +326,22 @@ log "Warnings: $WARNINGS"
 log "Report written to: $OUT_TXT"
 
 # ---------------------------------------------------------------------------
-# Machine-readable copy, best-effort. python3 is required later by the build
-# and matrix scripts anyway, so it is safe to use
-# here too.
-if command -v python3 >/dev/null 2>&1; then
-  python3 - "$OUT_JSON" "$CPU_MODEL" "$SOCKETS" "$CORES_PER_SOCKET" \
+# Machine-readable copy, best-effort. A Python interpreter is required
+# later by the build and matrix scripts anyway (resolved above into
+# PYTHON_BIN), so it is safe to use here too; fall back to plain python3
+# if even that could not be resolved, so this report still gets written.
+JSON_PYTHON=${PYTHON_BIN:-}
+if [[ -z "$JSON_PYTHON" ]] && command -v python3 >/dev/null 2>&1; then
+  JSON_PYTHON=python3
+fi
+if [[ -n "$JSON_PYTHON" ]]; then
+  "$JSON_PYTHON" - "$OUT_JSON" "$CPU_MODEL" "$SOCKETS" "$CORES_PER_SOCKET" \
     "$THREADS_PER_CORE" "$PHYSICAL_CORES" "$LOGICAL_CPUS" "$SMT_ACTIVE" \
     "$TURBO_STATE" "$MEM_TOTAL_KB" "$MEM_AVAIL_KB" "$SWAP_TOTAL_KB" \
     "$FREE_DISK_MB" "$LOAD1" "$LOAD5" "$LOAD15" "$WARNINGS" \
     "$(hostname)" "$(uname -a)" "$VIRTUALIZATION" \
-    "$POSTGRES_PROCESS_COUNT" "$AFFINITY_PROOF_JSON" <<'PY'
+    "$POSTGRES_PROCESS_COUNT" "$AFFINITY_PROOF_JSON" \
+    "$PYTHON_BIN" "$PYTHON_VERSION" "$CC_VERSION_LINE" <<'PY'
 import datetime
 import glob
 import json
@@ -325,7 +351,7 @@ import sys
  physical_cores, logical_cpus, smt_active, turbo_state, mem_total_kb,
  mem_avail_kb, swap_total_kb, free_disk_mb, load1, load5, load15,
  warnings, hostname, kernel, virtualization, postgres_process_count,
- affinity_proof_json) = sys.argv[1:]
+ affinity_proof_json, python_bin, python_version, cc_version) = sys.argv[1:]
 
 governors = []
 for path in sorted(glob.glob(
@@ -362,6 +388,9 @@ data = {
         else "dedicated"
     ),
     "cpu_affinity_protocol": json.loads(affinity_proof_json),
+    "python_bin": python_bin,
+    "python_version": python_version,
+    "cc_version": cc_version,
 }
 with open(out, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2, sort_keys=True)

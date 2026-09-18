@@ -7,13 +7,27 @@ export COPYFILE_DISABLE=1  # macOS: avoid AppleDouble (._*) sidecar files in tar
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORK="$SCRIPT_DIR/work"
 RESULTS="$SCRIPT_DIR/results"
+DISASSEMBLY="$SCRIPT_DIR/disassembly"
 
 die() { echo "03-collect.sh: ERROR: $*" >&2; exit 1; }
 log() { printf '%s\n' "$*"; }
 
-for tool in tar sha256sum python3 cp find; do
+for tool in tar cp find; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
 done
+# This is normally run on the Rocky Linux bare-metal host (always has
+# sha256sum), but self-test.py also exercises it directly on the
+# coordinator's own machine, which may be macOS (shasum -a 256 instead).
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA256=(sha256sum)
+elif command -v shasum >/dev/null 2>&1; then
+  SHA256=(shasum -a 256)
+else
+  die "required tool not found: sha256sum (or shasum)"
+fi
+# shellcheck source=lib-python.sh
+source "$SCRIPT_DIR/lib-python.sh"
+require_python
 
 required_results=(
   results.csv
@@ -51,6 +65,10 @@ done
   die "host-check.json is missing; run ./00-check-host.sh before collecting"
 [[ -f "$SCRIPT_DIR/plateau-probe-result.json" ]] ||
   die "plateau-probe-result.json is missing; run ./plateau-probe.sh before collecting"
+[[ -d "$DISASSEMBLY" && ! -L "$DISASSEMBLY" ]] ||
+  die "disassembly evidence is missing; run ./01b-disassemble.sh before collecting"
+[[ -z "$(find "$DISASSEMBLY" ! -type f ! -type d -print -quit)" ]] ||
+  die "special or symlinked disassembly evidence is not allowed: $DISASSEMBLY"
 
 HOSTNAME_TAG=$(hostname -s 2>/dev/null || hostname)
 DATE_TAG=$(date -u +%Y%m%dT%H%M%SZ)
@@ -79,6 +97,7 @@ for directory in logs recording-proofs w3-qualification client-load \
                  w1-detail pg-test-timing; do
   cp -a "$RESULTS/$directory" "$STAGE/results/"
 done
+cp -a "$DISASSEMBLY" "$STAGE/results/disassembly"
 cp "$WORK/manifest.json" "$WORK/source-manifest.json" "$STAGE/build/"
 cp -a "$WORK/build-logs" "$STAGE/build/"
 cp "$SCRIPT_DIR/host-check.txt" "$SCRIPT_DIR/host-check.json" "$STAGE/"
@@ -88,8 +107,10 @@ log "Staging exact harness and workloads"
 for name in \
   00-check-host.sh \
   01-build-all.sh \
+  01b-disassemble.sh \
   02-run-matrix.sh \
   03-collect.sh \
+  lib-python.sh \
   plateau-probe.sh \
   analyze-raw-archive.sh \
   wait-for-idle.sh \
@@ -119,7 +140,7 @@ if [[ -f "$SCRIPT_DIR/BAREMETAL-RUNBOOK-v11.md" ]]; then
   cp "$SCRIPT_DIR/BAREMETAL-RUNBOOK-v11.md" "$STAGE/kit/"
 fi
 
-python3 - "$STAGE" "$STAGE/MANIFEST.sha256" <<'PY'
+"$PYTHON_BIN" - "$STAGE" "$STAGE/MANIFEST.sha256" <<'PY'
 import hashlib
 import sys
 from pathlib import Path
@@ -141,11 +162,11 @@ tar -czf "$ARCHIVE" -C "$STAGE" \
   results build kit
 (
   cd "$SCRIPT_DIR"
-  sha256sum "$(basename "$ARCHIVE")" >"$(basename "$ARCHIVE").sha256"
+  "${SHA256[@]}" "$(basename "$ARCHIVE")" >"$(basename "$ARCHIVE").sha256"
 )
 
 log "Clean-room verifying extracted raw archive"
-python3 - "$ARCHIVE" <<'PY'
+"$PYTHON_BIN" - "$ARCHIVE" <<'PY'
 import subprocess
 import sys
 from pathlib import PurePosixPath
@@ -165,7 +186,7 @@ PY
 tar -xzf "$ARCHIVE" -C "$EXTRACT"
 (
   cd "$EXTRACT"
-  sha256sum -c MANIFEST.sha256 >/dev/null
+  "${SHA256[@]}" -c MANIFEST.sha256 >/dev/null
 )
 SIZE_HUMAN=$(du -h "$ARCHIVE" | cut -f1)
 ARCHIVE_SHA=$(awk '{print $1}' "$ARCHIVE.sha256")

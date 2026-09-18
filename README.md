@@ -61,9 +61,25 @@ cd ../v11-notes/bench-kit
 POSTGRES_REPO_PATH=/path/to/pg ./make-baremetal-package.sh ../dist
 ```
 
+The clone's remote name does not matter -- it is `origin` above only
+because that is what a plain `git clone` names it; the package build does
+not read any remote-qualified ref. `MASTER_SHA`/`V11_SHA`/`CONTROL_SHA`
+are resolved by commit hash, and the `test_wait_primitive` (W1) fixture is
+packaged from the kit's own `bench-kit/fixture-src/` snapshot, never read
+from git. The only thing that must happen first is `git fetch origin
+wet-v11 bench-v11-control` (substituting your remote's actual name), so
+both branches the three pinned commits live on are present in the clone.
+
 Then copy `dist/wet-v11-baremetal-r1.tar.gz` and its `.sha256` sidecar to
 the bare-metal host and follow `BAREMETAL-RUNBOOK-v11.md` (also present
-in this repo at the top level, and inside the package itself).
+in this repo at the top level, and inside the package itself) -- see its
+"Laptop workflow" section for the full clone-to-scp-to-ssh-to-tmux path,
+and its "Rocky Linux 8 preparation" section for the one-time host setup
+(package list, Python 3.9+ interpreter selection, governor check without
+`cpupower`, and why SELinux does not matter here). This kit builds on
+either macOS or Linux; make-baremetal-package.sh falls back from
+`sha256sum` to `shasum -a 256` when only the latter is present (stock
+macOS).
 
 The `crossover/` second-stage (persistent-backend crossover) is run
 directly from inside this same package by `run-benchmark.sh` — it calls
@@ -82,14 +98,20 @@ crossover archive/checksum, unedited.
 
 The package produced from this exact tree, with `sources.conf` pinned
 to the three SHAs above, has this SHA-256 (`wet-v11-baremetal-r1.tar.gz`,
-92900734 bytes):
+92926547 bytes):
 
 ```
-0a5121a466fa89bb4040832ebb16b3892fa66474758d6235fcc43435d1db1641
+7768950c23352871209adbfec945f0c2b2f60587bd91e57b516ebfdeba4d2d87
 ```
 
-The executor's own build from a fresh clone should reproduce this exact
-digest; if it does not, stop and compare `sources.conf` and the patch
+The outer `.tar.gz` embeds each file's mtime and is not byte-for-byte
+reproducible across separate builds (two builds from the identical tree
+and inputs do not produce this same digest); what matters is that the
+package's *contents* match, which `PACKAGE-MANIFEST.sha256` inside the
+package verifies per-file, and which `run-benchmark.sh` checks before
+starting. If the executor's own build's digest differs from the one
+above, extract both and diff `PACKAGE-MANIFEST.sha256`; if that content
+manifest differs too, stop and compare `sources.conf` and the patch
 sets before running anything.
 
 ## Where to look for more

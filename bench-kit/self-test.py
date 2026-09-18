@@ -81,6 +81,7 @@ def run_collector(source_kit: Path, root: Path) -> None:
         if source.is_file():
             shutil.copyfile(source, collector / name)
     shutil.copytree(root / "results", collector / "results")
+    shutil.copytree(root / "disassembly", collector / "disassembly")
     shutil.copytree(root / "build", collector / "work")
     shutil.copyfile(root / "host-check.txt", collector / "host-check.txt")
     shutil.copyfile(root / "host-check.json", collector / "host-check.json")
@@ -234,6 +235,29 @@ def make_plateau_probe(root: Path) -> None:
     })
 
 
+def make_disassembly(root: Path) -> None:
+    """Synthetic stand-in for 01b-disassemble.sh's output, so the
+    03-collect.sh exercise below (which now requires disassembly/) has
+    something to stage without actually running objdump."""
+    functions = (
+        "WaitEventSetWait", "FileReadV", "LWLockAcquire", "XLogWrite",
+        "SlruInternalWritePage", "CopyReadLine",
+        "pgaio_io_perform_synchronously",
+    )
+    for name in BUILD_NAMES:
+        build_dir = root / name
+        build_dir.mkdir(parents=True, exist_ok=True)
+        for func in functions:
+            (build_dir / f"{func}.txt").write_text(
+                f"synthetic disassembly of {func} for {name}\n",
+                encoding="utf-8",
+            )
+    write_json(root / "PROVENANCE.json", {
+        "gcc_version": "gcc (synthetic) 8.5.0",
+        "objdump_version": "GNU objdump (synthetic) 2.30",
+    })
+
+
 def create_tree(source_kit: Path, root: Path, *, plateau: bool = False):
     """Build one complete synthetic 560-cell (7x5x16) full-mode evidence
     tree. If plateau=True, the trace-vs-master W6c contrast is seeded with
@@ -243,11 +267,13 @@ def create_tree(source_kit: Path, root: Path, *, plateau: bool = False):
     kit = root / "kit"
     build = root / "build"
     results = root / "results"
+    disassembly = root / "disassembly"
     for path in (kit / "workloads", build, results / "logs",
                  results / "recording-proofs", results / "w3-qualification",
                  results / "client-load", results / "w1-detail",
                  results / "pg-test-timing"):
         path.mkdir(parents=True, exist_ok=True)
+    make_disassembly(disassembly)
 
     for relative in BOUND_KIT_FILES:
         destination = kit / relative

@@ -17,16 +17,19 @@ die() { echo "01-build-all.sh: ERROR: $*" >&2; exit 1; }
 log() { printf '%s\n' "[$(date -u +%H:%M:%S)] $*"; }
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib-python.sh
+source "$SCRIPT_DIR/lib-python.sh"
+require_python
 
-python3 "$SCRIPT_DIR/sources_conf.py" check "$SCRIPT_DIR/sources.conf" ||
+"$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" check "$SCRIPT_DIR/sources.conf" ||
   die "sources.conf is not filled in (see the brief's Launch note)"
 
-MASTER_SHA=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SCRIPT_DIR/sources.conf" MASTER_SHA)
-V11_SHA=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SCRIPT_DIR/sources.conf" V11_SHA)
-CONTROL_SHA=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SCRIPT_DIR/sources.conf" CONTROL_SHA)
-REPO_URL=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SCRIPT_DIR/sources.conf" POSTGRES_REPO_URL)
+MASTER_SHA=$("$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" get "$SCRIPT_DIR/sources.conf" MASTER_SHA)
+V11_SHA=$("$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" get "$SCRIPT_DIR/sources.conf" V11_SHA)
+CONTROL_SHA=$("$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" get "$SCRIPT_DIR/sources.conf" CONTROL_SHA)
+REPO_URL=$("$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" get "$SCRIPT_DIR/sources.conf" POSTGRES_REPO_URL)
 
-for tool in python3 sha256sum make cc ar ranlib find hostname tar; do
+for tool in sha256sum make cc ar ranlib find hostname tar; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
 done
 
@@ -60,7 +63,7 @@ hash_file() {
 
 [[ -f "$HOST_CHECK" ]] ||
   die "missing $HOST_CHECK -- run ./00-check-host.sh first"
-python3 - "$HOST_CHECK" "$(hostname)" <<'PY' ||
+"$PYTHON_BIN" - "$HOST_CHECK" "$(hostname)" <<'PY' ||
 import json
 import sys
 
@@ -96,7 +99,7 @@ done
 log "Using bundled pinned source archives (no network required)"
 
 SOURCE_METADATA_TEXT=$(
-  python3 - "$SOURCE_MANIFEST" "$SOURCE_ARCHIVE_MASTER" \
+  "$PYTHON_BIN" - "$SOURCE_MANIFEST" "$SOURCE_ARCHIVE_MASTER" \
     "$SOURCE_ARCHIVE_PATCHED" "$SOURCE_ARCHIVE_CONTROL" "$FIXTURE_DIR" \
     "$REPO_URL" "$MASTER_SHA" "$V11_SHA" "$CONTROL_SHA" <<'PY'
 import hashlib
@@ -188,8 +191,9 @@ build_one() {
     die "extracting bundled source failed for $name; see $log"
 
   # The fixture is not part of real PostgreSQL history; it is overlaid from
-  # the bundled snapshot (git show'd from FIXTURE_BRANCH, never checked
-  # out) onto every tree so all four builds get byte-identical fixture code.
+  # the bundled snapshot (fixture-src/, packaged and hash-verified by
+  # make-baremetal-package.sh; never read from git) onto every tree so all
+  # four builds get byte-identical fixture code.
   rm -rf -- "${ACTIVE_SOURCE:?}/${FIXTURE_REL:?}"
   mkdir -p "$(dirname "$ACTIVE_SOURCE/$FIXTURE_REL")"
   cp -a "$FIXTURE_DIR" "$ACTIVE_SOURCE/$FIXTURE_REL"
@@ -206,7 +210,7 @@ build_one() {
   ) >>"$log" 2>&1 ||
     die "configure failed for $name; see $log"
 
-  python3 - "$compiler_json" "$(command -v cc)" <<'PY' ||
+  "$PYTHON_BIN" - "$compiler_json" "$(command -v cc)" <<'PY' ||
 import hashlib
 import json
 import subprocess
@@ -287,7 +291,7 @@ PY
     "$runtime_prefix/bin/postgres" --version >>"$log" 2>&1 ||
     die "relocated $name installation is not executable"
 
-  python3 - "$runtime_prefix" "$install_tree_json" <<'PY' ||
+  "$PYTHON_BIN" - "$runtime_prefix" "$install_tree_json" <<'PY' ||
 import hashlib
 import json
 import os
@@ -332,7 +336,7 @@ PY
       die "$name unexpectedly installs pg_wait_event_tracing"
   fi
 
-  python3 - "$RECORDS" "$name" "$commit" "$runtime_prefix" \
+  "$PYTHON_BIN" - "$RECORDS" "$name" "$commit" "$runtime_prefix" \
     "$ACTIVE_PREFIX" "$compiler_json" "$install_tree_json" "$FIXTURE_TREE" \
     "$(hash_file "$runtime_prefix/bin/postgres")" \
     "$(hash_file "$runtime_prefix/bin/pgbench")" \
@@ -385,7 +389,7 @@ PY
 }
 
 verify_baseline_reproducibility() {
-  python3 - "$RECORDS" <<'PY'
+  "$PYTHON_BIN" - "$RECORDS" <<'PY'
 import json
 import sys
 
@@ -429,7 +433,7 @@ SOURCE_ARCHIVE_MASTER_SHA=$(hash_file "$SOURCE_ARCHIVE_MASTER")
 SOURCE_ARCHIVE_PATCHED_SHA=$(hash_file "$SOURCE_ARCHIVE_PATCHED")
 SOURCE_ARCHIVE_CONTROL_SHA=$(hash_file "$SOURCE_ARCHIVE_CONTROL")
 
-python3 - "$MANIFEST" "$RECORDS" "$REPO_URL" "$REPRO_EPOCH" \
+"$PYTHON_BIN" - "$MANIFEST" "$RECORDS" "$REPO_URL" "$REPRO_EPOCH" \
   "$(make --version | head -n 1)" "$JOBS" \
   "${CC:-}" "${CFLAGS:-}" "${CPPFLAGS:-}" "${LDFLAGS:-}" \
   "${CONFIGURE_FLAGS[*]}" "$(hostname)" \

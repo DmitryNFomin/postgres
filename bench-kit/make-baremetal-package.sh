@@ -42,9 +42,22 @@ DIST_DIR=${DIST_DIR:-"$V11_ROOT/dist"}
 die() { echo "make-baremetal-package.sh: ERROR: $*" >&2; exit 1; }
 log() { printf '%s\n' "$*"; }
 
-for tool in python3 tar sha256sum find; do
+for tool in python3 tar find; do
   command -v "$tool" >/dev/null 2>&1 || die "missing required packaging tool: $tool"
 done
+
+# This script runs on the coordinator's laptop, which may be macOS (no
+# sha256sum unless coreutils is installed) or Linux (sha256sum always
+# present). Prefer sha256sum where it exists; fall back to shasum -a 256
+# (present on every stock macOS), which accepts the same "-c CHECKSUMS"
+# verification syntax sha256sum does.
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA256=(sha256sum)
+elif command -v shasum >/dev/null 2>&1; then
+  SHA256=(shasum -a 256)
+else
+  die "missing required packaging tool: sha256sum (or shasum)"
+fi
 
 SOURCES_CONF="$SCRIPT_DIR/sources.conf"
 [[ -f "$SOURCES_CONF" ]] || die "missing $SOURCES_CONF"
@@ -52,8 +65,10 @@ SOURCES_CONF="$SCRIPT_DIR/sources.conf"
 KIT_FILES=(
   00-check-host.sh
   01-build-all.sh
+  01b-disassemble.sh
   02-run-matrix.sh
   03-collect.sh
+  lib-python.sh
   plateau-probe.sh
   analyze-raw-archive.sh
   wait-for-idle.sh
@@ -88,8 +103,56 @@ done
   die "missing $V11_ROOT/bench-kit/BAREMETAL-RUNBOOK-v11.md"
 [[ -d "$SCRIPT_DIR/fixture-src/test_wait_primitive" ]] ||
   die "missing bundled test_wait_primitive fixture snapshot"
+[[ -f "$SCRIPT_DIR/fixture-src/MANIFEST.json" ]] ||
+  die "missing $SCRIPT_DIR/fixture-src/MANIFEST.json"
 [[ -d "$SCRIPT_DIR/crossover" ]] ||
   die "missing crossover/ (second-stage persistent-backend harness)"
+
+# The test_wait_primitive fixture (W1) is carried as a snapshot committed
+# in the kit (fixture-src/), not read from any git ref -- the ref it was
+# originally captured from (see fixture-src/MANIFEST.json) may not exist,
+# or may not be fetched, on this machine or the executor's. Verify the
+# snapshot against its manifest before packaging it, on both --dry-run and
+# a real build, so corruption is caught early either way. This needs only
+# python3's hashlib; it never touches git.
+if ! python3 - "$SCRIPT_DIR/fixture-src" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+manifest = json.loads((root / "MANIFEST.json").read_text(encoding="utf-8"))
+expected = manifest.get("files_sha256", {})
+
+def digest(path):
+    result = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            result.update(chunk)
+    return result.hexdigest()
+
+actual = {
+    p.relative_to(root).as_posix(): digest(p)
+    for p in sorted(root.rglob("*"))
+    if p.is_file() and p.name != "MANIFEST.json"
+}
+if actual != expected:
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    mismatched = sorted(
+        k for k in (set(expected) & set(actual)) if expected[k] != actual[k]
+    )
+    print(
+        f"fixture-src MANIFEST.json verification failed: "
+        f"missing={missing} extra={extra} mismatched={mismatched}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+then
+  die "bundled test_wait_primitive fixture-src failed MANIFEST.json verification"
+fi
 
 CONTROL_PATCH_GLOB=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SOURCES_CONF" CONTROL_PATCH_GLOB)
 V11_PATCH_GLOB=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SOURCES_CONF" V11_PATCH_GLOB)
@@ -134,7 +197,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "V11-series patches matching $V11_PATCH_GLOB (${#V11_PATCHES[@]}):"
   for p in "${V11_PATCHES[@]}"; do log "  $p"; done
   log ""
-  log "Bundled test_wait_primitive fixture snapshot (git show, never checked out):"
+  log "Bundled test_wait_primitive fixture snapshot (verified against fixture-src/MANIFEST.json above; never read from git):"
   find "$SCRIPT_DIR/fixture-src/test_wait_primitive" -type f | sed "s#^#  #"
   log ""
   log "Source snapshots that would be taken with 'git archive' from sources.conf:"
@@ -159,8 +222,6 @@ MASTER_SHA=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SOURCES_CONF" MASTER_SH
 V11_SHA=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SOURCES_CONF" V11_SHA)
 CONTROL_SHA=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SOURCES_CONF" CONTROL_SHA)
 REPO_URL=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SOURCES_CONF" POSTGRES_REPO_URL)
-FIXTURE_BRANCH=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SOURCES_CONF" FIXTURE_BRANCH)
-FIXTURE_PATH=$(python3 "$SCRIPT_DIR/sources_conf.py" get "$SOURCES_CONF" FIXTURE_PATH)
 
 STAGE=$(mktemp -d)
 ARCHIVE="$DIST_DIR/$PACKAGE_NAME.tar.gz"
@@ -191,7 +252,6 @@ for name in "${WORKLOAD_FILES[@]}"; do
 done
 cp -a "$SCRIPT_DIR/crossover/." "$STAGE/$PACKAGE_NAME/crossover/"
 cp "$V11_ROOT/bench-kit/BAREMETAL-RUNBOOK-v11.md" "$STAGE/$PACKAGE_NAME/"
-cp -a "$SCRIPT_DIR/fixture-src" "$STAGE/$PACKAGE_NAME/source/test_wait_primitive_snapshot"
 
 MASTER_ARCHIVE="$STAGE/$PACKAGE_NAME/source/postgres-master.tar.gz"
 PATCHED_ARCHIVE="$STAGE/$PACKAGE_NAME/source/postgres-patched.tar.gz"
@@ -206,16 +266,15 @@ git -C "$POSTGRES_REPO_PATH" archive --format=tar.gz \
 git -C "$POSTGRES_REPO_PATH" archive --format=tar.gz \
   -o "$CONTROL_ARCHIVE" "$CONTROL_SHA"
 
-mkdir -p "$FIXTURE_DEST"
-for path in $(git -C "$POSTGRES_REPO_PATH" ls-tree -r --name-only \
-    "$FIXTURE_BRANCH" -- "$FIXTURE_PATH"); do
-  relative=${path#"$FIXTURE_PATH"/}
-  mkdir -p "$FIXTURE_DEST/$(dirname "$relative")"
-  git -C "$POSTGRES_REPO_PATH" show "$FIXTURE_BRANCH:$path" \
-    >"$FIXTURE_DEST/$relative"
-done
-FIXTURE_TREE=$(git -C "$POSTGRES_REPO_PATH" rev-parse \
-  "$FIXTURE_BRANCH:$FIXTURE_PATH")
+# Package the fixture straight from the verified kit snapshot -- no git ref
+# is read or required on this machine (that is the whole point of this
+# fix; see fixture-src/MANIFEST.json for where the snapshot came from).
+cp -a "$SCRIPT_DIR/fixture-src/test_wait_primitive" "$FIXTURE_DEST"
+FIXTURE_PROVENANCE=$(python3 -c '
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+print("{}@{}".format(data["source_branch"], data["commit"]))
+' "$SCRIPT_DIR/fixture-src/MANIFEST.json")
 
 for patch in "${CONTROL_PATCHES[@]}" "${V11_PATCHES[@]}"; do
   dest_dir=$(dirname "$patch")
@@ -225,7 +284,7 @@ done
 
 python3 - "$SOURCE_MANIFEST" "$MASTER_ARCHIVE" "$PATCHED_ARCHIVE" \
   "$CONTROL_ARCHIVE" "$FIXTURE_DEST" "$REPO_URL" "$MASTER_SHA" "$V11_SHA" \
-  "$CONTROL_SHA" "$FIXTURE_TREE" \
+  "$CONTROL_SHA" "$FIXTURE_PROVENANCE" \
   "$(git -C "$POSTGRES_REPO_PATH" show -s --format=%ct "$MASTER_SHA")" <<'PY'
 import hashlib
 import json
@@ -233,7 +292,7 @@ import sys
 from pathlib import Path
 
 (out, master_path, patched_path, control_path, fixture_dir, repo_url,
- master_commit, v11_commit, control_commit, fixture_tree,
+ master_commit, v11_commit, control_commit, fixture_provenance,
  source_date_epoch) = sys.argv[1:]
 
 def digest(path):
@@ -260,7 +319,11 @@ data = {
     },
     "source_date_epoch": int(source_date_epoch),
     "fixture": {
-        "tree": fixture_tree,
+        # Not a git tree object -- the fixture is packaged from the kit's
+        # own fixture-src/ snapshot, never read from git. This is the
+        # origin branch/commit that fixture-src/MANIFEST.json recorded
+        # when the snapshot was captured, kept only for provenance.
+        "tree": fixture_provenance,
         "files_sha256": fixture_files,
     },
     "archives": {
@@ -277,6 +340,7 @@ PY
 chmod 755 \
   "$STAGE/$PACKAGE_NAME/00-check-host.sh" \
   "$STAGE/$PACKAGE_NAME/01-build-all.sh" \
+  "$STAGE/$PACKAGE_NAME/01b-disassemble.sh" \
   "$STAGE/$PACKAGE_NAME/02-run-matrix.sh" \
   "$STAGE/$PACKAGE_NAME/03-collect.sh" \
   "$STAGE/$PACKAGE_NAME/plateau-probe.sh" \
@@ -299,13 +363,13 @@ chmod 755 \
   # shellcheck disable=SC2094
   find . -type f ! -name PACKAGE-MANIFEST.sha256 -print0 \
     | sort -z \
-    | xargs -0 sha256sum >PACKAGE-MANIFEST.sha256
+    | xargs -0 "${SHA256[@]}" >PACKAGE-MANIFEST.sha256
 )
 
 tar -czf "$ARCHIVE" -C "$STAGE" "$PACKAGE_NAME"
 (
   cd "$DIST_DIR"
-  sha256sum "$(basename "$ARCHIVE")" >"$(basename "$SIDECAR")"
+  "${SHA256[@]}" "$(basename "$ARCHIVE")" >"$(basename "$SIDECAR")"
 )
 
 VERIFY=$(mktemp -d)
@@ -328,12 +392,12 @@ PY
 tar -xzf "$ARCHIVE" -C "$VERIFY"
 (
   cd "$VERIFY/$PACKAGE_NAME"
-  sha256sum -c PACKAGE-MANIFEST.sha256 >/dev/null
-  PYTHONDONTWRITEBYTECODE=1 ./self-test.py
+  "${SHA256[@]}" -c PACKAGE-MANIFEST.sha256 >/dev/null
+  PYTHONDONTWRITEBYTECODE=1 python3 ./self-test.py
 )
 (
   cd "$DIST_DIR"
-  sha256sum -c "$(basename "$SIDECAR")"
+  "${SHA256[@]}" -c "$(basename "$SIDECAR")"
 )
 
 SUCCESS=1

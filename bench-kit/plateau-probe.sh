@@ -23,14 +23,18 @@ AFFINITY_HELPER="$SCRIPT_DIR/cpu_affinity.py"
 die() { echo "plateau-probe.sh: ERROR: $*" >&2; exit 1; }
 log() { printf '%s\n' "[$(date -u +%H:%M:%S)] $*"; }
 
-python3 "$SCRIPT_DIR/sources_conf.py" check "$SCRIPT_DIR/sources.conf" ||
+# shellcheck source=lib-python.sh
+source "$SCRIPT_DIR/lib-python.sh"
+require_python
+
+"$PYTHON_BIN" "$SCRIPT_DIR/sources_conf.py" check "$SCRIPT_DIR/sources.conf" ||
   die "sources.conf is not filled in"
 
 : "${SERVER_CPUS:?SERVER_CPUS must be set}"
 : "${PGBENCH_CPUS:?PGBENCH_CPUS must be set}"
 export SERVER_CPUS PGBENCH_CPUS
 
-for tool in python3 taskset lscpu; do
+for tool in taskset lscpu; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
 done
 
@@ -38,9 +42,9 @@ PREFIX_BASELINE_A="$WORK/install/base-a"
 [[ -x "$PREFIX_BASELINE_A/bin/postgres" ]] ||
   die "missing baseline-a build at $PREFIX_BASELINE_A -- run ./01-build-all.sh first"
 
-AFFINITY_JSON=$(python3 "$AFFINITY_HELPER" collect) ||
+AFFINITY_JSON=$("$PYTHON_BIN" "$AFFINITY_HELPER" collect) ||
   die "SERVER_CPUS/PGBENCH_CPUS failed verification"
-SERVER_NUMA_NODE=$(python3 -c "
+SERVER_NUMA_NODE=$("$PYTHON_BIN" -c "
 import json, sys
 data = json.loads('''$AFFINITY_JSON''')
 nodes = data['server_numa_nodes']
@@ -131,7 +135,7 @@ run_session() {
     die "clean shutdown failed for probe session $index"
   rm -rf -- "$datadir"
 
-  python3 - "$pgbench_log" "$WARMUP_SECONDS" "$DURATION" <<'PY'
+  "$PYTHON_BIN" - "$pgbench_log" "$WARMUP_SECONDS" "$DURATION" <<'PY'
 import re
 import sys
 path, warmup_s, duration_s = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
@@ -179,7 +183,7 @@ for i in 1 2 3 4 5 6 7 8; do
   fi
 done
 
-python3 - "$RESULT_FILE" "$SERVER_NUMA_NODE" "$NUMACTL_AVAILABLE" \
+"$PYTHON_BIN" - "$RESULT_FILE" "$SERVER_NUMA_NODE" "$NUMACTL_AVAILABLE" \
   "${#PINNED_TPS[@]}" "${PINNED_TPS[@]}" -- "${UNPINNED_TPS[@]}" <<'PY'
 import json
 import statistics

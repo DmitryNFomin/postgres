@@ -127,8 +127,10 @@ RESULT_FIELDS = (
 BOUND_KIT_FILES = (
     "00-check-host.sh",
     "01-build-all.sh",
+    "01b-disassemble.sh",
     "02-run-matrix.sh",
     "03-collect.sh",
+    "lib-python.sh",
     "plateau-probe.sh",
     "analyze-raw-archive.sh",
     "wait-for-idle.sh",
