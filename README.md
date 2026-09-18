@@ -14,7 +14,16 @@ out of the timed pair (leaving only the volatile store); it is the
 layout control used for the hook-null contrast in the benchmark and is
 not part of the submitted series.
 
-## What changed versus v8
+## What v11 contains beyond v8
+
+v11 includes the two optimisation commits measured in the v9 and v10
+rounds, folded into the series: v9 (hook pointer loaded once per timed
+report; the end path reads the volatile wait-event value only when a
+hook will consume it; the depth guard restored with direct stores) is
+folded into patch 0001, and v10 (an always-inline test of the
+backend-local attach-needed flag in front of the out-of-line attachment
+path, reached from every parsed and executed statement) is folded into
+patch 0004. On top of those, v11 adds:
 
 - Cold out-of-line hook path with a branch hint (patch 0001): the inline
   timed pair is one `unlikely()`-hinted pointer test per side; the
