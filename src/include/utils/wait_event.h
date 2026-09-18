@@ -131,16 +131,11 @@ static inline void
 pgstat_report_wait_start_timed(uint32 wait_event_info)
 {
 	*(volatile uint32 *) my_wait_event_info = wait_event_info;
-
-	if (unlikely(wait_event_begin_hook != NULL))
-		pgstat_wait_event_hook_begin_slow(wait_event_info);
 }
 
 static inline void
 pgstat_report_wait_end_timed(void)
 {
-	if (unlikely(wait_event_end_hook != NULL))
-		pgstat_wait_event_hook_end_slow();
 	*(volatile uint32 *) my_wait_event_info = 0;
 }
 
