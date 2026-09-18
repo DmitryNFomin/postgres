@@ -544,7 +544,7 @@ verify_baseline_reproducibility ||
   die "independent baseline builds differ; patched/control builds were not started"
 log "Independent baseline reproducibility: PASS"
 build_one patched "$V11_SHA" patchd yes
-build_one control "$CONTROL_SHA" ctrlop yes
+build_one control "$CONTROL_SHA" ctrlop no
 
 SOURCE_MANIFEST_SHA=$(hash_file "$SOURCE_MANIFEST")
 SOURCE_ARCHIVE_MASTER_SHA=$(hash_file "$SOURCE_ARCHIVE_MASTER")
