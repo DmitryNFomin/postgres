@@ -131,8 +131,9 @@ run_session() {
     >"$pgbench_log" 2>&1 ||
     die "pgbench failed for probe session $index; see $pgbench_log"
 
-  run_from_prefix "$PREFIX_BASELINE_A/bin/pg_ctl" -D "$datadir" -m fast -w stop ||
-    die "clean shutdown failed for probe session $index"
+  run_from_prefix "$PREFIX_BASELINE_A/bin/pg_ctl" -D "$datadir" -m fast -w stop \
+    >>"$logfile" 2>&1 ||
+    die "clean shutdown failed for probe session $index; see $logfile"
   rm -rf -- "$datadir"
 
   "$PYTHON_BIN" - "$pgbench_log" "$WARMUP_SECONDS" "$DURATION" <<'PY'
