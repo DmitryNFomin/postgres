@@ -900,6 +900,62 @@ shared_preload_libraries = 'pg_wait_event_tracing'
    a future release plans to change.
   </para>
 
+  <para>
+   Accounting a completed wait is deferred, not immediate: at the moment
+   a wait ends, the collector only reads the clock and stashes the
+   event, its duration, and that timestamp in a one-slot, backend-local
+   buffer; the count/total/maximum/histogram update (and, at the
+   <literal>trace</literal> level, the ring append) run later, at the
+   backend's own next timed wait, or at one of several other points where
+   ordering matters (a query/transaction boundary in trace mode, a
+   capture-level change, a reset, disabling capture, or process exit).
+   This is what keeps the collector's cost out of the interval a
+   contended lock's waiters are queued on: recording a wait's end used to
+   run to completion before returning control to the caller, which for an
+   <literal>LWLock</literal> wait is still inside the critical section
+   the lock protects.  Two consequences follow, both bounded:
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     <emphasis>Visibility latency.</emphasis>  A backend reading its own
+     data (<structname>pg_stat_wait_event_timing</structname>,
+     <structname>pg_backend_wait_event_trace</structname>,
+     <function>pg_wait_event_trace_by_statement()</function> called with
+     its own process number) always flushes its own pending wait first,
+     so it never observes a delay: an own-session read always reflects
+     every wait that has already completed.  A different session reading
+     that backend's row or ring, however, can see a wait appear only once
+     the owning backend's own next flush point is reached &mdash;
+     typically microseconds later, at its next wait, but possibly as late
+     as the end of the current statement, since a backend computing for a
+     long stretch with no further wait (a long CPU-bound query, for
+     instance) does not flush again until it does wait, or until that
+     statement ends.  A cross-backend reader should treat what it sees as
+     current up to a small, bounded lag behind the owning backend's own
+     view, not as exactly real-time.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>Crash loss.</emphasis>  If a backend is terminated
+     abruptly (killed, or a crash that takes the whole cluster down) in
+     the narrow window between a wait ending and that backend's own next
+     flush, that one pending wait is lost: it was never applied to the
+     statistics payload and never appended to the trace ring.  This is
+     strictly narrower than existing loss on a normal exit or crash
+     already implies &mdash; the statistics payload is released (and, on
+     a whole-cluster crash restart, every trace ring is discarded
+     regardless; see <xref linkend="pgwaiteventtracing-trace-ring"/>)
+     &mdash; it is called out here only because it is new: an orderly
+     exit's own cleanup flushes any still-pending wait first, so this
+     narrow loss window is specific to an abrupt kill, and affects at
+     most the single most recently completed wait.
+    </para>
+   </listitem>
+  </itemizedlist>
+
   <sect3 id="pgwaiteventtracing-aux-processes">
    <title>Server-Side (Non-Client) Processes</title>
 
