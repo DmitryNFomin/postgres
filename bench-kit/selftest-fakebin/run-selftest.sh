@@ -85,6 +85,32 @@ log "Fake kit copy: $KIT"
 
 run_step "01-build-all.sh (fake binaries, no compilation)" ./01-build-all.sh
 
+# --- --reuse-builds must refuse a stale "control" install that still has
+# --- the tracing module (what a build from before "build the control
+# --- installation without the tracing module" would leave behind, or
+# --- work/ copied over from such a build): verify_reusable_builds.py and
+# --- 02-run-matrix.sh's own preflight both apply
+# --- build_manifest_rules.validate_installed_builds(), so this exercises
+# --- the one shared rule both now use. ------------------------------------
+log "verify_reusable_builds.py: expect a clean pass against the fake build"
+( cd "$KIT" && python3 verify_reusable_builds.py "$KIT" ) ||
+  die "verify_reusable_builds.py rejected a fresh, correct fake build"
+log "  PASS: verify_reusable_builds.py accepts the fresh build"
+
+log "verify_reusable_builds.py: stale control install with a tracing module must be refused"
+STALE_MODULE="$KIT/work/install/ctrlop/lib/pg_wait_event_tracing.so"
+echo "stale module left over from a pre-fix build" >"$STALE_MODULE"
+set +e
+stale_output=$(cd "$KIT" && python3 verify_reusable_builds.py "$KIT" 2>&1)
+stale_rc=$?
+set -e
+rm -f -- "$STALE_MODULE"
+[[ "$stale_rc" -ne 0 ]] ||
+  die "verify_reusable_builds.py accepted a control install with a stale tracing module"
+printf '%s\n' "$stale_output" | grep -q "control unexpectedly contains the tracing module" ||
+  die "verify_reusable_builds.py refused the stale build, but not for the expected reason; got: $stale_output"
+log "  PASS: verify_reusable_builds.py refuses a stale control+module install (--reuse-builds would refuse to run)"
+
 # --- the actual regression: plateau-probe.sh's run_session() must not
 # --- leak `pg_ctl ... stop`'s stdout into the captured tps value. -------
 log "plateau-probe.sh (fixed): expect a clean run"

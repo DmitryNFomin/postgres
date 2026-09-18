@@ -110,6 +110,7 @@ for name in \
   01b-disassemble.sh \
   02-run-matrix.sh \
   03-collect.sh \
+  build_manifest_rules.py \
   lib-python.sh \
   plateau-probe.sh \
   analyze-raw-archive.sh \
@@ -125,6 +126,7 @@ for name in \
   sources_conf.py \
   self-test.py \
   run-benchmark.sh \
+  verify_reusable_builds.py \
   README.md; do
   [[ -f "$SCRIPT_DIR/$name" && ! -L "$SCRIPT_DIR/$name" ]] ||
     die "missing regular harness file: $name"

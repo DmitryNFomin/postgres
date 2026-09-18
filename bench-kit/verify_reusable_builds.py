@@ -7,8 +7,16 @@ Recomputes, from the files actually on disk:
   - the bundled source-archive SHA-256 hashes (source-manifest.json,
     postgres-{master,patched,control}.tar.gz) against manifest.json's
     "bundled_source" section;
-  - the installed postgres/pgbench/psql/initdb/pg_ctl SHA-256 for every
-    build's runtime_prefix against that build's manifest.json record.
+  - every installed build against build_manifest_rules.py's
+    validate_installed_builds() -- the exact same postgres/pgbench/psql/
+    initdb/pg_ctl, test_wait_primitive fixture, and pg_wait_event_tracing
+    module rules 02-run-matrix.sh's own preflight applies. This is the
+    same module both use, on purpose: a work/manifest.json that passed a
+    binary-only check here once got past --reuse-builds and then failed
+    02-run-matrix.sh's manifest check right after the plateau probe (a
+    build had installed the tracing module into "control", which
+    --reuse-builds never looked at) -- see reports/wpf-report.md,
+    Addendum 4.
 
 Exits 0 only if everything still matches byte-for-byte; exits 1 (with a
 diagnostic on stderr) otherwise. Never modifies anything.
@@ -20,6 +28,9 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from build_manifest_rules import ManifestMismatch, validate_installed_builds
 
 
 def digest(path: Path) -> str:
@@ -49,11 +60,17 @@ def main() -> int:
         fail(f"could not read {manifest_path}: {exc}")
         return 1
 
-    if manifest.get("schema_version") != 11:
-        fail("unsupported build manifest schema_version")
+    builds = manifest.get("builds")
+    if not isinstance(builds, list) or not builds:
+        fail("build manifest has no builds")
         return 1
-    if manifest.get("benchmark_series") != "wet-v11":
-        fail("unexpected build manifest benchmark_series")
+    prefixes = {
+        build.get("name"): build.get("runtime_prefix") for build in builds
+    }
+    try:
+        validate_installed_builds(manifest, prefixes)
+    except ManifestMismatch as exc:
+        fail(str(exc))
         return 1
 
     bundled = manifest.get("bundled_source") or {}
@@ -80,34 +97,6 @@ def main() -> int:
         if actual != expected:
             fail(f"{path.name} hash changed: manifest has {expected}, disk has {actual}")
             ok = False
-
-    builds = manifest.get("builds")
-    if not isinstance(builds, list) or not builds:
-        fail("build manifest has no builds")
-        return 1
-
-    for build in builds:
-        name = build.get("name", "?")
-        prefix = Path(build.get("runtime_prefix", ""))
-        expected_sha = build.get("sha256") or {}
-        for binary in ("postgres", "pgbench", "psql", "initdb", "pg_ctl"):
-            path = prefix / "bin" / binary
-            expected = expected_sha.get(binary)
-            if not expected:
-                fail(f"{name}: manifest has no recorded hash for {binary}")
-                ok = False
-                continue
-            if not path.is_file():
-                fail(f"{name}: missing installed binary {path}")
-                ok = False
-                continue
-            actual = digest(path)
-            if actual != expected:
-                fail(
-                    f"{name}/{binary} changed since the build manifest was "
-                    f"written: manifest has {expected}, disk has {actual}"
-                )
-                ok = False
 
     if ok:
         print(

@@ -240,47 +240,25 @@ for p in "$PREFIX_BASELINE_A" "$PREFIX_BASELINE_B" "$PREFIX_PATCHED" "$PREFIX_CO
   [[ -x "$p/bin/postgres" ]] || die "missing build at $p -- run ./01-build-all.sh first"
 done
 
-"$PYTHON_BIN" - "$MANIFEST" \
+[[ -r "$SCRIPT_DIR/build_manifest_rules.py" ]] ||
+  die "missing Python helper: $SCRIPT_DIR/build_manifest_rules.py"
+"$PYTHON_BIN" - "$SCRIPT_DIR" "$MANIFEST" \
   "baseline-a=$PREFIX_BASELINE_A" "baseline-b=$PREFIX_BASELINE_B" \
   "patched=$PREFIX_PATCHED" "control=$PREFIX_CONTROL" <<'PY' ||
-import hashlib
 import json
 import sys
 from pathlib import Path
 
-manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-prefixes = dict(item.split("=", 1) for item in sys.argv[2:])
-if manifest.get("schema_version") != 11:
-    raise SystemExit("unsupported build manifest schema")
-if manifest.get("benchmark_series") != "wet-v11":
-    raise SystemExit("unexpected build benchmark series")
-builds = {item["name"]: item for item in manifest.get("builds", [])}
-if set(builds) != set(prefixes):
-    raise SystemExit("build manifest does not describe the required prefixes")
-for name, prefix_text in prefixes.items():
-    prefix = Path(prefix_text)
-    expected = builds[name]["sha256"]
-    for binary in ("postgres", "pgbench", "psql", "initdb", "pg_ctl"):
-        path = prefix / "bin" / binary
-        actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        if actual != expected[binary]:
-            raise SystemExit(f"{name}/{binary} differs from build manifest")
-    fixture = next(prefix.glob("lib/**/test_wait_primitive.*"), None)
-    if fixture is None or hashlib.sha256(
-            fixture.read_bytes()).hexdigest() != expected["test_wait_primitive"]:
-        raise SystemExit(f"{name}/test_wait_primitive differs from manifest")
-    modules = [
-        path for path in prefix.glob("lib/**/pg_wait_event_tracing.*")
-        if path.is_file()
-    ]
-    if name == "patched":
-        if len(modules) != 1:
-            raise SystemExit("patched prefix has no unique tracing module")
-        actual = hashlib.sha256(modules[0].read_bytes()).hexdigest()
-        if actual != expected["pg_wait_event_tracing"]:
-            raise SystemExit("patched tracing module differs from manifest")
-    elif modules:
-        raise SystemExit(f"{name} unexpectedly contains the tracing module")
+script_dir, manifest_path = sys.argv[1:3]
+sys.path.insert(0, script_dir)
+from build_manifest_rules import ManifestMismatch, validate_installed_builds
+
+manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+prefixes = dict(item.split("=", 1) for item in sys.argv[3:])
+try:
+    validate_installed_builds(manifest, prefixes)
+except ManifestMismatch as exc:
+    raise SystemExit(str(exc))
 PY
   die "installed binaries do not match $MANIFEST; rebuild before running"
 
@@ -339,7 +317,8 @@ for workload_file in w3-short-lwlock.sql recording-proof.sql w3-qualification.sq
     die "missing workload file: $WORKLOAD_DIR/$workload_file"
 done
 for helper in benchmark_protocol.py cpu_affinity.py w3_qualification.py \
-              wilcoxon.py latin_square.py sources_conf.py; do
+              wilcoxon.py latin_square.py sources_conf.py \
+              build_manifest_rules.py; do
   [[ -r "$SCRIPT_DIR/$helper" ]] ||
     die "missing Python helper: $SCRIPT_DIR/$helper"
 done

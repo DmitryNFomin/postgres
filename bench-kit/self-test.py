@@ -75,7 +75,8 @@ def run_collector(source_kit: Path, root: Path) -> None:
     against the synthetic tree (still no PostgreSQL server anywhere)."""
     collector = root / "collector"
     shutil.copytree(root / "kit", collector)
-    for name in ("self-test.py", "run-benchmark.sh", "README.md",
+    for name in ("self-test.py", "run-benchmark.sh",
+                 "verify_reusable_builds.py", "README.md",
                  "BAREMETAL-RUNBOOK-v11.md"):
         source = source_kit / name
         if source.is_file():

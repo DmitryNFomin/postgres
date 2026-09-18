@@ -130,6 +130,7 @@ BOUND_KIT_FILES = (
     "01b-disassemble.sh",
     "02-run-matrix.sh",
     "03-collect.sh",
+    "build_manifest_rules.py",
     "lib-python.sh",
     "plateau-probe.sh",
     "analyze-raw-archive.sh",

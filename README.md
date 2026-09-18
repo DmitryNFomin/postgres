@@ -98,10 +98,10 @@ crossover archive/checksum, unedited.
 
 The package produced from this exact tree, with `sources.conf` pinned
 to the three SHAs above, has this SHA-256 (`wet-v11-baremetal-r2.tar.gz`,
-92964609 bytes):
+92966210 bytes):
 
 ```
-3c7f19a72ad184c9e41729a0d8f600f4ca3964c4811841d177d6b0a5d4bc26a8
+1c3cc512d1654efd0eb08e365f893b46b746af27bd109f245093685cffa9febb
 ```
 
 The outer `.tar.gz` embeds each file's mtime and is not byte-for-byte
