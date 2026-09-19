@@ -107,10 +107,42 @@ The four builds from the failed run took 20 to 40 minutes and are still
 good if nothing about the build changed (only e.g. a benchmarking-script
 fix, not a source/patch change). Reuse them instead of paying for a
 rebuild by copying the OLD extraction's `work/` directory into the new
-one, then passing `--reuse-builds`:
+one, then passing `--reuse-builds`.
+
+**Copy `work/` only -- nothing else.** The rest of a failed run's
+directory is either refused outright or would just be stale evidence from
+the failed attempt sitting next to a fresh one:
+
+- `results/`, `smoke-results/`, and any `results-*.tar.gz`/`.sha256`
+  archive are **refused unconditionally** if present -- with or without
+  `--reuse-builds` -- because a partial matrix can never be resumed or
+  merged; every configuration has to run under the same machine
+  conditions for the comparison to mean anything. If the failed run got
+  as far as a smoke matrix (as in the case this note documents: it passed
+  the plateau probe and the 35-cell smoke matrix, then died in
+  smoke-verification), its `smoke-results/` is exactly the evidence a
+  fresh `--reuse-builds` run needs to *not* see, or it refuses to start.
+- `disassembly/` is refused if present **without** `--reuse-builds` (a
+  disassembly run cannot be resumed either), but is harmless to leave
+  out of the new extraction even with `--reuse-builds`: if it is absent
+  there, `run-benchmark.sh` just re-runs `01b-disassemble.sh` fresh
+  (a few minutes, not worth copying).
+- `host-check.txt`/`host-check.json` and `plateau-probe-result.json` are
+  not refused if present, but do not copy them either: the preflight,
+  final-host-check, and plateau-probe phases regenerate all three from
+  scratch on every run, and a copied-over one from the failed attempt's
+  host state would just be stale (or, if it somehow disagreed with the
+  new run's actual host state, confusing to debug).
+- `run-logs/`, `status.json`, and `.benchmark.lock` belong to the failed
+  run's own directory; a fresh extraction starts these clean on its own
+  and none of them are things `--reuse-builds` looks at.
+
+So the restart sequence is:
 
 ```sh
-cp -a ../wet-v11-baremetal-r1/work .   # the failed run's build output
+# The failed run's directory is abandoned entirely except for one thing:
+cp -a ../wet-v11-baremetal-r1/work .   # the failed run's build output --
+                                        # and only this
 export SERVER_CPUS=...
 export PGBENCH_CPUS=...
 ./run-benchmark.sh --reuse-builds
@@ -118,15 +150,28 @@ export PGBENCH_CPUS=...
 
 `--reuse-builds` recomputes the SHA-256 of every bundled source archive and
 every installed `postgres`/`pgbench`/`psql`/`initdb`/`pg_ctl` binary under
-`work/install/` and compares them against `work/manifest.json`; it only
-skips `01-build-all.sh`/`01b-disassemble.sh` if every one of those still
-matches byte-for-byte, and refuses to run at all otherwise (it never
-silently rebuilds or reuses something that no longer matches). A
-pre-existing `results`/`smoke-results` directory is always refused, with
-or without this flag -- a partial matrix can never be resumed or merged,
-only a restart *before* the matrix phase can skip the build.
+`work/install/` (plus the `test_wait_primitive` fixture and the
+`pg_wait_event_tracing` module -- present, hash-matched, in the `patched`
+build only; absent everywhere else, `build_manifest_rules.py`) and compares
+them against `work/manifest.json`; it only skips
+`01-build-all.sh`/`01b-disassemble.sh` if every one of those still matches
+byte-for-byte, and refuses to run at all otherwise (it never silently
+rebuilds or reuses something that no longer matches).
 
-Changelog: r1 crashed in the plateau probe; r2 fixes it.
+The fake-binaries self-test exercises exactly this restart sequence end to
+end (`selftest-fakebin/run-selftest.sh`, the "--reuse-builds restart"
+step): build once, delete everything but `work/`, extract a second fake
+kit copy, copy that one directory across, and confirm `--reuse-builds`
+both passes its own build-reuse verification and runs the rest of the
+launcher to completion.
+
+Changelog: r1 crashed in the plateau probe; r2 fixed that, then (still as
+r2) failed again in smoke-verification because `analyze-results.py` had
+its own, backwards copy of the module-presence rule (it required
+`pg_wait_event_tracing` in the `control` build, when the rule everywhere
+else has always been "patched" build only) -- see `reports/wpf-report.md`,
+Addendum 5. `analyze-results.py` now calls `build_manifest_rules.py`
+instead of encoding that rule itself.
 
 The clone's remote name does not matter (`origin` above, or `fork`, or
 anything else you name it): `make-baremetal-package.sh` resolves

@@ -22,6 +22,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+import build_manifest_rules
 from cpu_affinity import validate_affinity_proof, validate_host_report
 from benchmark_protocol import (
     ACTIVE_CONFIGS,
@@ -147,6 +148,16 @@ def verify_manifest(build_dir: Path) -> dict:
     builds = {item["name"]: item for item in manifest.get("builds", [])}
     require(set(builds) == {"baseline-a", "baseline-b", "patched", "control"},
             f"unexpected build set: {sorted(builds)}")
+    # Single shared rule (build_manifest_rules.py): five binaries hashed in
+    # all four builds, fixture hashed in all four builds, tracing module
+    # present and hash-matched in "patched" only, absent (or "none")
+    # everywhere else. This used to be a private, and backwards, copy of
+    # that rule right here -- see build_manifest_rules.validate_manifest_
+    # hashes()'s docstring and reports/wpf-report.md, Addendum 5.
+    try:
+        build_manifest_rules.validate_manifest_hashes(builds)
+    except build_manifest_rules.ManifestMismatch as exc:
+        raise InvalidResults(str(exc)) from exc
     binaries = ("postgres", "pgbench", "psql", "initdb", "pg_ctl", "test_wait_primitive")
     for binary in binaries:
         require(
@@ -157,12 +168,6 @@ def verify_manifest(build_dir: Path) -> dict:
             "independent baseline installation trees differ")
     require(len({item["fixture_tree"] for item in builds.values()}) == 1,
             "source fixture tree differs across build records")
-    for name in ("patched", "control"):
-        require(builds[name]["sha256"]["pg_wait_event_tracing"] != "none",
-                f"{name} build lacks pg_wait_event_tracing")
-    for name in ("baseline-a", "baseline-b"):
-        require(builds[name]["sha256"]["pg_wait_event_tracing"] == "none",
-                f"{name} unexpectedly contains pg_wait_event_tracing")
     require(
         builds["patched"]["sha256"]["postgres"] != builds["control"]["sha256"]["postgres"],
         "patched and control postgres binaries are byte-identical -- the "

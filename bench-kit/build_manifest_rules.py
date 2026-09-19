@@ -27,7 +27,11 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from benchmark_protocol import BUILD_NAMES
+
 REQUIRED_BINARIES = ("postgres", "pgbench", "psql", "initdb", "pg_ctl")
+FIXTURE_SHA_KEY = "test_wait_primitive"
+MODULE_SHA_KEY = "pg_wait_event_tracing"
 FIXTURE_GLOB = "lib/**/test_wait_primitive.*"
 MODULE_GLOB = "lib/**/pg_wait_event_tracing.*"
 BUILD_WITH_MODULE = "patched"
@@ -70,17 +74,17 @@ def validate_installed_build(name: str, prefix: Path, expected: dict) -> None:
             raise ManifestMismatch(f"{name}/{binary} differs from build manifest")
 
     fixture = next(prefix.glob(FIXTURE_GLOB), None)
-    expected_fixture = expected.get("test_wait_primitive")
+    expected_fixture = expected.get(FIXTURE_SHA_KEY)
     if not expected_fixture:
         raise ManifestMismatch(
-            f"{name}: manifest has no recorded test_wait_primitive hash"
+            f"{name}: manifest has no recorded {FIXTURE_SHA_KEY} hash"
         )
     if fixture is None or digest(fixture) != expected_fixture:
-        raise ManifestMismatch(f"{name}/test_wait_primitive differs from manifest")
+        raise ManifestMismatch(f"{name}/{FIXTURE_SHA_KEY} differs from manifest")
 
     modules = [path for path in prefix.glob(MODULE_GLOB) if path.is_file()]
     if name == BUILD_WITH_MODULE:
-        expected_module = expected.get("pg_wait_event_tracing")
+        expected_module = expected.get(MODULE_SHA_KEY)
         if not expected_module or expected_module == "none":
             raise ManifestMismatch(
                 f"{name}: manifest has no recorded tracing-module hash"
@@ -91,6 +95,47 @@ def validate_installed_build(name: str, prefix: Path, expected: dict) -> None:
             raise ManifestMismatch(f"{name} tracing module differs from manifest")
     elif modules:
         raise ManifestMismatch(f"{name} unexpectedly contains the tracing module")
+
+
+def validate_manifest_hashes(builds: dict) -> None:
+    """Pure manifest.json check -- no filesystem access, no installed
+    prefixes required. This is what analyze-results.py calls (it only
+    ever sees a build manifest, never an installed prefix; the
+    filesystem-backed rule above is validate_installed_build()).
+
+    `builds` is {name: build_record} as extracted from manifest.json's
+    "builds" list. Confirms, for every one of BUILD_NAMES, that the five
+    required binaries and the test_wait_primitive fixture each have a
+    recorded hash, and applies the exact same pg_wait_event_tracing
+    present-in-BUILD_WITH_MODULE-only rule as validate_installed_build().
+
+    This function used to be duplicated (and gotten backwards) as a
+    private check inside analyze-results.py's verify_manifest(), which
+    required the tracing module in *both* "patched" and "control" --
+    contradicting this module's actual rule (module in "patched" only)
+    and failing every real run at the smoke-verification phase right
+    after a real run had already built a correct control installation.
+    See reports/wpf-report.md, Addendum 5.
+    """
+    for name in BUILD_NAMES:
+        if name not in builds:
+            raise ManifestMismatch(f"manifest is missing a build record for {name}")
+        sha256_map = builds[name].get("sha256") or {}
+        for binary in REQUIRED_BINARIES:
+            if not sha256_map.get(binary):
+                raise ManifestMismatch(
+                    f"{name}: manifest has no recorded hash for {binary}"
+                )
+        if not sha256_map.get(FIXTURE_SHA_KEY):
+            raise ManifestMismatch(
+                f"{name}: manifest has no recorded {FIXTURE_SHA_KEY} hash"
+            )
+        module_hash = sha256_map.get(MODULE_SHA_KEY)
+        if name == BUILD_WITH_MODULE:
+            if not module_hash or module_hash == "none":
+                raise ManifestMismatch(f"{name} build lacks {MODULE_SHA_KEY}")
+        elif module_hash and module_hash != "none":
+            raise ManifestMismatch(f"{name} unexpectedly contains {MODULE_SHA_KEY}")
 
 
 def validate_installed_builds(manifest: dict, prefixes: dict) -> None:

@@ -20,6 +20,7 @@ from pathlib import Path
 from benchmark_protocol import (
     ACTIVE_CONFIGS,
     BOUND_KIT_FILES,
+    BUILD_NAMES,
     CONFIGS,
     EARLY_AA_GATE_REPETITIONS,
     EARLY_AA_GATE_WORKLOAD,
@@ -33,13 +34,13 @@ from benchmark_protocol import (
     WORKLOADS,
     pgbench_margin_log,
 )
+from build_manifest_rules import BUILD_WITH_MODULE
 from latin_square import build_schedule
 from stats_common import confidence_interval, classify_contrast, t_only_classification
 from w3_qualification import analyze_file
 from wilcoxon import wilcoxon_signed_rank
 
 CSV_FIELDS = RESULT_FIELDS
-BUILD_NAMES = ("baseline-a", "baseline-b", "patched", "control")
 
 
 def digest(path: Path) -> str:
@@ -136,9 +137,13 @@ def verify_runner_contract(source_kit: Path) -> None:
 
 
 def _module_sha(config_build: str) -> str:
-    return "none" if config_build in ("baseline-a", "baseline-b") else (
-        "8" * 64 if config_build == "patched" else "9" * 64
-    )
+    # Single shared rule (build_manifest_rules.BUILD_WITH_MODULE): the
+    # tracing module is present only in the "patched" build, "none"
+    # everywhere else -- this used to hand "control" a fake module hash
+    # too, which is the same backwards rule analyze-results.py's old
+    # private check had (reports/wpf-report.md, Addendum 5), just baked
+    # into this synthetic-manifest builder instead.
+    return "8" * 64 if config_build == BUILD_WITH_MODULE else "none"
 
 
 def _binary_sha(config_build: str, binary: str) -> str:

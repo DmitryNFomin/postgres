@@ -21,6 +21,15 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/lib-python.sh"
 require_python
 
+# Single shared rule (build_manifest_rules.BUILD_WITH_MODULE) for which
+# build gets the pg_wait_event_tracing module: every "does this build
+# install the module" decision below is derived from it, not a per-line
+# yes/no literal that could drift from the rule 02-run-matrix.sh's
+# preflight, verify_reusable_builds.py, and analyze-results.py all enforce.
+MODULE_BUILD=$("$PYTHON_BIN" -c \
+  "from build_manifest_rules import BUILD_WITH_MODULE; print(BUILD_WITH_MODULE)")
+has_module() { [[ "$1" == "$MODULE_BUILD" ]] && echo yes || echo no; }
+
 # ---------------------------------------------------------------------------
 # SELFTEST_FAKE_PREFIX: fake-binaries self-test mode (selftest-fakebin/,
 # driven by selftest-fakebin/run-selftest.sh via self-test.py). Skips real
@@ -96,8 +105,10 @@ PY
   echo '{"schema_version": 11, "selftest_fake_prefix": true}' \
     >"$WORK/source-manifest.json"
   : >"$RECORDS"
-  for pair in "baseline-a=base-a=no" "baseline-b=base-b=no" \
-              "patched=patchd=yes" "control=ctrlop=no"; do
+  for pair in "baseline-a=base-a=$(has_module baseline-a)" \
+              "baseline-b=base-b=$(has_module baseline-b)" \
+              "patched=patchd=$(has_module patched)" \
+              "control=ctrlop=$(has_module control)"; do
     name_for_leaf=${pair%%=*}
     rest=${pair#*=}
     leaf=${rest%%=*}
@@ -538,13 +549,13 @@ for leaf in base-a base-b patchd ctrlop; do
   [[ ${#leaf} -eq 6 ]] || die "runtime prefix leaf '$leaf' is not six bytes"
 done
 
-build_one baseline-a "$MASTER_SHA" base-a no
-build_one baseline-b "$MASTER_SHA" base-b no
+build_one baseline-a "$MASTER_SHA" base-a "$(has_module baseline-a)"
+build_one baseline-b "$MASTER_SHA" base-b "$(has_module baseline-b)"
 verify_baseline_reproducibility ||
   die "independent baseline builds differ; patched/control builds were not started"
 log "Independent baseline reproducibility: PASS"
-build_one patched "$V11_SHA" patchd yes
-build_one control "$CONTROL_SHA" ctrlop no
+build_one patched "$V11_SHA" patchd "$(has_module patched)"
+build_one control "$CONTROL_SHA" ctrlop "$(has_module control)"
 
 SOURCE_MANIFEST_SHA=$(hash_file "$SOURCE_MANIFEST")
 SOURCE_ARCHIVE_MASTER_SHA=$(hash_file "$SOURCE_ARCHIVE_MASTER")

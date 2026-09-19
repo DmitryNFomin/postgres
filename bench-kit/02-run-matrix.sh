@@ -287,6 +287,29 @@ mapfile -t WORKLOADS < <("$PYTHON_BIN" -c \
   "from benchmark_protocol import WORKLOADS; print('\n'.join(WORKLOADS))")
 mapfile -t W1_FUNCTIONS < <("$PYTHON_BIN" -c \
   "from benchmark_protocol import W1_FUNCTIONS; print('\n'.join(W1_FUNCTIONS))")
+# Single config table (benchmark_protocol.py) for which configurations must
+# prove the module absent vs. loaded, and which capture mode each loaded
+# config expects -- assert_mode_proof() below must consult these, not a
+# private bash case statement that could drift from benchmark_protocol.py.
+mapfile -t MODULE_ABSENT_CONFIGS < <("$PYTHON_BIN" -c \
+  "from benchmark_protocol import MODULE_ABSENT_CONFIGS as c; print('\n'.join(c))")
+mapfile -t MODULE_LOADED_CONFIGS < <("$PYTHON_BIN" -c \
+  "from benchmark_protocol import MODULE_LOADED_CONFIGS as c; print('\n'.join(c))")
+declare -A CAPTURE_FOR_CONFIG=()
+while IFS=$'\t' read -r config_name capture_value; do
+  [[ -n "$config_name" ]] || continue
+  CAPTURE_FOR_CONFIG["$config_name"]="$capture_value"
+done < <("$PYTHON_BIN" -c \
+  "from benchmark_protocol import CAPTURE_FOR_CONFIG as c
+for k, v in c.items():
+    print(f'{k}\t{v}')")
+
+in_list() {
+  local needle=$1 item
+  shift
+  for item in "$@"; do [[ "$item" == "$needle" ]] && return 0; done
+  return 1
+}
 CELLS_PER_REPETITION=$(( ${#CONFIGS[@]} * ${#WORKLOADS[@]} ))
 TOTAL_CELLS=$(( ${#CONFIGS[@]} * ${#WORKLOADS[@]} * RUNS ))
 
@@ -504,59 +527,53 @@ assert_mode_proof() {
   preload=$(psql_for "$prefix" -qAtc "SHOW shared_preload_libraries" 2>&1) ||
     die "could not read shared_preload_libraries for $config: $preload"
 
-  case "$config" in
-    master|master-aa|control|hook-null)
-      case "$preload" in
-        *"$MODULE_NAME"*)
-          die "$MODULE_NAME is unexpectedly present in shared_preload_libraries for $config ('$preload')"
-          ;;
-      esac
-      if capture_out=$(psql_for "$prefix" -qAtc "SHOW $GUC_CAPTURE" 2>&1); then
-        die "$GUC_CAPTURE is unexpectedly readable for $config (got '$capture_out')"
-      fi
-      local extension_count
-      extension_count=$(psql_for "$prefix" -qAtc \
-        "SELECT count(*) FROM pg_extension WHERE extname = '$MODULE_NAME'") ||
-        die "could not inspect pg_extension for $config"
-      [[ "$extension_count" == 0 ]] ||
-        die "$MODULE_NAME SQL extension unexpectedly exists for $config"
-      ;;
-    module-off|stats|trace)
-      case "$preload" in
-        *"$MODULE_NAME"*) ;;
-        *)
-          die "$MODULE_NAME is missing from shared_preload_libraries for $config (got '$preload')"
-          ;;
-      esac
-      case "$config" in
-        module-off) expected=off ;;
-        stats) expected=stats ;;
-        trace) expected=trace ;;
-      esac
-      capture_out=$(psql_for "$prefix" -qAtc "SHOW $GUC_CAPTURE" 2>&1) ||
-        die "$GUC_CAPTURE is not readable for $config even though the module should be loaded"
-      [[ "$capture_out" == "$expected" ]] ||
-        die "$GUC_CAPTURE is '$capture_out' for $config, expected exactly '$expected'"
-      psql_for "$prefix" -qAtc "CREATE EXTENSION IF NOT EXISTS $MODULE_NAME" >/dev/null ||
-        die "CREATE EXTENSION $MODULE_NAME failed for $config"
-      local extension_count
-      extension_count=$(psql_for "$prefix" -qAtc \
-        "SELECT count(*) FROM pg_extension WHERE extname = '$MODULE_NAME'") ||
-        die "could not verify $MODULE_NAME SQL installation for $config"
-      [[ "$extension_count" == 1 ]] ||
-        die "$MODULE_NAME SQL extension is not installed for $config"
-      if [[ "$config" == module-off ]]; then
-        hooks_installed=$(psql_for "$prefix" -qAtc \
-          "SELECT $HOOKS_INSTALLED_FUNCTION()") ||
-          die "$HOOKS_INSTALLED_FUNCTION() failed for $config"
-        [[ "$hooks_installed" == f ]] ||
-          die "$HOOKS_INSTALLED_FUNCTION() returned '$hooks_installed' for module-off, expected false"
-      fi
-      ;;
-    *)
-      die "unknown config: $config"
-      ;;
-  esac
+  if in_list "$config" "${MODULE_ABSENT_CONFIGS[@]}"; then
+    case "$preload" in
+      *"$MODULE_NAME"*)
+        die "$MODULE_NAME is unexpectedly present in shared_preload_libraries for $config ('$preload')"
+        ;;
+    esac
+    if capture_out=$(psql_for "$prefix" -qAtc "SHOW $GUC_CAPTURE" 2>&1); then
+      die "$GUC_CAPTURE is unexpectedly readable for $config (got '$capture_out')"
+    fi
+    local extension_count
+    extension_count=$(psql_for "$prefix" -qAtc \
+      "SELECT count(*) FROM pg_extension WHERE extname = '$MODULE_NAME'") ||
+      die "could not inspect pg_extension for $config"
+    [[ "$extension_count" == 0 ]] ||
+      die "$MODULE_NAME SQL extension unexpectedly exists for $config"
+  elif in_list "$config" "${MODULE_LOADED_CONFIGS[@]}"; then
+    case "$preload" in
+      *"$MODULE_NAME"*) ;;
+      *)
+        die "$MODULE_NAME is missing from shared_preload_libraries for $config (got '$preload')"
+        ;;
+    esac
+    expected=${CAPTURE_FOR_CONFIG[$config]:-}
+    [[ -n "$expected" ]] ||
+      die "no expected capture mode for $config in benchmark_protocol.CAPTURE_FOR_CONFIG"
+    capture_out=$(psql_for "$prefix" -qAtc "SHOW $GUC_CAPTURE" 2>&1) ||
+      die "$GUC_CAPTURE is not readable for $config even though the module should be loaded"
+    [[ "$capture_out" == "$expected" ]] ||
+      die "$GUC_CAPTURE is '$capture_out' for $config, expected exactly '$expected'"
+    psql_for "$prefix" -qAtc "CREATE EXTENSION IF NOT EXISTS $MODULE_NAME" >/dev/null ||
+      die "CREATE EXTENSION $MODULE_NAME failed for $config"
+    local extension_count
+    extension_count=$(psql_for "$prefix" -qAtc \
+      "SELECT count(*) FROM pg_extension WHERE extname = '$MODULE_NAME'") ||
+      die "could not verify $MODULE_NAME SQL installation for $config"
+    [[ "$extension_count" == 1 ]] ||
+      die "$MODULE_NAME SQL extension is not installed for $config"
+    if [[ "$config" == module-off ]]; then
+      hooks_installed=$(psql_for "$prefix" -qAtc \
+        "SELECT $HOOKS_INSTALLED_FUNCTION()") ||
+        die "$HOOKS_INSTALLED_FUNCTION() failed for $config"
+      [[ "$hooks_installed" == f ]] ||
+        die "$HOOKS_INSTALLED_FUNCTION() returned '$hooks_installed' for module-off, expected false"
+    fi
+  else
+    die "unknown config: $config (not in benchmark_protocol's MODULE_ABSENT_CONFIGS or MODULE_LOADED_CONFIGS)"
+  fi
 }
 
 # ---------------------------------------------------------------------------
