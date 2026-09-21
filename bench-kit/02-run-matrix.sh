@@ -1261,6 +1261,18 @@ PY
   stop_freq_sampler
   freq_stats=$(summarize_freq_sampler "$freq_log")
   cached_after=$(meminfo_cached_kb)
+  # Sample at the end of the measured window (here, right after the
+  # workload's measured pgbench/W1 run and before stop_server_checked
+  # tears the cluster down) -- the fraction of the postmaster's resident
+  # pages that sit on the NUMA node(s) SERVER_CPUS lives on. This is only
+  # a meaningful signal because 00-check-host.sh/cpu_affinity.py now
+  # refuse (no override) any SERVER_CPUS that spans more than one NUMA
+  # node: with that guard, server_numa_nodes below is always exactly one
+  # node. Before that guard existed, a cross-socket SERVER_CPUS (e.g. the
+  # rehearsal incident's "1-31" on a 2-node, interleaved-numbering host)
+  # made server_numa_nodes = every node on the machine, so "local" was
+  # vacuously the whole host and this always read 1.0 regardless of where
+  # memory actually landed -- see reports/wpf-report.md, Addendum 6.
   local numa_node_list
   numa_node_list=$("$PYTHON_BIN" "$AFFINITY_HELPER" collect 2>/dev/null |
     "$PYTHON_BIN" -c "import json,sys; print(','.join(str(n) for n in json.load(sys.stdin)['server_numa_nodes']))" 2>/dev/null || echo "")

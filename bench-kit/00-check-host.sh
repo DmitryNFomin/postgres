@@ -299,12 +299,35 @@ if [[ "$NUMA_NODE_COUNT" -gt 1 ]] && ! command -v numactl >/dev/null 2>&1; then
 fi
 
 if [[ "$TOPOLOGY_OK" -eq 1 ]]; then
-  if AFFINITY_PROOF_JSON=$("${PYTHON_BIN:-python3}" "$AFFINITY_HELPER" collect); then
+  # Combine stdout+stderr: on success cpu_affinity.py prints exactly one
+  # JSON line and nothing on stderr; on failure it prints nothing on
+  # stdout and a (possibly multi-line, e.g. the NUMA-span refusal's
+  # topology summary and recommended mask pair) detail on stderr. Either
+  # way the single captured blob is unambiguous and, on failure, gets
+  # logged into host-check.txt below instead of only flashing past on the
+  # terminal.
+  if AFFINITY_RAW=$("${PYTHON_BIN:-python3}" "$AFFINITY_HELPER" collect 2>&1); then
+    AFFINITY_PROOF_JSON="$AFFINITY_RAW"
     AFFINITY_TOPOLOGY_VERIFIED=1
     log "Affinity topology:      verified (masks disjoint, no shared physical core, taskset confirmed)"
+
+    SERVER_CPU_COUNT=$(printf '%s' "$AFFINITY_PROOF_JSON" |
+      "$PYTHON_BIN" -c "import json,sys; print(len(json.load(sys.stdin)['server_cpu_ids']))" 2>/dev/null || echo "")
+    MAX_PROTOCOL_CLIENTS=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -c \
+      "from benchmark_protocol import CLIENTS_FOR_WORKLOAD; print(max(CLIENTS_FOR_WORKLOAD.values()))" \
+      2>/dev/null || echo "")
+    if [[ "$SERVER_CPU_COUNT" =~ ^[0-9]+$ && "$MAX_PROTOCOL_CLIENTS" =~ ^[0-9]+$ ]] &&
+       (( SERVER_CPU_COUNT > 2 * MAX_PROTOCOL_CLIENTS )); then
+      log ""
+      log "*** NOTE (non-blocking): SERVER_CPUS has $SERVER_CPU_COUNT CPUs, more than 2x the largest client count in the protocol ($MAX_PROTOCOL_CLIENTS, W6c/crossover). An oversized, undersubscribed server set lets the scheduler migrate PostgreSQL backends across idle cores instead of keeping them pinned, adding run-to-run scheduling variance that has nothing to do with the code under test. The runbook's 8-physical-core server set is normally enough. ***"
+      log ""
+    fi
   else
     AFFINITY_PROOF_JSON='{"verified": false}'
-    warn "SERVER_CPUS/PGBENCH_CPUS failed verification (empty, overlapping, sharing a physical core, or not applicable with taskset) -- see the detail above"
+    log ""
+    log "$AFFINITY_RAW"
+    log ""
+    warn "SERVER_CPUS/PGBENCH_CPUS failed verification (empty, overlapping, sharing a physical core, spanning more than one NUMA node, or not applicable with taskset) -- see the detail above"
     TOPOLOGY_OK=0
   fi
 fi

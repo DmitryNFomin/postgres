@@ -30,7 +30,9 @@ Usage:
 
 Run the default command inside tmux or screen on the idle Linux host.
 SERVER_CPUS and PGBENCH_CPUS must be set to two disjoint CPU lists (Linux
-cpu-list syntax, e.g. "1-31") that share no physical core; see
+cpu-list syntax, including taskset's stride form for interleaved NUMA
+numbering, e.g. "1-15:2") that share no physical core and each stay
+within a single NUMA node; see "Deriving CPU masks" in
 BAREMETAL-RUNBOOK-v11.md. CPU affinity is not tied to one fixed topology.
 EOF
 }

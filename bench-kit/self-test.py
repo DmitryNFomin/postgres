@@ -62,6 +62,7 @@ from benchmark_protocol import (
     WORKLOADS,
     pgbench_margin_log,
 )
+import cpu_affinity
 from build_manifest_rules import BUILD_WITH_MODULE
 from latin_square import build_schedule
 from stats_common import confidence_interval, classify_contrast, t_only_classification
@@ -569,6 +570,61 @@ def test_plateau_scenario_unit() -> None:
         raise RuntimeError("Hodges-Lehmann interval unexpectedly excludes zero")
 
 
+def test_numa_affinity_guard() -> None:
+    """Unit-level check of cpu_affinity.py's cross-NUMA-node refusal and
+    same-node mask recommendation, against a fake two-node topology with
+    interleaved CPU numbering (even CPUs on node 0, odd on node 1) -- the
+    exact shape of the real host that motivated this guard (see
+    reports/wpf-report.md, Addendum 6): 64 CPUs, SMT off, and the
+    original incident's cross-socket masks (SERVER_CPUS=1-31,
+    PGBENCH_CPUS=32-39). This exercises cpu_affinity.check_single_node_masks()
+    directly (a pure function of a topology dict) rather than going
+    through a real `lscpu`/`taskset`, which this self-test's own host
+    (possibly non-Linux, definitely a different topology) cannot stand in
+    for."""
+    topology = {cpu: (cpu // 2, cpu % 2, cpu % 2) for cpu in range(64)}
+
+    # --- cross-node mask: refused, with topology + recommendation -----
+    try:
+        cpu_affinity.check_single_node_masks(
+            set(range(1, 32)), set(range(32, 40)), topology
+        )
+        raise RuntimeError("cross-node SERVER_CPUS/PGBENCH_CPUS was not refused")
+    except ValueError as error:
+        message = str(error)
+        for expected in (
+            "SERVER_CPUS spans more than one NUMA node",
+            "PGBENCH_CPUS spans more than one NUMA node",
+            "NUMA node 0: 32 physical core(s), CPUs 0-62:2",
+            "NUMA node 1: 32 physical core(s), CPUs 1-63:2",
+            "SMT: off",
+            "Recommended pair",
+            "export SERVER_CPUS=1-15:2",
+            "export PGBENCH_CPUS=17-31:2",
+        ):
+            if expected not in message:
+                raise RuntimeError(
+                    f"NUMA-guard refusal message missing {expected!r}:\n{message}"
+                ) from error
+
+    # --- same-node stride mask: accepted (no exception) ----------------
+    cpu_affinity.check_single_node_masks(
+        set(range(1, 16, 2)), set(range(17, 32, 2)), topology
+    )
+
+    # --- recommendation matches the refusal message exactly -------------
+    recommendation = cpu_affinity.recommend_single_node_masks(topology)
+    if recommendation != {
+        "node": 1, "server_cpus": "1-15:2", "pgbench_cpus": "17-31:2",
+    }:
+        raise RuntimeError(f"unexpected mask recommendation: {recommendation}")
+
+    # --- no NUMA node has 16 physical cores: no recommendation ----------
+    small_topology = {cpu: (cpu // 2, cpu % 2, cpu % 2) for cpu in range(8)}
+    if cpu_affinity.recommend_single_node_masks(small_topology) is not None:
+        raise RuntimeError("expected no recommendation on an undersized topology")
+
+
 def test_plateau_scenario_end_to_end(source_kit: Path, analyzer: Path) -> None:
     """Build a full synthetic tree with the plateau injected into the
     trace-vs-master W6c contrast and confirm analyze-results.py itself
@@ -600,6 +656,7 @@ def main() -> int:
     analyzer = source_kit / "analyze-results.py"
 
     test_plateau_scenario_unit()
+    test_numa_affinity_guard()
 
     with tempfile.TemporaryDirectory(prefix="wet-v11-self-test-") as temporary:
         root = Path(temporary)
@@ -622,6 +679,16 @@ def main() -> int:
         resync_completion(results)
         run_analyzer(analyzer, root, expect_success=False,
                      expected_error="server/pgbench CPU sets overlap")
+        protocol_path.write_bytes(saved_protocol)
+        resync_completion(results)
+
+        # --- tamper: CPU affinity server spans two NUMA nodes --------------
+        protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+        protocol["cpu_affinity_protocol"]["server_numa_nodes"] = [0, 1]
+        write_json(protocol_path, protocol)
+        resync_completion(results)
+        run_analyzer(analyzer, root, expect_success=False,
+                     expected_error="spans more than one NUMA node")
         protocol_path.write_bytes(saved_protocol)
         resync_completion(results)
 

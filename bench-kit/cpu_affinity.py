@@ -67,6 +67,167 @@ def configured_cpu_lists():
     return server_cpus, pgbench_cpus
 
 
+def format_cpu_list(cpu_ids):
+    """Compress a sorted collection of CPU ids into taskset syntax,
+    including the stride form (e.g. "1-15:2") needed for a host whose CPU
+    numbering interleaves NUMA nodes (odd/even split across two sockets).
+    A run of three or more evenly-spaced ids becomes "start-end[:stride]";
+    anything else falls back to individual ids joined by commas."""
+    ids = sorted(set(cpu_ids))
+    if not ids:
+        return ""
+    groups = []
+    i = 0
+    n = len(ids)
+    while i < n:
+        j = i
+        if j + 1 < n:
+            stride = ids[j + 1] - ids[j]
+            k = j + 1
+            while k + 1 < n and ids[k + 1] - ids[k] == stride:
+                k += 1
+            if k > j:
+                if stride == 1:
+                    groups.append("{}-{}".format(ids[j], ids[k]))
+                else:
+                    groups.append("{}-{}:{}".format(ids[j], ids[k], stride))
+                i = k + 1
+                continue
+        groups.append(str(ids[j]))
+        i = j + 1
+    return ",".join(groups)
+
+
+def _nodes_with_core_representatives(topology):
+    """{node: [cpu, ...]} with exactly one representative CPU id per
+    distinct physical (socket, core) -- the lowest-numbered CPU sharing
+    that core -- so an SMT sibling is never double-counted as a second
+    physical core."""
+    nodes = {}
+    seen_cores = set()
+    for cpu in sorted(topology):
+        core, socket, node = topology[cpu]
+        key = (node, socket, core)
+        if key in seen_cores:
+            continue
+        seen_cores.add(key)
+        nodes.setdefault(node, []).append(cpu)
+    for cpus in nodes.values():
+        cpus.sort()
+    return nodes
+
+
+def describe_topology_lines(topology):
+    """Human-readable topology summary: NUMA nodes, CPUs per node with the
+    actual numbering (taskset syntax), and SMT state -- everything an
+    executor needs to pick a same-node mask pair by hand."""
+    nodes = _nodes_with_core_representatives(topology)
+    lines = []
+    for node in sorted(nodes):
+        cpus_in_node = sorted(
+            cpu for cpu, (_core, _socket, cpu_node) in topology.items()
+            if cpu_node == node
+        )
+        lines.append(
+            "NUMA node {}: {} physical core(s), CPUs {}".format(
+                node, len(nodes[node]), format_cpu_list(cpus_in_node)
+            )
+        )
+    total_cpus = len(topology)
+    total_cores = sum(len(cpus) for cpus in nodes.values())
+    if total_cores and total_cpus != total_cores:
+        lines.append(
+            "SMT: on ({} logical CPUs / {} physical cores)".format(
+                total_cpus, total_cores
+            )
+        )
+    else:
+        lines.append("SMT: off ({} physical core(s))".format(total_cores))
+    return lines
+
+
+def recommend_single_node_masks(topology, per_role=8):
+    """Recommend a same-node SERVER_CPUS/PGBENCH_CPUS pair: the first
+    `per_role` physical cores of one NUMA node for the server, the next
+    `per_role` physical cores of the SAME node for pgbench (the v7
+    protocol). Prefers a node that does not contain CPU id 0 (commonly
+    the busiest CPU for kernel/IRQ duties on a freshly booted host) when
+    more than one node has enough cores; falls back to the lowest node id
+    otherwise. Returns None if no single node has 2 * per_role physical
+    cores online."""
+    nodes = _nodes_with_core_representatives(topology)
+
+    def sort_key(node):
+        return (0 if 0 not in nodes[node] else 1, node)
+
+    for node in sorted(nodes, key=sort_key):
+        cores = nodes[node]
+        if len(cores) >= 2 * per_role:
+            return {
+                "node": node,
+                "server_cpus": format_cpu_list(cores[:per_role]),
+                "pgbench_cpus": format_cpu_list(cores[per_role:2 * per_role]),
+            }
+    return None
+
+
+def check_single_node_masks(server_ids, pgbench_ids, topology):
+    """Refuse (ValueError, no override) if SERVER_CPUS or PGBENCH_CPUS
+    spans more than one NUMA node. A cross-socket mask lets the scheduler
+    and the memory allocator split work and pages across both nodes,
+    adding run-to-run variance that has nothing to do with the code under
+    test (see reports/wpf-report.md, "numa_local_fraction" investigation:
+    a mask spanning every node on the host makes that metric vacuously
+    1.0 no matter where memory actually lands). On refusal, prints the
+    live topology and a concrete, same-node recommended pair."""
+    server_nodes = {topology[c][2] for c in server_ids}
+    pgbench_nodes = {topology[c][2] for c in pgbench_ids}
+    if len(server_nodes) <= 1 and len(pgbench_nodes) <= 1:
+        return
+    lines = []
+    if len(server_nodes) > 1:
+        lines.append(
+            "SERVER_CPUS spans more than one NUMA node: nodes {} (CPUs {})".format(
+                ",".join(str(n) for n in sorted(server_nodes)),
+                format_cpu_list(server_ids),
+            )
+        )
+    if len(pgbench_nodes) > 1:
+        lines.append(
+            "PGBENCH_CPUS spans more than one NUMA node: nodes {} (CPUs {})".format(
+                ",".join(str(n) for n in sorted(pgbench_nodes)),
+                format_cpu_list(pgbench_ids),
+            )
+        )
+    lines.append(
+        "A cross-socket mask lets the scheduler and memory allocator split "
+        "work and pages across both NUMA nodes, adding run-to-run variance "
+        "that has nothing to do with the code under test -- SERVER_CPUS "
+        "and PGBENCH_CPUS must each be confined to a single NUMA node."
+    )
+    lines.append("")
+    lines.append("Topology (from lscpu -e):")
+    lines.extend("  " + line for line in describe_topology_lines(topology))
+    lines.append("")
+    recommendation = recommend_single_node_masks(topology)
+    if recommendation is not None:
+        lines.append(
+            "Recommended pair (v7 protocol: server gets 8 physical cores, "
+            "pgbench gets the next 8 physical cores, both on NUMA node {}):"
+            .format(recommendation["node"])
+        )
+        lines.append("  export SERVER_CPUS={}".format(recommendation["server_cpus"]))
+        lines.append("  export PGBENCH_CPUS={}".format(recommendation["pgbench_cpus"]))
+    else:
+        lines.append(
+            "No single NUMA node on this host has {} or more physical "
+            "cores online; this protocol needs {} for the server and {} "
+            "for pgbench on the SAME node, so this host cannot run it as "
+            "configured.".format(2 * 8, 8, 8)
+        )
+    raise ValueError("\n".join(lines))
+
+
 def _lscpu_topology():
     """Return {cpu: (core, socket, node)} for every online CPU."""
     output = subprocess.check_output(
@@ -159,6 +320,8 @@ def collect_topology_proof():
             "SERVER_CPUS and PGBENCH_CPUS overlap: "
             + ",".join(str(c) for c in sorted(server_ids & pgbench_ids))
         )
+
+    check_single_node_masks(server_ids, pgbench_ids, topology)
 
     server_cores = {(topology[c][1], topology[c][0]) for c in server_ids}
     pgbench_cores = {(topology[c][1], topology[c][0]) for c in pgbench_ids}
@@ -264,6 +427,22 @@ def validate_affinity_proof(affinity):
     for key in ("server_cpus", "pgbench_cpus"):
         if not isinstance(affinity.get(key), str) or not affinity[key]:
             raise ValueError(f"{key} must be a nonempty string")
+    # Defense in depth: a proof recorded before this NUMA guard existed (or
+    # one that was hand-edited) could still claim "verified" while its
+    # SERVER_CPUS/PGBENCH_CPUS span more than one NUMA node -- reject it
+    # here too, not only at collection time.
+    for key in ("server_numa_nodes", "pgbench_numa_nodes"):
+        nodes = affinity.get(key)
+        if nodes is None:
+            continue
+        if not isinstance(nodes, list) or any(type(n) is not int for n in nodes):
+            raise ValueError(f"{key} must be a list of integer NUMA node ids")
+        if len(set(nodes)) > 1:
+            raise ValueError(
+                f"{key} spans more than one NUMA node: {sorted(set(nodes))} "
+                "-- SERVER_CPUS/PGBENCH_CPUS must each be confined to a "
+                "single NUMA node"
+            )
 
 
 def validate_host_report(report, expected_hostname=None):

@@ -18,9 +18,9 @@ extract, set this host's CPU masks, and start the complete run:
 sha256sum -c wet-v11-baremetal-r2.tar.gz.sha256
 tar -xzf wet-v11-baremetal-r2.tar.gz
 cd wet-v11-baremetal-r2
-lscpu -e                      # find two disjoint CPU sets on separate cores
-export SERVER_CPUS=...        # e.g. 1-31 (PostgreSQL)
-export PGBENCH_CPUS=...       # e.g. 32-39 (pgbench), no shared physical core
+lscpu -e                      # derive same-node masks -- see "Deriving CPU masks" below
+export SERVER_CPUS=...        # 8 physical cores, one NUMA node (PostgreSQL)
+export PGBENCH_CPUS=...       # the next 8 physical cores, the SAME node (pgbench)
 ./run-benchmark.sh
 ```
 
@@ -31,8 +31,56 @@ Leave the host idle.
 
 Unlike the v10 kit, this kit is not tied to one fixed two-socket topology:
 you tell it which CPUs to use for PostgreSQL and which for pgbench, and it
-verifies at runtime that both masks are non-empty, online, and share no
-physical core (see "CPU affinity" below).
+verifies at runtime that both masks are non-empty, online, share no
+physical core, and each stay within a single NUMA node (see "Deriving CPU
+masks" below).
+
+## Deriving CPU masks
+
+Both `SERVER_CPUS` and `PGBENCH_CPUS` must be derived from the actual
+target host's own `lscpu -e` output, every time -- masks copied from a
+different host's topology are not portable (CPU numbering, which CPUs
+belong to which NUMA node, and even how many nodes exist all vary by
+machine and BIOS).
+
+```sh
+lscpu -e
+```
+
+Read the `NODE` column. **Both masks must land on the same NUMA node** --
+`00-check-host.sh` refuses to start (no override) if either one spans
+more than one node, because a cross-socket mask lets the scheduler and
+the memory allocator split work and pages across both nodes, adding
+run-to-run variance that has nothing to do with the code under test, and
+makes the recorded `numa_local_fraction` evidence meaningless (a mask
+that spans every node on the host makes "local" mean "anywhere," so the
+fraction reads 1.0 regardless of where memory actually landed -- see
+`reports/wpf-report.md` Addendum 6). Two node arrangements come up in
+practice:
+
+- **Contiguous numbering** (a node owns a contiguous block of CPU ids,
+  e.g. node 0 = CPUs 0-31, node 1 = CPUs 32-63): `SERVER_CPUS` is the
+  first 8 physical cores of one node, `PGBENCH_CPUS` the next 8 physical
+  cores of the SAME node, e.g. `SERVER_CPUS=0-7 PGBENCH_CPUS=8-15`.
+- **Interleaved numbering** (CPU ids alternate between nodes, e.g. even
+  CPU ids = node 0, odd = node 1 -- seen on some two-socket Xeon
+  platforms): use taskset's stride syntax (`start-end:stride`) to select
+  8 physical cores from a single node without crossing to the other,
+  e.g. on a host where node 1 is the odd CPUs 1,3,5,...,63:
+  `SERVER_CPUS=1-15:2 PGBENCH_CPUS=17-31:2`.
+
+Either way: 8 physical cores for the server, 8 for pgbench, both on the
+same node (the v7 protocol) -- not more, not fewer. Too few starves the
+workload; a server set much larger than the client counts the matrix
+actually drives (32 clients at most, in W6c and the crossover)
+undersubscribes it instead, letting the scheduler migrate PostgreSQL
+backends across idle cores and adding scheduling variance unrelated to
+the code under test (`00-check-host.sh` warns, non-blocking, if
+`SERVER_CPUS` has more than 2x that 32-client maximum).
+
+If either mask spans more than one NUMA node, `00-check-host.sh` refuses
+to start and prints the live topology plus a concrete recommended pair
+in the same taskset syntax shown above.
 
 ## Laptop workflow
 
@@ -60,9 +108,9 @@ tmux new -s v11-bench
 sha256sum -c wet-v11-baremetal-r2.tar.gz.sha256
 tar -xzf wet-v11-baremetal-r2.tar.gz
 cd wet-v11-baremetal-r2
-lscpu -e
-export SERVER_CPUS=...   # e.g. 1-31
-export PGBENCH_CPUS=...  # e.g. 32-39
+lscpu -e                  # derive same-node masks -- see "Deriving CPU masks" above
+export SERVER_CPUS=...   # 8 physical cores, one NUMA node
+export PGBENCH_CPUS=...  # the next 8 physical cores, the SAME node
 ./run-benchmark.sh
 # detach with Ctrl-b d; reattach any time from a new ssh session with:
 #   tmux attach -t v11-bench
@@ -143,7 +191,7 @@ So the restart sequence is:
 # The failed run's directory is abandoned entirely except for one thing:
 cp -a ../wet-v11-baremetal-r1/work .   # the failed run's build output --
                                         # and only this
-export SERVER_CPUS=...
+export SERVER_CPUS=...   # the same-node pair used for the original run
 export PGBENCH_CPUS=...
 ./run-benchmark.sh --reuse-builds
 ```
@@ -451,7 +499,18 @@ To check only package integrity, the self-test, and host readiness:
 - Linux bare metal, SMT off recommended, at least 8 physical cores and
   16 GB RAM.
 - Two disjoint CPU sets for `SERVER_CPUS`/`PGBENCH_CPUS` that share no
-  physical core (checked via `lscpu -p=CPU,CORE,SOCKET,NODE`).
+  physical core (checked via `lscpu -p=CPU,CORE,SOCKET,NODE`), **and each
+  confined to a single NUMA node** -- `00-check-host.sh` refuses to start
+  (no override) if either mask spans more than one node. A cross-socket
+  mask lets the scheduler and the memory allocator split work and pages
+  across both nodes, which adds run-to-run variance that has nothing to
+  do with the code under test, and makes the recorded
+  `numa_local_fraction` evidence meaningless (a mask that spans every
+  node on the host makes "local" mean "anywhere," so the fraction reads
+  1.0 no matter where memory actually landed -- see
+  `reports/wpf-report.md` Addendum 6). Derive both masks from this
+  host's own `lscpu -e` (see "Deriving CPU masks" below); do not reuse a
+  mask pair from a different host's topology.
 - At least 30 GB free under the extracted kit.
 - GCC 8 or newer (Rocky Linux 8's stock gcc 8.5 is fine), a Python 3.9+
   interpreter (the stock Rocky 8 `python3` is 3.6, too old -- see "Rocky
