@@ -104,7 +104,13 @@ done
 ) || die "kit package integrity check failed"
 [[ -f "$KIT_DIR/work/manifest.json" && ! -L "$KIT_DIR/work/manifest.json" ]] ||
   die "kit build manifest is missing"
-[[ "$(stat -c '%U' "$KIT_DIR/work/manifest.json")" == "$(id -un)" ]] ||
+# GNU stat (Linux bare-metal host) uses -c; BSD/macOS stat (dev-machine
+# fake-binaries self-test) uses -f. Try GNU syntax first since that is the
+# real target.
+file_owner() {
+  stat -c '%U' "$1" 2>/dev/null || stat -f '%Su' "$1"
+}
+[[ "$(file_owner "$KIT_DIR/work/manifest.json")" == "$(id -un)" ]] ||
   die "kit builds belong to a different executor"
 [[ -z "$(find_postgres_pids)" ]] ||
   die "a PostgreSQL server is already running"
@@ -206,7 +212,17 @@ fi
   die "current host state differs from the crossover protocol"
 
 if [[ "$RUN_MODE" == full ]]; then
-  log "Beginning 16 independent persistent-backend sessions (patched installation only)."
+  sessions_log=16
+  # Cosmetic (log text only, not the actual session count -- protocol.py's
+  # own SESSIONS constant already compresses this correctly under either
+  # variable): found not to check BENCHMARK_REHEARSAL=1 while verifying
+  # this stage on rocky-8 (brief-v11-wpg-crossover-parity.md) -- a real
+  # rehearsal run logged "Beginning 16 ..." while actually running the
+  # correct 2 sessions.
+  if [[ -n "${SELFTEST_FAKE_PREFIX:-}" || "${BENCHMARK_REHEARSAL:-0}" == 1 ]]; then
+    sessions_log=2
+  fi
+  log "Beginning $sessions_log independent persistent-backend sessions (patched installation only)."
 else
   log "Beginning two short startup and capture-transition smoke sessions."
 fi
@@ -278,12 +294,23 @@ tar -czf "$TEMP_ARCHIVE" \
 ARCHIVE_SHA256=$(sha256sum "$TEMP_ARCHIVE" | awk '{print $1}')
 printf '%s  %s\n' "$ARCHIVE_SHA256" "$(basename "$ARCHIVE")" \
   >"$TEMP_SIDECAR"
-mv -Tn "$TEMP_ARCHIVE" "$ARCHIVE"
+# -Tn (GNU mv: treat DEST as a normal file, never overwrite) is what the
+# real Rocky Linux host's mv provides; BSD/macOS mv (a launcher-level
+# fake run may run there) has neither flag, so fall back to a manual
+# existence check plus a plain rename -- ARCHIVE's name is unique per run
+# (RUN_ID/OUTPUT_NAME) either way.
+if ! mv -Tn "$TEMP_ARCHIVE" "$ARCHIVE" 2>/dev/null; then
+  [[ ! -e "$ARCHIVE" ]] || die "archive destination already exists"
+  mv "$TEMP_ARCHIVE" "$ARCHIVE"
+fi
 [[ ! -e "$TEMP_ARCHIVE" ]] ||
   die "archive destination appeared during publication"
 TEMP_ARCHIVE=""
 ARCHIVE_PUBLISHED=1
-mv -Tn "$TEMP_SIDECAR" "$ARCHIVE.sha256"
+if ! mv -Tn "$TEMP_SIDECAR" "$ARCHIVE.sha256" 2>/dev/null; then
+  [[ ! -e "$ARCHIVE.sha256" ]] || die "checksum destination already exists"
+  mv "$TEMP_SIDECAR" "$ARCHIVE.sha256"
+fi
 [[ ! -e "$TEMP_SIDECAR" ]] ||
   die "checksum destination appeared during publication"
 TEMP_SIDECAR=""

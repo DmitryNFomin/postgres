@@ -49,7 +49,7 @@ if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
   hash_file() { sha256sum "$1" | awk '{print $1}'; }
 
   install_fake_prefix() {
-    local runtime_leaf=$1 build_module=$2
+    local runtime_leaf=$1 build_module=$2 build_name=$3
     local prefix="$INSTALL_ROOT/$runtime_leaf"
     rm -rf -- "$prefix"
     mkdir -p "$prefix/bin" "$prefix/lib"
@@ -58,6 +58,14 @@ if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
       cp "$SELFTEST_FAKE_PREFIX/$bin" "$prefix/bin/$bin"
       chmod +x "$prefix/bin/$bin"
     done
+    if [[ "$build_name" == control ]]; then
+      # analyze-results.py requires patched/control postgres binaries to
+      # differ (the control patch is supposed to change core codegen) --
+      # every build otherwise copies the exact same fake binaries, so
+      # patched and control's "postgres" would be byte-identical without
+      # this. A trailing comment after the script's own `exit` is inert.
+      echo "# control-build marker (selftest-fakebin)" >>"$prefix/bin/postgres"
+    fi
     echo "fake test_wait_primitive shared object (selftest-fakebin)" \
       >"$prefix/lib/test_wait_primitive.so"
     local module_sha=none
@@ -74,10 +82,30 @@ if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
       "$(hash_file "$prefix/bin/pg_ctl")" \
       "$(hash_file "$prefix/lib/test_wait_primitive.so")" \
       "$module_sha" <<'PY'
+import hashlib
 import json
 import sys
+from pathlib import Path
 (out, name, leaf, prefix, postgres_sha, pgbench_sha, psql_sha, initdb_sha,
  pg_ctl_sha, fixture_sha, module_sha) = sys.argv[1:]
+# crossover/verify_installs.py compares this against every file actually
+# under the "patched" prefix byte-for-byte (it is what lets the crossover
+# reuse an already-built kit installation instead of re-verifying it a
+# different way) -- an empty install_tree here always failed that check
+# the moment a launcher-level fake run's crossover phase actually reused
+# a fake build, which nothing exercised before analyze-results.py's
+# module-rule fix made it this far. Real (non-fake) builds already record
+# a real install_tree the same way, just via a full os.walk instead of
+# this small fixed file list.
+prefix_path = Path(prefix)
+install_tree = {
+    path.relative_to(prefix_path).as_posix(): {
+        "type": "file",
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+    for path in sorted(prefix_path.rglob("*"))
+    if path.is_file()
+}
 record = {
     "name": name,
     "commit": "selftest-fake",
@@ -85,7 +113,7 @@ record = {
     "compile_prefix": prefix,
     "compiler": {"c": {"command": "cc", "path": "selftest-fakebin/cc",
                         "sha256": "0" * 64, "version": "selftest-fakebin"}},
-    "install_tree": {},
+    "install_tree": install_tree,
     "fixture_tree": "selftest-fake",
     "provenance_sha256": {"build_log": "0" * 64, "compiler_json": "0" * 64,
                            "install_tree_json": "0" * 64},
@@ -113,7 +141,7 @@ PY
     rest=${pair#*=}
     leaf=${rest%%=*}
     module=${rest#*=}
-    install_fake_prefix "$leaf" "$module"
+    install_fake_prefix "$leaf" "$module" "$name_for_leaf"
   done
 
   "$PYTHON_BIN" - "$MANIFEST" "$RECORDS" <<'PY'
@@ -131,7 +159,19 @@ manifest = {
     "build_host": "selftest-fakebin",
     "repo_url": "selftest-fakebin",
     "source_date_epoch": 0,
-    "build_system": "selftest-fake (SELFTEST_FAKE_PREFIX, no compilation)",
+    # analyze-results.py's verify_manifest() checks build_system/
+    # configure_flags against the one fixed protocol regardless of fake
+    # mode (as it should: those are supposed to be a true, non-negotiable
+    # fact about how a build was produced) -- claim the same values a real
+    # build's manifest records, exactly like schema_version/
+    # benchmark_series/compiler_cache above already do, rather than a
+    # fake-shaped value nothing downstream expects. "selftest_fake_prefix"
+    # marks this manifest as fake for anyone reading it by hand.
+    "selftest_fake_prefix": True,
+    "build_system": "configure-make",
+    "configure_flags": [
+        "--disable-rpath", "--without-icu", "--without-readline", "--without-zlib",
+    ],
     "optimization": "n/a",
     "parallel_jobs": 1,
     "environment": {},

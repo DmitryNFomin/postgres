@@ -7,6 +7,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -23,6 +24,7 @@ from protocol import (
     BLOCKS_PER_SESSION,
     BOUND_FILES,
     CLIENTS,
+    MEASUREMENT_SECONDS,
     PROOF_FIELDS,
     RESULT_FIELDS,
     SCHEDULE_FIELDS,
@@ -32,6 +34,25 @@ from protocol import (
     file_hashes,
     protocol_document,
 )
+
+# Derived from protocol.py's own MEASUREMENT_SECONDS (which is itself
+# gated on SELFTEST_FAKE_PREFIX) instead of a hardcoded 30_000_000_000,
+# so this synthetic-evidence self-test agrees with analyze.py's
+# validate_results() regardless of which mode this process happens to
+# inherit -- a literal 30s figure here made this self-test fail whenever
+# it ran with SELFTEST_FAKE_PREFIX set in its environment (e.g. nested
+# inside a fake-binaries self-test run), even though this synthetic check
+# never launches any binary at all.
+_MEASUREMENT_NS = MEASUREMENT_SECONDS * 1_000_000_000
+# extract_blocks.py's build_session_results() computes pgbench CPU% as
+# (delta pgbench_cpu_ticks / clock_ticks_per_second) / elapsed_seconds,
+# and rejects it above MAX_PGBENCH_CAPACITY_FRACTION -- a fixed 1000->
+# 15400 tick delta was calibrated for the real 30-second window (giving
+# ~60% capacity); holding it fixed while MEASUREMENT_SECONDS shrinks
+# under SELFTEST_FAKE_PREFIX makes that same delta land over a much
+# shorter elapsed_seconds and look like the driver saturated. Scale it
+# with MEASUREMENT_SECONDS so the synthetic capacity stays ~60% either way.
+_MEASUREMENT_END_TICKS = 1000 + round(14400 * MEASUREMENT_SECONDS / 30)
 
 
 HERE = Path(__file__).resolve().parent
@@ -128,7 +149,7 @@ def write_analysis_fixture(root: Path) -> None:
             tps = session_level * mode_factor
             transition = clock
             start = transition + 5_000_000_000
-            end = start + 30_000_000_000
+            end = start + _MEASUREMENT_NS
             clock = end + 1_000_000_000
             events.extend([
                 {
@@ -145,7 +166,7 @@ def write_analysis_fixture(root: Path) -> None:
                 {
                     "timestamp_ns": end, "phase": "measurement_end",
                     "session_index": session_index, "block_index": block_index,
-                    "mode": mode, "pgbench_cpu_ticks": 15400,
+                    "mode": mode, "pgbench_cpu_ticks": _MEASUREMENT_END_TICKS,
                     "pgbench_starttime_ticks": 500, "clock_ticks_per_second": 100,
                 },
             ])
@@ -214,6 +235,53 @@ def test_host_state() -> None:
     host_state.validate(state)
     state["load_average"] = [0.0, 0.0, 0.0]
     host_state.validate(state)
+
+    # BENCHMARK_REHEARSAL=1 parity with 00-check-host.sh (rehearsal.py):
+    # host_state.py must relax exactly the same "no cpufreq governor
+    # exposed" case the preflight already relaxed earlier in the same
+    # run, and must never relax a governor that IS readable but genuinely
+    # not "performance". This reproduces, and guards against regressing,
+    # the real rehearsal outage this covers: rocky-8 rehearsal run 4
+    # passed 00-check-host.sh's preflight (VM exposes no cpufreq governor
+    # at all, relaxed there) and the full 35-cell matrix, then died at
+    # crossover-smoke with "CPU governors are not all performance"
+    # because host_state.py had no rehearsal awareness at all.
+    saved_rehearsal = os.environ.get("BENCHMARK_REHEARSAL")
+    try:
+        missing_governor_state = synthetic_host_state()
+        missing_governor_state["governors"] = []
+
+        os.environ.pop("BENCHMARK_REHEARSAL", None)
+        try:
+            host_state.validate(dict(missing_governor_state))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(
+                "a missing cpufreq governor was accepted without "
+                "BENCHMARK_REHEARSAL=1"
+            )
+
+        os.environ["BENCHMARK_REHEARSAL"] = "1"
+        host_state.validate(dict(missing_governor_state))  # must not raise
+
+        wrong_governor_state = synthetic_host_state()
+        wrong_governor_state["governors"] = ["powersave"] * 24
+        try:
+            host_state.validate(dict(wrong_governor_state))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(
+                "a readable non-performance governor was accepted under "
+                "BENCHMARK_REHEARSAL=1 -- only a MISSING governor is ever "
+                "relaxed"
+            )
+    finally:
+        if saved_rehearsal is None:
+            os.environ.pop("BENCHMARK_REHEARSAL", None)
+        else:
+            os.environ["BENCHMARK_REHEARSAL"] = saved_rehearsal
 
 
 def test_runtime_paths() -> None:
@@ -312,9 +380,9 @@ def test_extraction() -> None:
                     "clock_ticks_per_second": 100,
                 },
                 {
-                    "timestamp_ns": start + 30_000_000_000, "phase": "measurement_end",
+                    "timestamp_ns": start + _MEASUREMENT_NS, "phase": "measurement_end",
                     "session_index": 1, "block_index": block_index, "mode": mode,
-                    "pgbench_cpu_ticks": 15400, "pgbench_starttime_ticks": 500,
+                    "pgbench_cpu_ticks": _MEASUREMENT_END_TICKS, "pgbench_starttime_ticks": 500,
                     "clock_ticks_per_second": 100,
                 },
             ])
@@ -342,7 +410,9 @@ def test_extraction() -> None:
             result_path, events_path, prefix, backend_path, metadata,
         )
         assert len(rows) == BLOCKS_PER_SESSION
-        assert all(int(row["full_seconds"]) == 29 for row in rows)
+        assert all(
+            int(row["full_seconds"]) == MEASUREMENT_SECONDS - 1 for row in rows
+        )
         assert all(float(row["tps"]) == THREADS * 1000.0 for row in rows)
         assert all(int(row["failed_transactions"]) == 0 for row in rows)
 

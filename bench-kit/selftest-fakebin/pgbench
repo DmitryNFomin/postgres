@@ -9,19 +9,33 @@
 #                      for). Understands SIGALRM early-stop the same way
 #                      real pgbench's -T timer does (crossover/run-worker.sh
 #                      sends it to end a persistent-backend session early).
-# Never connects to a real server.
+#
+# This sleeps one real second per requested second of -T, same as real
+# pgbench -- what makes a launcher-level fake run fast is
+# benchmark_protocol.py's FULL_PROFILE/SMOKE_PROFILE being genuinely
+# small (1-3 real seconds) under SELFTEST_FAKE_PREFIX, not this script
+# pretending a large window went by quickly. An earlier version of this
+# script slept a small fraction of a real second per simulated second
+# instead of shrinking the profile; that broke every check tied to real
+# wall-clock pacing (the warmup "still running" proof point, $SECONDS-
+# based W3-window elapsed math) in ways a fixed, small, real profile does
+# not. Never connects to a real server.
 set -euo pipefail
 
 init_mode=0
 duration=0
 clients=1
+threads=1
 seed=1
+log_enabled=0
+log_prefix=""
 args=("$@")
 i=0
 while [[ $i -lt ${#args[@]} ]]; do
   arg="${args[$i]}"
   case "$arg" in
     -i) init_mode=1 ;;
+    -l) log_enabled=1 ;;
     -T)
       i=$((i + 1))
       duration="${args[$i]}"
@@ -30,6 +44,11 @@ while [[ $i -lt ${#args[@]} ]]; do
       i=$((i + 1))
       clients="${args[$i]}"
       ;;
+    -j)
+      i=$((i + 1))
+      threads="${args[$i]}"
+      ;;
+    --log-prefix=*) log_prefix="${arg#*=}" ;;
     --random-seed=*) seed="${arg#*=}" ;;
   esac
   i=$((i + 1))
@@ -52,8 +71,34 @@ trap 'stop_requested=1' ALRM TERM
 # sessions/cells do not all print byte-identical numbers.
 base_tps=$(( 4000 + (seed * 37) % 500 ))
 
+# crossover/run-worker.sh's real-runtime pgbench call (not the synthetic
+# self-test data) uses "-l --aggregate-interval=1 --log-prefix=X -j 8":
+# real pgbench then writes one aggregate file per thread ("X.PID" for
+# thread 0, "X.PID.N" for threads 1..7), one row per real elapsed second,
+# 16 space-separated fields keyed by Unix-epoch second --
+# extract_blocks.py's read_aggregate_logs()/build_session_results() parse
+# exactly that shape and sum across all THREADS files per second. Same
+# row shape self-test.py's aggregate_row() already uses for its synthetic
+# fixtures (fields 2-5 are latency sums/min/max, 6-15 are zero except the
+# three failure counters at 13-15, which stay zero -- "0 failed" always).
+declare -a log_files=()
+if [[ "$log_enabled" -eq 1 && -n "$log_prefix" ]]; then
+  for ((t = 0; t < threads; t++)); do
+    if [[ "$t" -eq 0 ]]; then
+      log_files+=("${log_prefix}.$$")
+    else
+      log_files+=("${log_prefix}.$$.${t}")
+    fi
+  done
+  : >"${log_files[0]}"
+  for f in "${log_files[@]:1}"; do : >"$f"; done
+fi
+
 total_xacts=0
 elapsed=0
+# last_logged starts one second before "now" so the very first catch-up
+# loop iteration logs "now" itself, not "now+1".
+last_logged=$(($(date +%s) - 1))
 while [[ "$elapsed" -lt "$duration" && "$stop_requested" -eq 0 ]]; do
   sleep 1 &
   wait $! 2>/dev/null || true
@@ -63,6 +108,26 @@ while [[ "$elapsed" -lt "$duration" && "$stop_requested" -eq 0 ]]; do
   total_xacts=$((total_xacts + tps))
   printf 'progress: %d.0 s, %d.0 tps, lat %d.%03d ms stddev %d.%03d, 0 failed\n' \
     "$elapsed" "$tps" 1 $((elapsed % 100)) 1 200
+  if [[ "$log_enabled" -eq 1 && -n "$log_prefix" ]]; then
+    # Catch up on every real epoch second since the last row, not just
+    # "one row per loop iteration": under load (multiple fake sessions'
+    # worth of processes running at once, as the crossover harness does)
+    # a single "sleep 1" plus this loop's own overhead can occasionally
+    # take a little over a second, which would otherwise skip a whole
+    # epoch second in the aggregate log entirely -- and
+    # extract_blocks.py's read_aggregate_logs()/build_session_results()
+    # require every second in the measured range to be present.
+    now_epoch=$(date +%s)
+    per_thread=$((tps / threads))
+    while (( last_logged < now_epoch )); do
+      last_logged=$((last_logged + 1))
+      for f in "${log_files[@]}"; do
+        printf '%s %s %s %s %s %s 0 0 0 0 0 0 0 0 0 0\n' \
+          "$last_logged" "$per_thread" $((per_thread * 50)) $((per_thread * 2500)) 40 60 \
+          >>"$f"
+      done
+    done
+  fi
 done
 
 echo "transaction type: <builtin: select only>"

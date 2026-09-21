@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 
 
@@ -37,11 +38,51 @@ SEQUENCES = {
     ),
 }
 
-SESSIONS = 16
 BLOCKS_PER_SESSION = 8
-MEASUREMENT_SECONDS = 30
-SETTLE_SECONDS = 3
-INITIAL_WARMUP_SECONDS = 10
+_FAKE = bool(os.environ.get("SELFTEST_FAKE_PREFIX"))
+# BENCHMARK_REHEARSAL=1: a real rehearsal of run-benchmark.sh against real
+# builds (see benchmark_protocol.py for the full rationale). Only SESSIONS
+# is compressed here (16 -> 2, same value as the fake-binaries self-test,
+# for the same "analyze.py requires an even A/B split" reason below); a
+# rehearsal must still measure a real MEASUREMENT_SECONDS/SETTLE_SECONDS/
+# INITIAL_WARMUP_SECONDS window with real pgbench, so those stay at their
+# real values (unlike SELFTEST_FAKE_PREFIX, which has nothing real to wait
+# out and compresses those too).
+_REHEARSAL = os.environ.get("BENCHMARK_REHEARSAL") == "1"
+if _FAKE:
+    # Fake-binaries self-test: BLOCKS_PER_SESSION stays exactly 8
+    # (analyze.py hard-requires it), but there is nothing real to wait out
+    # per block, and a launcher-level preflight needs to finish in well
+    # under a real run's hours, so SESSIONS drops to 2 (1 "A" + 1 "B" --
+    # analyze.py requires an even split) and every real-time window is
+    # compressed. run-worker.sh's own SESSIONS/BLOCK_SECONDS/
+    # SETTLE_SECONDS/INITIAL_WARMUP_SECONDS mirror these same numbers by
+    # convention (it is a bash script, so it cannot import this module) --
+    # keep them in agreement if any of these change. 3, not 1 or 2, for
+    # MEASUREMENT_SECONDS: extract_blocks.py's within-block CV needs at
+    # least two full seconds of per-second samples after boundary
+    # trimming (statistics.stdev() requires 2+ points), and a
+    # non-second-aligned start/end can trim a full second off either edge.
+    # Never used for a real run.
+    SESSIONS = 2
+    MEASUREMENT_SECONDS = 3
+    SETTLE_SECONDS = 0
+    INITIAL_WARMUP_SECONDS = 1
+else:
+    SESSIONS = 2 if _REHEARSAL else 16
+    MEASUREMENT_SECONDS = 30
+    SETTLE_SECONDS = 3
+    INITIAL_WARMUP_SECONDS = 10
+# Single source for the real-nanosecond block-measurement tolerance every
+# consumer (analyze.py's validate_results(), extract_blocks.py's
+# build_session_results(), self-test.py's synthetic evidence) must agree
+# on -- each used to hardcode its own 29_500_000_000/31_500_000_000 pair,
+# which is exactly the real (MEASUREMENT_SECONDS=30) case of this same
+# -0.5s/+1.5s slack, so a fake-mode MEASUREMENT_SECONDS caused each
+# independent copy to disagree with the others instead of just this one
+# constant changing everywhere at once.
+MEASUREMENT_NS_LOW = int((MEASUREMENT_SECONDS - 0.5) * 1_000_000_000)
+MEASUREMENT_NS_HIGH = int((MEASUREMENT_SECONDS + 1.5) * 1_000_000_000)
 CLIENTS = 32
 THREADS = 8
 SCALE = 100

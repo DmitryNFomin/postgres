@@ -21,12 +21,133 @@ OUT_TXT="$SCRIPT_DIR/host-check.txt"
 OUT_JSON="$SCRIPT_DIR/host-check.json"
 WARNINGS=0
 
+# BENCHMARK_REHEARSAL=1: a real rehearsal of the launcher against real
+# PostgreSQL builds inside a VM, to catch anything the fake-binaries
+# self-test structurally cannot (real configure/make, real pg_ctl/pgbench,
+# real timing) before trusting a bare-metal run. A VM can never satisfy a
+# few checks below that exist to characterize dedicated bare-metal
+# hardware (core/RAM floors sized for a real benchmark host, cpufreq
+# governor exposure, "not virtualized"); this mode logs those as
+# non-blocking notes instead of refusing to start, while every other
+# check -- including every mode proof, hash check, and CPU-affinity
+# disjointness/no-shared-core requirement -- is unchanged and still
+# fail-closed. Rehearsal output must never be mistaken for real evidence;
+# analyze-results.py/analyze-raw-archive.sh stamp their output accordingly
+# when this is set. Default 0 (real runs never set this).
+REHEARSAL=0
+[[ "${BENCHMARK_REHEARSAL:-0}" == 1 ]] && REHEARSAL=1
+
 log() { printf '%s\n' "$*" | tee -a "$OUT_TXT"; }
 warn() {
   WARNINGS=$((WARNINGS + 1))
   { printf '\n*** WARNING: %s ***\n\n' "$*"; } | tee -a "$OUT_TXT" >&2
 }
+# rehearsal_note: like warn(), but does not increment WARNINGS and is
+# clearly labeled as a rehearsal-only relaxation -- use ONLY for a check
+# that is structurally impossible to satisfy from inside a VM, never for
+# anything that indicates a real problem with the run itself.
+rehearsal_note() {
+  { printf '\n*** REHEARSAL NOTE (not evidence, not blocking): %s ***\n\n' "$*"; } | tee -a "$OUT_TXT" >&2
+}
+warn_unless_rehearsal() {
+  if [[ "$REHEARSAL" -eq 1 ]]; then
+    rehearsal_note "$*"
+  else
+    warn "$*"
+  fi
+}
 section() { log ""; log "== $* =="; }
+
+# check_coresident_postgres: a real, blocking check -- not a provenance
+# note, and not something BENCHMARK_REHEARSAL relaxes (no override: an
+# executor with a real co-resident PostgreSQL server must stop it, not
+# suppress this). This used to only be recorded here, with the actual
+# refusal surfacing hours later from crossover/run.sh's own "otherwise
+# idle" check -- after an executor had already paid for the entire
+# multi-hour measurement matrix. Fail fast here instead, so crossover's
+# check is a second line of defence, not the first. Uses real `pgrep`
+# regardless of SELFTEST_FAKE_PREFIX: this inspects the actual host's
+# process table, which has nothing to do with this kit's own fake or real
+# binaries, so the fake-binaries self-test can and does exercise this
+# exact code path with a stub process.
+check_coresident_postgres() {
+  CORESIDENT_POSTGRES_PIDS=$(
+    {
+      pgrep -x postgres 2>/dev/null || true
+      pgrep -x postmaster 2>/dev/null || true
+    } | sort -nu
+  )
+  if [[ -n "$CORESIDENT_POSTGRES_PIDS" ]]; then
+    CORESIDENT_POSTGRES_COUNT=$(printf '%s\n' "$CORESIDENT_POSTGRES_PIDS" | wc -l | tr -d ' ')
+    CORESIDENT_POSTGRES_PID_CSV=$(printf '%s\n' "$CORESIDENT_POSTGRES_PIDS" | paste -sd, -)
+    warn "a PostgreSQL server is already running on this host (postgres/postmaster pid(s): $CORESIDENT_POSTGRES_PID_CSV) -- stop it before running this kit. Find the service with: systemctl list-units --type=service | grep -i postgres -- then: sudo systemctl stop <unit> (add --now disable, or 'systemctl disable <unit>', if it should not come back on reboot). crossover/run.sh refuses to start alongside any co-resident PostgreSQL server as a second line of defence, but that must never be how this is first discovered -- not after the full measurement matrix already ran."
+  else
+    CORESIDENT_POSTGRES_COUNT=0
+    CORESIDENT_POSTGRES_PID_CSV=""
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST_FAKE_PREFIX: fake-binaries self-test mode. This may be running on
+# a dev machine that is not Linux, has no /proc or /sys, and has none of the
+# real hardware this check exists to inspect. Skip the real probing entirely
+# and write out a synthetic, internally-consistent host-check.txt/.json
+# instead (hostname matches 01-build-all.sh's fake "build_host", warnings
+# are always zero, and the CPU-affinity proof comes from
+# cpu_affinity.fake_topology_proof() -- the single place that shape is
+# built, also used by 02-run-matrix.sh's own fake-mode fallback, so the two
+# can never drift into two different fake shapes). Still never starts a
+# real PostgreSQL server; still exits nonzero on any actual problem with
+# the fake inputs themselves (e.g. SERVER_CPUS/PGBENCH_CPUS unset or
+# overlapping).
+# ---------------------------------------------------------------------------
+if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+  require_python
+  : >"$OUT_TXT"
+  log "Host check for the wait-event-tracing benchmark kit (SELFTEST_FAKE_PREFIX fake mode)"
+  log "Run at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  log "This is a synthetic report; no real hardware was inspected."
+  [[ -n "${SERVER_CPUS:-}" && -n "${PGBENCH_CPUS:-}" ]] ||
+    { echo "00-check-host.sh: SELFTEST_FAKE_PREFIX requires SERVER_CPUS/PGBENCH_CPUS" >&2; exit 1; }
+  check_coresident_postgres
+  if [[ "$WARNINGS" -gt 0 ]]; then
+    log ""
+    log "Co-resident PostgreSQL processes: $CORESIDENT_POSTGRES_COUNT (pid(s): $CORESIDENT_POSTGRES_PID_CSV)"
+    log ""
+    log "Warnings: $WARNINGS"
+    log "$WARNINGS warning(s) above. The benchmark is blocked before any build."
+    exit 1
+  fi
+  FAKE_AFFINITY_JSON=$("$PYTHON_BIN" "$SCRIPT_DIR/cpu_affinity.py" fake-collect) ||
+    { echo "00-check-host.sh: SELFTEST_FAKE_PREFIX fake CPU-affinity proof failed" >&2; exit 1; }
+  "$PYTHON_BIN" - "$OUT_JSON" "$FAKE_AFFINITY_JSON" <<'PY' ||
+import datetime
+import json
+import sys
+
+out, affinity_json = sys.argv[1:]
+data = {
+    "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "hostname": "selftest-fakebin",
+    "kernel": "selftest-fakebin (no real kernel)",
+    "virtualization": "none",
+    "cpu_model": "selftest-fakebin",
+    "warning_count": 0,
+    "co_resident_postgres_process_count": 0,
+    "host_isolation": "dedicated",
+    "cpu_affinity_protocol": json.loads(affinity_json),
+}
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+    { echo "00-check-host.sh: SELFTEST_FAKE_PREFIX fake host-check generation failed" >&2; exit 1; }
+  log "Fake CPU affinity: PostgreSQL=$SERVER_CPUS pgbench=$PGBENCH_CPUS"
+  log ""
+  log "Warnings: 0 (fake mode)"
+  log "Machine-readable copy: $OUT_JSON"
+  exit 0
+fi
 
 : >"$OUT_TXT"
 log "Host check for the wait-event-tracing benchmark kit"
@@ -47,6 +168,11 @@ REQUIRED_TOOLS=(
   python3 perl bison flex make cc ar ranlib objdump sha256sum tar
   awk sed grep find ps pgrep df hostname systemd-detect-virt
   sort wc tr paste lscpu taskset
+  # The rest are only ever invoked later, by crossover/run.sh -- listed
+  # here too (parity audit, brief-v11-wpg-crossover-parity.md) so a host
+  # missing one of them fails in the first minute of preflight instead of
+  # after the 7-hour matrix, at the very start of the crossover stage.
+  stat xargs cp chmod rm readlink mktemp mv mkdir dirname date
 )
 for tool in "${REQUIRED_TOOLS[@]}"; do
   if command -v "$tool" >/dev/null 2>&1; then
@@ -123,7 +249,7 @@ log "Logical CPUs:           $LOGICAL_CPUS"
 log "SMT (hyperthreading):   $SMT_ACTIVE"
 
 if [[ "$PHYSICAL_CORES" -lt 8 ]]; then
-  warn "fewer than 8 physical cores ($PHYSICAL_CORES) -- the runbook asks for 8+"
+  warn_unless_rehearsal "fewer than 8 physical cores ($PHYSICAL_CORES) -- the runbook asks for 8+"
 fi
 
 # ---------------------------------------------------------------------------
@@ -196,7 +322,7 @@ for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
 done
 if [[ ${#GOVERNORS[@]} -eq 0 ]]; then
   log "Per-core governor: not exposed by this kernel/CPU driver"
-  warn "could not read any cpufreq governor; cannot confirm 'performance' mode"
+  warn_unless_rehearsal "could not read any cpufreq governor; cannot confirm 'performance' mode"
 else
   # Tabulate distinct governor values.
   declare -A COUNTS=()
@@ -239,7 +365,7 @@ MEM_AVAIL_KB=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
 log "Total RAM:  $(( MEM_TOTAL_KB / 1024 )) MiB"
 log "Free RAM:   $(( MEM_AVAIL_KB / 1024 )) MiB (MemAvailable)"
 if [[ "$MEM_TOTAL_KB" -lt $((16 * 1024 * 1024)) ]]; then
-  warn "less than 16 GB total RAM -- the runbook asks for 16+ GB"
+  warn_unless_rehearsal "less than 16 GB total RAM -- the runbook asks for 16+ GB"
 fi
 
 # ---------------------------------------------------------------------------
@@ -295,33 +421,28 @@ log "Virtualization: $VIRTUALIZATION"
 if [[ "$VIRTUALIZATION" == unknown ]]; then
   warn "virtualization could not be detected; dedicated bare metal is unproven"
 elif [[ "$VIRTUALIZATION" != none ]]; then
-  warn "virtualization was detected ($VIRTUALIZATION), but the runbook requires dedicated bare metal"
+  warn_unless_rehearsal "virtualization was detected ($VIRTUALIZATION), but the runbook requires dedicated bare metal outside BENCHMARK_REHEARSAL=1"
 fi
 
-POSTGRES_PIDS=$(
-  {
-    pgrep -x postgres 2>/dev/null || true
-    pgrep -x postmaster 2>/dev/null || true
-  } | sort -nu
-)
-if [[ -n "$POSTGRES_PIDS" ]]; then
-  POSTGRES_PROCESS_COUNT=$(printf '%s\n' "$POSTGRES_PIDS" | wc -l | tr -d ' ')
-  POSTGRES_PID_CSV=$(printf '%s\n' "$POSTGRES_PIDS" | paste -sd, -)
+check_coresident_postgres
+POSTGRES_PROCESS_COUNT=$CORESIDENT_POSTGRES_COUNT
+if [[ "$POSTGRES_PROCESS_COUNT" -gt 0 ]]; then
+  POSTGRES_PID_CSV=$CORESIDENT_POSTGRES_PID_CSV
   log ""
-  log "Co-resident PostgreSQL processes: $POSTGRES_PROCESS_COUNT"
-  log "These are recorded but do not block an otherwise-idle host."
+  log "Co-resident PostgreSQL processes: $POSTGRES_PROCESS_COUNT (pid(s): $POSTGRES_PID_CSV)"
   if ! ps -ww -p "$POSTGRES_PID_CSV" \
       -o user=,pid=,ppid=,stat=,etimes=,pcpu=,pmem=,comm=,args= |
       tee -a "$OUT_TXT"; then
     log "Process inventory changed while it was being captured."
   fi
 else
-  POSTGRES_PROCESS_COUNT=0
   log "Co-resident PostgreSQL processes: none"
 fi
 
 # ---------------------------------------------------------------------------
 section "Summary"
+[[ "$REHEARSAL" -eq 1 ]] &&
+  log "BENCHMARK_REHEARSAL=1: this is a rehearsal run, not evidence. VM-only relaxations logged as REHEARSAL NOTE above are not included in the warning count below."
 log "Warnings: $WARNINGS"
 log "Report written to: $OUT_TXT"
 
@@ -341,7 +462,7 @@ if [[ -n "$JSON_PYTHON" ]]; then
     "$FREE_DISK_MB" "$LOAD1" "$LOAD5" "$LOAD15" "$WARNINGS" \
     "$(hostname)" "$(uname -a)" "$VIRTUALIZATION" \
     "$POSTGRES_PROCESS_COUNT" "$AFFINITY_PROOF_JSON" \
-    "$PYTHON_BIN" "$PYTHON_VERSION" "$CC_VERSION_LINE" <<'PY'
+    "$PYTHON_BIN" "$PYTHON_VERSION" "$CC_VERSION_LINE" "$REHEARSAL" <<'PY'
 import datetime
 import glob
 import json
@@ -351,7 +472,8 @@ import sys
  physical_cores, logical_cpus, smt_active, turbo_state, mem_total_kb,
  mem_avail_kb, swap_total_kb, free_disk_mb, load1, load5, load15,
  warnings, hostname, kernel, virtualization, postgres_process_count,
- affinity_proof_json, python_bin, python_version, cc_version) = sys.argv[1:]
+ affinity_proof_json, python_bin, python_version, cc_version,
+ rehearsal) = sys.argv[1:]
 
 governors = []
 for path in sorted(glob.glob(
@@ -391,6 +513,7 @@ data = {
     "python_bin": python_bin,
     "python_version": python_version,
     "cc_version": cc_version,
+    "benchmark_rehearsal": rehearsal == "1",
 }
 with open(out, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2, sort_keys=True)

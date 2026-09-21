@@ -291,7 +291,39 @@ export SERVER_CPUS PGBENCH_CPUS
 log "Configured CPU affinity: PostgreSQL=$SERVER_CPUS pgbench=$PGBENCH_CPUS"
 
 run_phase preflight "under 1 minute" "$SCRIPT_DIR/00-check-host.sh"
-run_phase kit-self-test "under 1 minute" "$PYTHON_BIN" "$SCRIPT_DIR/self-test.py"
+# BENCHMARK_REHEARSAL_SKIP_SELFTEST=1, honoured ONLY under
+# BENCHMARK_REHEARSAL=1 (real mode ignores it entirely, no matter how it
+# is set): kit-self-test's own nested fake-binaries self-test takes about
+# 26 minutes per rehearsal attempt, and an identical package only needs
+# to prove that once. The skip is justified by data, not by the
+# operator's say-so: PACKAGE-SELFTEST.json is written by
+# make-baremetal-package.sh only after self-test.py actually passed
+# against this exact staged package content, BEFORE PACKAGE-MANIFEST.
+# sha256 was generated over it -- so its presence and "passed": true are
+# already covered by the package-integrity check above, and a
+# dev checkout (no PACKAGE-MANIFEST.sha256 at all) can never produce one.
+# Use this to iterate faster on later rehearsal attempts against the same
+# package; the rehearsal that is finally reported as evidence that the
+# launcher works on the target must still be one that ran kit-self-test.
+SKIP_SELFTEST=0
+if [[ "${BENCHMARK_REHEARSAL:-0}" == 1 && "${BENCHMARK_REHEARSAL_SKIP_SELFTEST:-0}" == 1 ]]; then
+  if [[ -f "$SCRIPT_DIR/PACKAGE-SELFTEST.json" ]] && "$PYTHON_BIN" -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+sys.exit(0 if data.get("passed") is True else 1)
+' "$SCRIPT_DIR/PACKAGE-SELFTEST.json" 2>/dev/null; then
+    SKIP_SELFTEST=1
+  else
+    log "*** REHEARSAL NOTE (not evidence, not blocking): BENCHMARK_REHEARSAL_SKIP_SELFTEST=1 was set, but no verified PACKAGE-SELFTEST.json is present -- running kit-self-test anyway ***"
+  fi
+fi
+if [[ "$SKIP_SELFTEST" -eq 1 ]]; then
+  log "*** REHEARSAL NOTE (not evidence, not blocking): skipping kit-self-test -- PACKAGE-SELFTEST.json (verified above by PACKAGE-MANIFEST.sha256) confirms this exact package already passed self-test.py on the packaging machine ***"
+  run_phase kit-self-test "skipped (BENCHMARK_REHEARSAL_SKIP_SELFTEST=1)" true
+else
+  run_phase kit-self-test "under 1 minute" "$PYTHON_BIN" "$SCRIPT_DIR/self-test.py"
+fi
 run_phase initial-idle-check "1 to 20 minutes" "$SCRIPT_DIR/wait-for-idle.sh"
 
 if [[ "${PREFLIGHT_ONLY:-0}" -eq 1 ]]; then
@@ -378,9 +410,21 @@ run_phase crossover-smoke "1 to 2 minutes" \
 run_phase crossover "2.5 to 3.5 hours" \
   "$SCRIPT_DIR/crossover/run.sh" "$SCRIPT_DIR"
 
+# Sort by modification time, NOT by path string: each archive lives under
+# a randomized mktemp -d staging directory
+# (/var/tmp/w6c-persistent-crossover.XXXXXX/...), which sorts BEFORE the
+# sortable UTC timestamp embedded in the filename itself, so a plain `sort`
+# on the full path orders by the random suffix first. Found on rocky-8 the
+# first time a rehearsal/repeat run left more than one staging directory
+# behind in /var/tmp: a stale archive from an earlier, unrelated attempt
+# outranked the archive this run just produced, and would have been handed
+# back to the operator as if it were fresh evidence.
+# `ls -t` (newest first), not `find -printf` (GNU-only -- this script's
+# SELFTEST_FAKE_PREFIX path also runs directly on a macOS/BSD packaging
+# machine, where find has no -printf at all).
 crossover_archive=$(find /var/tmp -maxdepth 2 \
-  -name 'w6c-persistent-crossover-*.tar.gz' -type f -print 2>/dev/null |
-  sort | tail -n 1 || true)
+  -name 'w6c-persistent-crossover-*.tar.gz' -type f -print0 2>/dev/null |
+  xargs -0 ls -t 2>/dev/null | head -n 1 || true)
 
 CURRENT_PHASE=complete
 PHASE_START_EPOCH=$(date +%s)

@@ -23,6 +23,9 @@ from protocol import (
     CLIENTS,
     EQUIVALENCE_MARGIN_PERCENT,
     MAX_PGBENCH_CAPACITY_FRACTION,
+    MEASUREMENT_NS_HIGH as _MEASUREMENT_NS_HIGH,
+    MEASUREMENT_NS_LOW as _MEASUREMENT_NS_LOW,
+    MEASUREMENT_SECONDS,
     PLACEBO_MARGIN_PERCENT,
     PROOF_FIELDS,
     RESULT_FIELDS,
@@ -126,7 +129,7 @@ def validate_results(rows: list[dict[str, str]], schedule: list[dict[str, str]])
             require(math.isfinite(float(row[field])),
                     "non-finite result field {}".format(field))
         require(
-            int(row["full_seconds"]) in (29, 30)
+            int(row["full_seconds"]) in (MEASUREMENT_SECONDS - 1, MEASUREMENT_SECONDS)
             and int(row["transactions"]) > 0
             and float(row["tps"]) > 0
             and float(row["latency_ms"]) >= 0
@@ -160,7 +163,7 @@ def validate_results(rows: list[dict[str, str]], schedule: list[dict[str, str]])
             end = int(row["measurement_end_ns"])
             require(
                 previous_end < start < end
-                and 29_500_000_000 <= end - start <= 31_500_000_000,
+                and _MEASUREMENT_NS_LOW <= end - start <= _MEASUREMENT_NS_HIGH,
                 "session {} block timestamps are invalid".format(session_index),
             )
             previous_end = end

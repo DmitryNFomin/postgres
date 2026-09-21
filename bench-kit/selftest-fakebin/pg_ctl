@@ -10,6 +10,7 @@ set -m # each backgrounded fake server gets its own process group
 datadir=""
 mode=""
 postgres_opts=""
+logfile=""
 args=("$@")
 i=0
 while [[ $i -lt ${#args[@]} ]]; do
@@ -21,6 +22,10 @@ while [[ $i -lt ${#args[@]} ]]; do
     -o)
       i=$((i + 1))
       postgres_opts="${args[$i]}"
+      ;;
+    -l)
+      i=$((i + 1))
+      logfile="${args[$i]}"
       ;;
     start|stop|status|restart|reload)
       mode="${args[$i]}"
@@ -54,6 +59,19 @@ case "$mode" in
   start)
     mkdir -p "$datadir"
     seed_selftest_state
+    # Real postgres, given "-l LOGFILE" at start, writes its own startup
+    # AND shutdown messages into that file (including the
+    # "database system is shut down" line analyze-results.py's
+    # verify_runtime_evidence() looks for) -- remember which logfile this
+    # data directory is using so `stop` (called without -l, same as real
+    # usage) can append the matching shutdown line to the same file.
+    if [[ -n "$logfile" ]]; then
+      printf '%s\n' "$logfile" >"$datadir/.selftest-logfile"
+      {
+        echo "fake postgres server log (selftest-fakebin)"
+        echo "database system is ready to accept connections"
+      } >>"$logfile"
+    fi
     sleep 100000 &
     server_pid=$!
     disown "$server_pid" 2>/dev/null || true
@@ -73,6 +91,10 @@ case "$mode" in
       kill "$server_pid" 2>/dev/null || true
       wait "$server_pid" 2>/dev/null || true
       rm -f -- "$pidfile"
+    fi
+    if [[ -f "$datadir/.selftest-logfile" ]]; then
+      echo "database system is shut down" >>"$(cat "$datadir/.selftest-logfile")"
+      rm -f -- "$datadir/.selftest-logfile"
     fi
     [[ -z "$socket_dir" ]] || rm -f -- "$socket_dir/.active-datadir"
     echo "waiting for server to shut down.... done"

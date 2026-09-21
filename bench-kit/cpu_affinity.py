@@ -199,6 +199,44 @@ def collect_topology_proof():
     }
 
 
+def fake_topology_proof():
+    """Synthetic CPU-affinity proof for SELFTEST_FAKE_PREFIX (fake-binaries
+    self-test) mode: there is no real topology to probe (this may be
+    running on a non-Linux dev machine, or a Linux one whose CPU layout is
+    irrelevant against fake binaries), so this is derived purely from
+    SERVER_CPUS/PGBENCH_CPUS via parse_cpu_list() -- the same parser
+    collect_topology_proof() uses for the real check -- instead of a
+    placeholder object that validate_affinity_proof()/validate_host_report()
+    would reject outright (they did: 00-check-host.sh and 02-run-matrix.sh
+    used to each write their own minimal fake stand-in here, and neither
+    satisfied the shape the real verifier requires, which nothing ever
+    caught before analyze-results.py actually ran against a fake-binaries
+    smoke result -- see reports/wpf-report.md, Addendum 5). Never used for
+    a real run."""
+    server_cpus, pgbench_cpus = configured_cpu_lists()
+    server_ids = parse_cpu_list(server_cpus)
+    pgbench_ids = parse_cpu_list(pgbench_cpus)
+    if not server_ids:
+        raise ValueError("SERVER_CPUS resolves to an empty CPU set")
+    if not pgbench_ids:
+        raise ValueError("PGBENCH_CPUS resolves to an empty CPU set")
+    if server_ids & pgbench_ids:
+        raise ValueError(
+            "SERVER_CPUS and PGBENCH_CPUS overlap: "
+            + ",".join(str(c) for c in sorted(server_ids & pgbench_ids))
+        )
+    return {
+        "verified": True,
+        "shared_physical_core": False,
+        "server_cpus": server_cpus,
+        "pgbench_cpus": pgbench_cpus,
+        "server_cpu_ids": sorted(server_ids),
+        "pgbench_cpu_ids": sorted(pgbench_ids),
+        "server_numa_nodes": [0],
+        "pgbench_numa_nodes": [0],
+    }
+
+
 def validate_affinity_proof(affinity):
     """Validate one cpu_affinity_protocol object's internal consistency.
 
@@ -252,6 +290,8 @@ def main():
     try:
         if command == "collect" and len(sys.argv) == 2:
             print(json.dumps(collect_topology_proof(), sort_keys=True))
+        elif command == "fake-collect" and len(sys.argv) == 2:
+            print(json.dumps(fake_topology_proof(), sort_keys=True))
         elif command == "verify-live" and len(sys.argv) == 2:
             collect_topology_proof()
         elif command == "verify-self" and len(sys.argv) == 3:

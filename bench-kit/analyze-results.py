@@ -32,19 +32,20 @@ from benchmark_protocol import (
     CLIENTS_FOR_WORKLOAD,
     CONFIGS,
     EARLY_AA_GATE_MAX_HALF_WIDTH_PERCENT,
-    EARLY_AA_GATE_REPETITIONS,
     EARLY_AA_GATE_WORKLOAD,
-    FULL_PROFILE,
     MODULE_GUCS,
     PGBENCH_WORKLOADS,
     RESULT_FIELDS,
     SHARED_BUFFERS_FOR_WORKLOAD,
-    SMOKE_PROFILE,
     TRACE_CONFIGS,
     W1_FUNCTIONS,
     W3_PROTOCOL,
     WORKLOADS,
+    early_aa_gate_repetitions,
+    full_profile,
     pgbench_margin_log,
+    plateau_probe_sessions_per_variant,
+    smoke_profile,
 )
 from latin_square import verify_schedule as verify_latin_square_schedule
 from stats_common import classify_contrast, confidence_interval, describe
@@ -176,13 +177,13 @@ def verify_manifest(build_dir: Path) -> dict:
     return manifest
 
 
-def verify_protocol(protocol: dict) -> None:
+def verify_protocol(protocol: dict, rehearsal: bool) -> None:
     require(protocol.get("schema_version") == 11, "unsupported protocol schema")
     require(protocol.get("benchmark_series") == "wet-v11",
             "unexpected protocol benchmark series")
     mode = protocol.get("mode")
     require(mode in {"full", "smoke"}, f"unsupported protocol mode: {mode}")
-    expected = FULL_PROFILE if mode == "full" else SMOKE_PROFILE
+    expected = full_profile(rehearsal) if mode == "full" else smoke_profile(rehearsal)
     for name, value in expected.items():
         require(protocol.get(name) == value,
                 f"protocol {name} is {protocol.get(name)!r}, expected {value!r}")
@@ -209,7 +210,7 @@ def verify_protocol(protocol: dict) -> None:
             "W3 thresholds differ from the fixed protocol")
     gate = protocol.get("analysis", {}).get("early_aa_gate", {})
     require(
-        gate.get("check_after_repetitions") == list(EARLY_AA_GATE_REPETITIONS)
+        gate.get("check_after_repetitions") == list(early_aa_gate_repetitions(rehearsal))
         and gate.get("workload") == EARLY_AA_GATE_WORKLOAD
         and gate.get("max_half_width_percent") == EARLY_AA_GATE_MAX_HALF_WIDTH_PERCENT,
         "early A/A gate protocol differs from the fixed rule",
@@ -248,16 +249,21 @@ def verify_host(root: Path, protocol: dict, manifest: dict) -> dict:
     return report
 
 
-def verify_plateau_probe(root: Path) -> dict:
+def verify_plateau_probe(root: Path, rehearsal: bool) -> dict:
     path = root / "plateau-probe-result.json"
     require(path.is_file(), "missing plateau-probe-result.json")
     data = json.loads(path.read_text(encoding="utf-8"))
+    expected_sessions = plateau_probe_sessions_per_variant(rehearsal)
     require(data.get("selected_variant") in {"pinned", "unpinned"},
             "plateau probe did not record a valid selected_variant")
     for key in ("pinned_tps", "unpinned_tps"):
         values = data.get(key)
-        require(isinstance(values, list) and len(values) == 4,
-                f"plateau probe {key} must have exactly 4 sessions")
+        require(
+            isinstance(values, list)
+            and len(values) == expected_sessions,
+            f"plateau probe {key} must have exactly "
+            f"{expected_sessions} session(s)",
+        )
     require(isinstance(data.get("numactl_available"), bool),
             "plateau probe lacks numactl_available")
     require(isinstance(data.get("server_numa_node"), int),
@@ -443,7 +449,7 @@ def verify_progress(results_dir: Path, rows: list) -> None:
             "matrix progress total-cell count is wrong")
 
 
-def verify_early_aa(results_dir: Path, protocol: dict) -> None:
+def verify_early_aa(results_dir: Path, protocol: dict, rehearsal: bool) -> None:
     entries = [
         json.loads(line)
         for line in (results_dir / "aa-early.jsonl").read_text(encoding="utf-8").splitlines()
@@ -453,7 +459,8 @@ def verify_early_aa(results_dir: Path, protocol: dict) -> None:
         require(not entries, "smoke run unexpectedly contains A/A gate checkpoints")
         return
     require(
-        [item.get("repetitions_complete") for item in entries] == list(EARLY_AA_GATE_REPETITIONS),
+        [item.get("repetitions_complete") for item in entries]
+        == list(early_aa_gate_repetitions(rehearsal)),
         "early A/A gate checkpoints are incomplete",
     )
     require(all(item.get("passed") is True for item in entries),
@@ -644,6 +651,23 @@ def render_markdown(report: dict) -> str:
     lines = [
         "# Wait-event tracing v11 benchmark analysis",
         "",
+    ]
+    if report.get("benchmark_rehearsal"):
+        lines.extend([
+            "**REHEARSAL, NOT EVIDENCE.** This run was produced with "
+            "`BENCHMARK_REHEARSAL=1` set, which relaxes a handful of "
+            "checks that a VM can never satisfy (core/RAM floors, cpufreq "
+            "governor exposure, dedicated-bare-metal detection) so the "
+            "real launcher can be rehearsed end to end against real "
+            "PostgreSQL builds before trusting it on real hardware. "
+            "Every other check -- mode proofs, hashes, CPU-affinity "
+            "disjointness, statistics -- ran unrelaxed against this "
+            "host's real numbers below, but those numbers describe a "
+            "shared, virtualized, resource-constrained host and must "
+            "not be cited as performance evidence for the patch.",
+            "",
+        ])
+    lines.extend([
         "Evidence completeness and integrity: **PASS**",
         "",
         wrap72(
@@ -671,7 +695,7 @@ def render_markdown(report: dict) -> str:
             "resolved difference."
         ),
         "",
-    ]
+    ])
     for workload in WORKLOADS:
         item = report["statistics"][workload]
         floor = item["aa_resolution_floor"]
@@ -744,10 +768,40 @@ def main() -> int:
     try:
         root = args.root.resolve()
         results_dir, build_dir, kit_dir = locate(root)
+        evidence_root = root
+        if not (evidence_root / "host-check.json").is_file():
+            evidence_root = results_dir.parent
+
+        # Peek the archive's own recorded benchmark_rehearsal flag before
+        # verify_protocol()/verify_plateau_probe()/verify_early_aa() need to
+        # know whether to check the archive against the real or the
+        # rehearsal-compressed protocol profile. This MUST come from what
+        # the archive says about itself, not from this verifying process's
+        # environment: analyze-raw-archive.sh's whole point is to verify a
+        # raw archive on a different machine than the one that captured it,
+        # which has no reason to have BENCHMARK_REHEARSAL set to match.
+        # host-check.json's hash is independently re-verified below by
+        # verify_host() against the value protocol.json itself records, and
+        # (when reached via analyze-raw-archive.sh) the whole archive's file
+        # set was already hash-checked against MANIFEST.sha256 before this
+        # script ever ran -- this early, not-yet-hash-checked read only
+        # selects which fixed profile to check against, it never bypasses a
+        # check.
+        rehearsal = False
+        host_check_path = evidence_root / "host-check.json"
+        if host_check_path.is_file():
+            try:
+                rehearsal = bool(
+                    json.loads(host_check_path.read_text(encoding="utf-8"))
+                    .get("benchmark_rehearsal", False)
+                )
+            except (json.JSONDecodeError, OSError):
+                rehearsal = False
+
         protocol_path = results_dir / "protocol.json"
         require(protocol_path.is_file(), "protocol.json is missing")
         protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
-        verify_protocol(protocol)
+        verify_protocol(protocol, rehearsal)
         require(
             (results_dir / "seed.txt").read_text(encoding="utf-8").strip()
             == str(protocol["seed"]),
@@ -758,18 +812,15 @@ def main() -> int:
         manifest_path = build_dir / "manifest.json"
         require(protocol.get("build_manifest_sha256") == sha256(manifest_path),
                 "build manifest is not the one bound when the matrix started")
-        evidence_root = root
-        if not (evidence_root / "host-check.json").is_file():
-            evidence_root = results_dir.parent
         host_report = verify_host(evidence_root, protocol, manifest)
-        plateau_probe = verify_plateau_probe(evidence_root)
+        plateau_probe = verify_plateau_probe(evidence_root, rehearsal)
         verify_bound_kit(protocol, kit_dir)
         rows = read_csv(results_dir / "results.csv", RESULT_FIELDS)
         verify_rows(rows, protocol)
         verify_schedule(results_dir, rows, protocol)
         verify_completion(results_dir, rows)
         verify_progress(results_dir, rows)
-        verify_early_aa(results_dir, protocol)
+        verify_early_aa(results_dir, protocol, rehearsal)
         client_load = verify_runtime_evidence(results_dir, rows, protocol)
         statistics_report = statistical_analysis(rows, protocol)
         diagnostics = block_diagnostics(rows, protocol)
@@ -777,6 +828,11 @@ def main() -> int:
         report = {
             "valid": True,
             "integrity_valid": True,
+            # host-check.json's own "benchmark_rehearsal" flag (written by
+            # 00-check-host.sh from $BENCHMARK_REHEARSAL) surfaces here so
+            # render_markdown() can stamp the report; a bool, defaulting to
+            # False for any host-check.json predating this field.
+            "benchmark_rehearsal": bool(host_report.get("benchmark_rehearsal", False)),
             "host_environment": host_report,
             "plateau_probe": plateau_probe,
             "row_count": len(rows),
@@ -792,6 +848,8 @@ def main() -> int:
                                 encoding="utf-8")
         output_md.write_text(render_markdown(report), encoding="utf-8")
         print(f"verification: PASS ({len(rows)} complete cells)")
+        if report["benchmark_rehearsal"]:
+            print("verification: REHEARSAL, NOT EVIDENCE (BENCHMARK_REHEARSAL=1)")
         print(f"analysis JSON: {output_json}")
         print(f"analysis report: {output_md}")
         return 0

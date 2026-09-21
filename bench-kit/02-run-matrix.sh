@@ -44,38 +44,33 @@ fi
   { echo "02-run-matrix.sh: ERROR: sources.conf is not filled in" >&2; exit 1; }
 
 MODE=${BENCHMARK_MODE:-full}
+# RUNS/DURATION/WARMUP_SECONDS/PGBENCH_SCALE/W1_ITERATIONS/
+# QUIESCENCE_SECONDS all come from benchmark_protocol.py's FULL_PROFILE/
+# SMOKE_PROFILE -- the single source analyze-results.py's verify_protocol()
+# checks protocol.json against -- rather than a second hardcoded copy here
+# that could disagree with it. Those profiles are themselves compressed
+# under SELFTEST_FAKE_PREFIX (benchmark_protocol.py), so this script never
+# needs its own fake-mode branch for any of these six values.
 case "$MODE" in
   full)
     RESULTS="$SCRIPT_DIR/results"
-    RUNS=16
-    DURATION=30
-    WARMUP_SECONDS=10
-    PGBENCH_SCALE=100
-    W1_ITERATIONS=100000000
-    QUIESCENCE_SECONDS=5
+    PROFILE_NAME=FULL_PROFILE
     ;;
   smoke)
     RESULTS="$SCRIPT_DIR/smoke-results"
-    RUNS=1
-    if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
-      DURATION=2
-      # The mode-proof queries (recording-proof.sql/w3-qualification.sql)
-      # need to complete strictly inside the warmup window even against
-      # the fake binaries' own process-startup overhead.
-      WARMUP_SECONDS=3
-    else
-      DURATION=6
-      WARMUP_SECONDS=3
-    fi
-    PGBENCH_SCALE=1
-    W1_ITERATIONS=100000
-    QUIESCENCE_SECONDS=0
+    PROFILE_NAME=SMOKE_PROFILE
     ;;
   *)
     echo "02-run-matrix.sh: ERROR: BENCHMARK_MODE must be full or smoke" >&2
     exit 1
     ;;
 esac
+read -r RUNS DURATION WARMUP_SECONDS PGBENCH_SCALE W1_ITERATIONS QUIESCENCE_SECONDS \
+  < <("$PYTHON_BIN" -c "
+from benchmark_protocol import $PROFILE_NAME as p
+print(p['runs_per_cell'], p['duration_seconds'], p['warmup_seconds'],
+      p['pgbench_scale'], p['w1_iterations'], p['quiescence_seconds'])
+")
 MANIFEST="$WORK/manifest.json"
 HOST_CHECK="$SCRIPT_DIR/host-check.json"
 AFFINITY_HELPER="$SCRIPT_DIR/cpu_affinity.py"
@@ -95,9 +90,57 @@ die() {
   stop_freq_sampler >/dev/null 2>&1 || true
   stop_client >/dev/null 2>&1 || true
   stop_server >/dev/null 2>&1 || true
+  declare -F stop_cell_watchdog >/dev/null 2>&1 && stop_cell_watchdog
   exit 1
 }
 log() { printf '%s\n' "[$(date -u +%H:%M:%S)] $*"; }
+REHEARSAL=0
+[[ "${BENCHMARK_REHEARSAL:-0}" == 1 ]] && REHEARSAL=1
+rehearsal_note() { log "*** REHEARSAL NOTE (not evidence, not blocking): $* ***"; }
+
+# Per-cell wall-time budget: a real host runs a W1 cell (a single backend
+# looping over test_wait_primitive, no pgbench, no warmup/duration window
+# bounding it the way pgbench workloads have) in well under a minute, but
+# under QEMU emulation the same 1e8-iteration loop can run for the better
+# part of an hour per cell -- found when a real rehearsal ran one W1 cell
+# for 53+ minutes before being killed by hand. This applies in BOTH modes
+# (not just rehearsal): a real budget of 30 minutes is generous enough
+# that no real cell has ever come close to it, so it costs nothing there,
+# but it means a genuinely hung cell on real hardware also surfaces
+# instead of silently consuming hours. Under BENCHMARK_REHEARSAL=1 the
+# budget tightens to 10 minutes, matched to how fast a rehearsal is
+# already expected to move. Applied around each run_cell() call in the
+# matrix loop below, not inside run_cell() itself, so the timer covers
+# exactly the wall time a single cell takes end to end (server start
+# through server stop) with no risk of drifting from what the loop's own
+# "done in Ns" timing already reports.
+CELL_TIMEOUT_SECONDS=1800
+(( REHEARSAL )) && CELL_TIMEOUT_SECONDS=600
+MAIN_PID=$$
+WATCHDOG_PID=""
+start_cell_watchdog() {
+  local label=$1
+  (
+    sleep "$CELL_TIMEOUT_SECONDS"
+    echo "" >&2
+    echo "02-run-matrix.sh: ERROR: cell exceeded its ${CELL_TIMEOUT_SECONDS}s wall-time budget: $label" >&2
+    kill -TERM "$MAIN_PID" 2>/dev/null
+  ) &
+  WATCHDOG_PID=$!
+  disown "$WATCHDOG_PID" 2>/dev/null || true
+}
+stop_cell_watchdog() {
+  [[ -z "$WATCHDOG_PID" ]] || kill "$WATCHDOG_PID" 2>/dev/null || true
+  wait "$WATCHDOG_PID" 2>/dev/null || true
+  WATCHDOG_PID=""
+}
+handle_cell_timeout() {
+  trap - TERM
+  echo "" >&2
+  echo "02-run-matrix.sh: ERROR: cell wall-time budget exceeded (${CELL_TIMEOUT_SECONDS}s)${CURRENT_CELL:+: $CURRENT_CELL}" >&2
+  exit 124
+}
+trap handle_cell_timeout TERM
 
 # ---------------------------------------------------------------------------
 # Server/client lifecycle, defined early because die() calls these.
@@ -177,6 +220,7 @@ on_error() {
   stop_freq_sampler
   stop_client
   stop_server >/dev/null 2>&1 || true
+  stop_cell_watchdog
   exit "$rc"
 }
 trap on_error ERR
@@ -184,6 +228,7 @@ on_exit() {
   stop_freq_sampler
   stop_client
   stop_server >/dev/null 2>&1 || true
+  stop_cell_watchdog
 }
 trap on_exit EXIT
 
@@ -218,15 +263,35 @@ if [[ -z "${SELFTEST_FAKE_PREFIX:-}" ]]; then
     verify-host-report "$HOST_CHECK" "$(hostname)" ||
     die "host check is not a clean report for this host"
 else
-  AFFINITY_PROOF_JSON='{"selftest_fake_prefix": true}'
+  # analyze-results.py's verify_protocol() runs validate_affinity_proof()
+  # against this unconditionally (fake mode included), so it has to be a
+  # real proof shape, not a placeholder -- see cpu_affinity.fake_topology_
+  # proof()'s docstring.
+  AFFINITY_PROOF_JSON=$("$PYTHON_BIN" "$AFFINITY_HELPER" fake-collect) ||
+    die "SERVER_CPUS/PGBENCH_CPUS failed fake-mode verification"
   # The protocol.json provenance step below hashes host-check.txt/.json
-  # unconditionally; 00-check-host.sh is never run in fake-binary
-  # self-tests, so provide minimal stand-ins if real ones are not there.
+  # unconditionally; if this is invoked directly (not through
+  # run-benchmark.sh, which always runs 00-check-host.sh first, including
+  # in fake mode), provide minimal stand-ins if real ones are not there.
   [[ -f "$SCRIPT_DIR/host-check.txt" ]] ||
     echo "selftest-fakebin: 00-check-host.sh was not run" >"$SCRIPT_DIR/host-check.txt"
-  [[ -f "$SCRIPT_DIR/host-check.json" ]] ||
-    echo '{"selftest_fake_prefix": true, "warning_count": 0}' \
-      >"$SCRIPT_DIR/host-check.json"
+  if [[ ! -f "$SCRIPT_DIR/host-check.json" ]]; then
+    "$PYTHON_BIN" - "$SCRIPT_DIR/host-check.json" "$AFFINITY_PROOF_JSON" <<'PY'
+import json
+import sys
+out, affinity_json = sys.argv[1:]
+data = {
+    "warning_count": 0,
+    "hostname": "selftest-fakebin",
+    "co_resident_postgres_process_count": 0,
+    "host_isolation": "dedicated",
+    "cpu_affinity_protocol": json.loads(affinity_json),
+}
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+  fi
 fi
 [[ -r "$MANIFEST" ]] ||
   die "missing $MANIFEST -- run ./01-build-all.sh first"
@@ -310,6 +375,15 @@ in_list() {
   for item in "$@"; do [[ "$item" == "$needle" ]] && return 0; done
   return 1
 }
+# Same single-source reasoning for which repetition(s) trigger the early
+# A/A gate: benchmark_protocol.EARLY_AA_GATE_REPETITIONS is itself
+# compressed under SELFTEST_FAKE_PREFIX (to just repetition 1, since a
+# fake-mode FULL_PROFILE only ever runs one repetition), so a hardcoded
+# "6|10" bash case here would never fire in fake mode and a launcher-level
+# fake run's aa-early.jsonl would end up missing the checkpoint
+# analyze-results.py's verify_early_aa() requires for "full" mode.
+mapfile -t EARLY_AA_GATE_REPETITIONS < <("$PYTHON_BIN" -c \
+  "from benchmark_protocol import EARLY_AA_GATE_REPETITIONS as r; print('\n'.join(str(x) for x in r))")
 CELLS_PER_REPETITION=$(( ${#CONFIGS[@]} * ${#WORKLOADS[@]} ))
 TOTAL_CELLS=$(( ${#CONFIGS[@]} * ${#WORKLOADS[@]} * RUNS ))
 
@@ -894,16 +968,44 @@ PY
           -f "$WORKLOAD_DIR/w3-qualification.sql" >"$w3_raw" ||
           die "could not capture W3 qualification evidence"
         w3_elapsed=$((SECONDS - proof_start))
-        (( w3_elapsed > 0 && w3_elapsed < WARMUP_SECONDS )) ||
+        if (( w3_elapsed > 0 && w3_elapsed < WARMUP_SECONDS )); then
+          : # normal case
+        elif [[ "$REHEARSAL" -eq 1 ]]; then
+          rehearsal_note "W3 qualification took ${w3_elapsed}s against a ${WARMUP_SECONDS}s warmup window for $CURRENT_CELL -- this VM/emulation may be slower than the intended target; measure real proof durations under $RECORDING_DIR before trusting a shorter warmup there"
+          (( w3_elapsed > 0 )) || w3_elapsed=1
+        else
           die "W3 qualification consumed the warmup window"
+        fi
         if ! "$PYTHON_BIN" "$SCRIPT_DIR/w3_qualification.py" \
           "$w3_raw" "$w3_summary" "$w3_elapsed"; then
           die "W3 did not qualify as short ProcArray LWLock contention; see $w3_summary"
         fi
       fi
 
-    if (( SECONDS - proof_start >= WARMUP_SECONDS )); then
-      die "mode proof consumed the entire warmup window and could contaminate the measured samples"
+    # Elapsed real seconds from pgbench's own launch (proof_start, before
+    # even the snapshot_delay sleep) to here -- i.e. exactly the quantity
+    # the guard below compares against WARMUP_SECONDS. Recorded per cell
+    # (mode_proof_duration_s in $RECORDING_DIR) regardless of mode: useful
+    # on a real host too, to see headroom against WARMUP_SECONDS before a
+    # slower one ever gets close to it.
+    local proof_elapsed=$((SECONDS - proof_start))
+    echo "$proof_elapsed" >"$proof_file.duration_s"
+    if (( proof_elapsed >= WARMUP_SECONDS )); then
+      if [[ "$REHEARSAL" -eq 1 ]]; then
+        # The guard itself is unchanged and still fail-closed outside
+        # BENCHMARK_REHEARSAL=1 (a real host passing this means the
+        # warmup budget has real headroom); a VM/emulated rehearsal can
+        # legitimately run the same proof query slower without that
+        # meaning anything about the patch, so this is a REHEARSAL NOTE
+        # instead of a die() -- benchmark_protocol.py already widens
+        # WARMUP_SECONDS under BENCHMARK_REHEARSAL=1 for exactly this;
+        # reaching this branch means even that wider budget wasn't enough
+        # on this host, which is itself useful to know before trusting a
+        # real run's tighter real-mode budget.
+        rehearsal_note "mode proof took ${proof_elapsed}s against a ${WARMUP_SECONDS}s warmup window for $CURRENT_CELL (config=$config workload=$workload) -- exceeds even the widened rehearsal budget; this VM/emulation is slower than the intended target for this configuration"
+      else
+        die "mode proof consumed the entire warmup window and could contaminate the measured samples"
+      fi
     fi
   fi
 
@@ -1273,7 +1375,13 @@ configs, workloads = rest[:sep], rest[sep + 1:]
 
 root = Path(script_dir)
 sys.path.insert(0, script_dir)
-from benchmark_protocol import BOUND_KIT_FILES, W3_PROTOCOL
+from benchmark_protocol import (
+    BOUND_KIT_FILES,
+    EARLY_AA_GATE_MAX_HALF_WIDTH_PERCENT,
+    EARLY_AA_GATE_REPETITIONS,
+    EARLY_AA_GATE_WORKLOAD,
+    W3_PROTOCOL,
+)
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1325,9 +1433,9 @@ data = {
             "side; otherwise unresolved"
         ),
         "early_aa_gate": {
-            "check_after_repetitions": [6, 10],
-            "workload": "W4",
-            "max_half_width_percent": 1.0,
+            "check_after_repetitions": list(EARLY_AA_GATE_REPETITIONS),
+            "workload": EARLY_AA_GATE_WORKLOAD,
+            "max_half_width_percent": EARLY_AA_GATE_MAX_HALF_WIDTH_PERCENT,
         },
     },
     "max_pgbench_thread_capacity_fraction": 0.90,
@@ -1377,7 +1485,9 @@ for line in "${SCHEDULE_LINES[@]}"; do
 
   log "[$n/$TOTAL_CELLS] config=$config workload=$workload repetition=$repetition position=$position"
   write_progress running "starting cell $n/$TOTAL_CELLS"
+  start_cell_watchdog "$CURRENT_CELL"
   run_cell "$run_index" "$config" "$workload" "$repetition" "$block" "$position"
+  stop_cell_watchdog
   CELLS_COMPLETED=$n
 
   cell_elapsed=$(( $(date +%s) - cell_start ))
@@ -1390,13 +1500,11 @@ for line in "${SCHEDULE_LINES[@]}"; do
 
   if [[ "$MODE" == full && $((n % CELLS_PER_REPETITION)) -eq 0 ]]; then
     completed_repetition=$((n / CELLS_PER_REPETITION))
-    case "$completed_repetition" in
-      6|10)
-        log "Running early A/A gate after repetition $completed_repetition"
-        check_early_aa "$completed_repetition" ||
-          die "early A/A gate failed; host unsuitable (raw data retained)"
-        ;;
-    esac
+    if in_list "$completed_repetition" "${EARLY_AA_GATE_REPETITIONS[@]}"; then
+      log "Running early A/A gate after repetition $completed_repetition"
+      check_early_aa "$completed_repetition" ||
+        die "early A/A gate failed; host unsuitable (raw data retained)"
+    fi
   fi
 done
 

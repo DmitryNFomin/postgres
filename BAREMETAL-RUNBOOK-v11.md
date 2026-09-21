@@ -218,6 +218,136 @@ sudo dnf install -y gcc make bison flex perl-core python39 numactl util-linux ta
   install, run PostgreSQL, write results) happens entirely under the
   executor account's own `$HOME`, which is unconfined under Rocky 8's
   stock targeted policy regardless of enforcing/permissive mode.
+- A fresh Rocky Linux 8 host (in particular a cloud/VM image) may already
+  ship a PostgreSQL service, pre-installed and enabled, from an unrelated
+  PGDG package. Check for one and stop and disable it before running this
+  kit -- `00-check-host.sh` now refuses to start (see "Host requirements"
+  below) if any `postgres`/`postmaster` process is running, on this host
+  or any other cluster:
+  ```sh
+  systemctl list-units --type=service | grep -i postgres
+  sudo systemctl stop <unit>       # e.g. postgresql-13.service
+  sudo systemctl disable <unit>    # so it does not come back on reboot
+  ```
+
+## Rehearsing the launcher in a VM
+
+`BENCHMARK_REHEARSAL=1` runs the real launcher against real PostgreSQL
+builds and a real pgbench, inside a VM instead of dedicated bare metal --
+useful for exercising everything the fake-binaries self-test structurally
+cannot (real `configure`/`make`, real `pg_ctl`/`pgbench`, real timing)
+before trusting a from-scratch kit on real hardware. The real build
+(`configure`/`make` x4) is unchanged and still the dominant cost -- plan
+for the runbook's normal 20-to-40-minute estimate, longer still under an
+emulated, non-native-architecture VM. But the matrix/plateau-probe/
+crossover repetition and session counts and the full-matrix measurement
+window ARE compressed (1 repetition instead of 16, a 5-second measurement
+window instead of 30, 2 plateau-probe and 2 crossover sessions instead of
+8 and 16) so a rehearsal finishes in around an hour beyond the build,
+not the runbook's 6.5-to-8.5-hour full-matrix estimate -- while still
+exercising all 7 configurations and all 5 workloads, every phase, with
+real binaries. Per-cell/session overhead that is not itself a repetition
+count (quiescence, pgbench data-set scale, crossover block/settle/warmup
+durations) stays at its real value, with two exceptions:
+
+- The warmup window (`FULL_PROFILE`/`SMOKE_PROFILE` `warmup_seconds`)
+  widens to 30s (from the real 10s/3s) under `BENCHMARK_REHEARSAL=1`. A
+  real host passing its own smoke/full matrix at the tighter real value
+  proves the mode-proof query (`recording-proof.sql`,
+  `w3-qualification.sql`) has headroom there, but the same query can
+  legitimately run slower on a VM or under emulation without that
+  meaning anything about the patch -- found when a rehearsal died at
+  smoke cell 12 (`config=trace`, `W4`) with "mode proof consumed the
+  entire warmup window" under QEMU emulation. `02-run-matrix.sh`'s own
+  guard for this is unchanged and still fail-closed outside rehearsal
+  mode (no override); if even the widened 30s budget is not enough, it
+  logs a REHEARSAL NOTE with the measured duration instead of failing
+  the run. Every measured proof duration is recorded per cell, in both
+  modes, as `results/recording-proofs/cell-<N>.csv.duration_s` -- useful
+  on a real host too, to see actual headroom against the warmup budget
+  before a slower one ever gets close to it.
+- `FULL_PROFILE`'s `w1_iterations` drops to 1e6 (from the real 1e8) under
+  `BENCHMARK_REHEARSAL=1`. W1 is a single backend looping over
+  `test_wait_primitive` with no pgbench and no warmup/duration window
+  bounding it the way pgbench workloads have, so nothing else limits its
+  run time. A real host executes 1e8 iterations in well under a minute;
+  under QEMU emulation, the underlying syscall per iteration
+  (latch/timeout/file-read/usleep) is slow enough that a real rehearsal
+  ran one W1 cell for 53+ minutes at 99% CPU before being killed by
+  hand -- seven W1 cells (one per configuration) would have added
+  roughly six hours. `SMOKE_PROFILE`'s `w1_iterations` (1e5 real) was
+  never a problem and is unchanged.
+
+Independently of both of the above, every matrix cell (`run_cell()` in
+`02-run-matrix.sh`, wrapping server start through server stop) now has a
+wall-time budget: 30 minutes in real mode, tightened to 10 minutes under
+`BENCHMARK_REHEARSAL=1`. This is not a rehearsal-only relaxation -- the
+real-mode budget is generous enough that no real cell has ever come
+close to it, so it costs nothing there, but it means a genuinely hung
+cell on real hardware also surfaces with a clear "cell exceeded its
+wall-time budget" message naming the cell and elapsed time, instead of
+silently consuming hours (exactly what the 53-minute W1 stall above
+would otherwise have done indefinitely).
+
+```sh
+sha256sum -c wet-v11-baremetal-r2.tar.gz.sha256
+tar -xzf wet-v11-baremetal-r2.tar.gz
+cd wet-v11-baremetal-r2
+lscpu -e
+export SERVER_CPUS=...
+export PGBENCH_CPUS=...
+BENCHMARK_REHEARSAL=1 ./run-benchmark.sh
+```
+
+Set it in the environment before `./run-benchmark.sh` (or
+`--preflight-only`); `00-check-host.sh`/`benchmark_protocol.py`/
+`crossover/protocol.py` read it directly, same as
+`SERVER_CPUS`/`PGBENCH_CPUS`. Beyond the repetition/session/window
+compression above, it relaxes exactly four host checks that a VM can
+never satisfy, logging each as a non-blocking "REHEARSAL NOTE" instead of
+refusing to start:
+
+- fewer than 8 physical cores;
+- less than 16 GB total RAM;
+- no readable cpufreq governor (common under QEMU/TCG, which does not
+  expose one at all);
+- virtualization detected (`systemd-detect-virt` reporting anything
+  other than `none`).
+
+Every other check is unchanged and still fail-closed: required tools,
+gcc floor, disk space, load average, swap, CPU-affinity disjointness and
+no-shared-physical-core, and -- above all -- every mode proof, build/
+fixture hash, and statistical check the real matrix and crossover run.
+`analyze-results.py`/`analyze-raw-archive.sh` read the
+`benchmark_rehearsal` flag `00-check-host.sh` recorded in
+`host-check.json` and stamp `analysis.md`/`analysis.json` and their
+console output "REHEARSAL, NOT EVIDENCE" -- a rehearsal's numbers
+describe a shared, resource-constrained, virtualized host measured with a
+single repetition and a short window, and must never be cited as
+performance evidence for the patch. Never set
+`BENCHMARK_REHEARSAL=1` for a real evidence-gathering run.
+
+`BENCHMARK_REHEARSAL_SKIP_SELFTEST=1`, honoured only alongside
+`BENCHMARK_REHEARSAL=1` (real mode ignores it entirely, however it is
+set), skips the `kit-self-test` phase's ~26-minute nested fake-binaries
+self-test on later rehearsal attempts against an unchanged package. The
+skip is justified by data, not by the operator's say-so:
+`make-baremetal-package.sh` now runs `self-test.py` against the fully
+staged package content *before* generating `PACKAGE-MANIFEST.sha256`
+over it, and only then writes `PACKAGE-SELFTEST.json` (`"passed": true`,
+a timestamp, and the packaging host) into the package -- so that file
+becomes one more entry the manifest covers, tying the attestation to
+this exact package's own already-verified integrity chain (there is no
+way to copy it onto a different package, and a bare dev checkout, with
+no `PACKAGE-MANIFEST.sha256` at all, can never produce one).
+`run-benchmark.sh` only skips `kit-self-test` when `PACKAGE-SELFTEST.json`
+is present and says `"passed": true` -- which, by the time it is read,
+has already passed the package-integrity phase's `PACKAGE-MANIFEST.sha256`
+check above it. Use this to iterate faster across several rehearsal
+attempts against the same package (e.g. after a `--reuse-builds` restart
+following an unrelated failure); the rehearsal that is finally reported
+as evidence the launcher works on the target must still be one that ran
+with `kit-self-test` included.
 
 ## What the launcher does
 
@@ -289,6 +419,9 @@ The run stops immediately and prints diagnostics when any of these fail:
 - `sources.conf` placeholder check, package checksum, or self-test;
 - bare-metal, idle-host, tool, RAM, disk, governor, or CPU-affinity checks
   (including a shared physical core between PostgreSQL and pgbench);
+- a co-resident `postgres`/`postmaster` process anywhere on the host, at
+  either the initial preflight or the final host check before the full
+  matrix (no override -- stop it first);
 - baseline reproducibility comparison;
 - any server start or clean shutdown;
 - a mode proof (module presence/absence, capture level,
@@ -328,9 +461,19 @@ To check only package integrity, the self-test, and host readiness:
   has more than one NUMA node, the check warns but continues, and the
   probe falls back to `taskset`-only pinning of the pinned variant.
 - CPU frequency governor set to `performance`.
-- No active build, backup, or interactive workload. Existing low-activity
-  PostgreSQL clusters are recorded as co-resident provenance and do not
-  block.
+- No active build, backup, or interactive workload, and **no other
+  PostgreSQL server running anywhere on the host** -- `00-check-host.sh`
+  refuses to start (naming the offending `postgres`/`postmaster` pid(s))
+  if it finds one, at both the initial preflight and the final host check
+  run again just before the full matrix; there is no override. This used
+  to be recorded as non-blocking co-resident provenance, with the actual
+  refusal only ever surfacing hours later from `crossover/run.sh`'s own
+  "otherwise idle" check, after the entire multi-hour measurement matrix
+  had already run for nothing (reports/wpf-report.md, Addendum 5) --
+  `crossover/run.sh`'s check still runs too, as a second line of defence,
+  but should never be how this is first discovered. Stop (and, if it
+  should not come back on reboot, disable) any such service first; see
+  "Rocky Linux 8 preparation" below.
 - Extract directly under the executor account's home to keep Unix socket
   paths short.
 

@@ -37,11 +37,20 @@ def build_schedule(
     configuration at least floor(runs / len(configs)) times" property.
     """
     n = len(configs)
-    if runs < n:
-        raise ValueError(
-            f"need at least {n} repetitions to fill a {n}x{n} Latin "
-            f"square at least once; got {runs}"
-        )
+    if runs < 1:
+        raise ValueError(f"need at least 1 repetition; got {runs}")
+    # The real protocol always calls this with runs=16 >= n=7 (RUNS in
+    # benchmark_protocol.py, unconditional even in fake mode -- see its
+    # comment), which is what actually gives the "every position sees
+    # every configuration at least floor(runs / n) times" balance
+    # verify_schedule() checks. For runs < n (only ever true for a
+    # SELFTEST_FAKE_PREFIX FULL_PROFILE, which compresses runs_per_cell to
+    # 1) that quotient is 0, so verify_schedule() is called with
+    # min_occurrences_per_position=0 and the balance guarantee is
+    # vacuous -- there is nothing to balance over a single repetition
+    # anyway. The quotient/remainder math below already handles runs < n
+    # correctly (it degrades to "pick `runs` distinct rows at random");
+    # only this guard needs to stop pretending 1..n-1 is invalid.
     base = list(configs)
     rng.shuffle(base)
 

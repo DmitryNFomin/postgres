@@ -11,6 +11,8 @@ for whatever topology the host actually has.
 
 from __future__ import annotations
 
+import os
+
 from w3_qualification import THRESHOLDS
 
 
@@ -149,32 +151,162 @@ BOUND_KIT_FILES = (
     "workloads/w3-qualification.sql",
 )
 
-RUNS = 16
-EARLY_AA_GATE_REPETITIONS = (6, 10)
+RUNS = 16  # the real protocol's repetition count -- fixed regardless of
+# SELFTEST_FAKE_PREFIX: self-test.py's own synthetic 560-cell (7x5x16)
+# clean-room tree is unconditional and has nothing to do with fake
+# binaries, so this constant must not react to that environment variable
+# (see FULL_PROFILE below, which is the one that does).
+_FAKE = bool(os.environ.get("SELFTEST_FAKE_PREFIX"))
+
+# BENCHMARK_REHEARSAL=1: a REAL rehearsal of this launcher (real configure/
+# make/gcc, real pg_ctl/pgbench, real timing) against real PostgreSQL
+# builds, typically inside a VM, before trusting a from-scratch kit on real
+# hardware -- see 00-check-host.sh for the companion VM-incapable-host-check
+# relaxation. Unlike SELFTEST_FAKE_PREFIX, this must still measure real
+# elapsed time and produce real pgbench/W1 numbers (they are just not
+# evidence), so only the multiplicative knobs that turn a multi-hour run
+# into a multi-hour run TIMES SIXTEEN are compressed here -- repetition
+# count, the per-cell measurement window, and session counts -- while
+# per-cell overhead (warmup, quiescence, pgbench data-set scale, W1
+# iteration count) and the smoke profile (already short by design) stay at
+# their real values, so the rehearsal still exercises real-shaped timing
+# and data volume.
+_REHEARSAL = os.environ.get("BENCHMARK_REHEARSAL") == "1"
+
+# Fake-binaries self-test: a launcher-level preflight run must finish in
+# well under a real run's hours, so every timed/repeated knob below is
+# compressed for SELFTEST_FAKE_PREFIX -- this is the ONE place each of
+# them is compressed; 02-run-matrix.sh, plateau-probe.sh, and the
+# crossover all read the resulting values (or their own analogous
+# profile, for the crossover) rather than hardcoding a fake-mode number
+# themselves. Never used for a real run.
+def _early_aa_gate_repetitions(fake: bool, rehearsal: bool) -> tuple:
+    return (1,) if (fake or rehearsal) else (6, 10)
+
+
+def early_aa_gate_repetitions(rehearsal: bool) -> tuple:
+    """Verifier-facing counterpart of EARLY_AA_GATE_REPETITIONS -- see
+    full_profile() above for why rehearsal is an explicit parameter but
+    fake is still read ambiently."""
+    return _early_aa_gate_repetitions(_FAKE, rehearsal)
+
+
+EARLY_AA_GATE_REPETITIONS = _early_aa_gate_repetitions(_FAKE, _REHEARSAL)
 EARLY_AA_GATE_WORKLOAD = "W4"
 EARLY_AA_GATE_MAX_HALF_WIDTH_PERCENT = 1.0
 
-FULL_PROFILE = {
-    "mode": "full",
-    "runs_per_cell": RUNS,
-    "expected_cells": len(CONFIGS) * len(WORKLOADS) * RUNS,
-    "duration_seconds": 30,
-    "warmup_seconds": 10,
-    "quiescence_seconds": 5,
-    "pgbench_scale": 100,
-    "w1_iterations": 100_000_000,
-}
+def _full_profile(fake: bool, rehearsal: bool) -> dict:
+    """The full-matrix protocol profile for a given (fake, rehearsal) mode
+    pair. A single function so every consumer -- the ambient FULL_PROFILE
+    below (used by producers: 02-run-matrix.sh, plateau-probe.sh,
+    self-test.py's own launcher-driven fake run) and
+    analyze-results.py's verify_protocol() (used by a *verifier*, which
+    must judge an archive by what it says about itself, not by the
+    verifying process's own environment -- see the rehearsal parameter's
+    call site) -- agree on exactly what each mode compresses."""
+    runs_per_cell = 1 if (fake or rehearsal) else RUNS
+    return {
+        "mode": "full",
+        "runs_per_cell": runs_per_cell,
+        "expected_cells": len(CONFIGS) * len(WORKLOADS) * runs_per_cell,
+        "duration_seconds": 1 if fake else (5 if rehearsal else 30),
+        # 30s (not the real 10s) under BENCHMARK_REHEARSAL=1: a real host
+        # passing at 10s proved the mode-proof query (recording-proof.sql,
+        # w3-qualification.sql) has real headroom there, but a VM/emulated
+        # rehearsal can legitimately run that same query slower without that
+        # meaning anything about the patch -- found when a real rehearsal
+        # died at "mode proof consumed the entire warmup window" on the
+        # "trace" config specifically (the heaviest capture path) under QEMU
+        # emulation. 02-run-matrix.sh's own guard is unchanged and still
+        # fail-closed outside rehearsal mode; if even this wider budget is
+        # not enough, that guard downgrades to a REHEARSAL NOTE instead of
+        # dying, and every measured proof duration is recorded per cell
+        # under results/recording-proofs/ regardless of mode.
+        "warmup_seconds": 3 if fake else (30 if rehearsal else 10),
+        "quiescence_seconds": 0 if fake else 5,
+        "pgbench_scale": 1 if fake else 100,
+        # 1e6 (not the real 1e8) under BENCHMARK_REHEARSAL=1: W1 is a single
+        # backend running a tight SELECT loop over test_wait_primitive with no
+        # pgbench, no warmup/duration window at all, and no per-cell wall-time
+        # floor the way pgbench workloads have -- so nothing else bounds its
+        # run time. A real host executes 1e8 iterations in well under a
+        # minute; under QEMU emulation, each iteration's underlying syscall
+        # (latch/timeout/file-read/usleep) is slow enough that a real
+        # rehearsal ran the W1 cell for master-aa alone for 53+ minutes at
+        # 99% CPU before being killed -- seven W1 cells (one per config)
+        # would have added roughly six hours. Real mode is unaffected;
+        # fake mode already uses 1000.
+        "w1_iterations": 1000 if fake else (1_000_000 if rehearsal else 100_000_000),
+    }
 
-SMOKE_PROFILE = {
-    "mode": "smoke",
-    "runs_per_cell": 1,
-    "expected_cells": len(CONFIGS) * len(WORKLOADS),
-    "duration_seconds": 6,
-    "warmup_seconds": 3,
-    "quiescence_seconds": 0,
-    "pgbench_scale": 1,
-    "w1_iterations": 100_000,
-}
+
+def full_profile(rehearsal: bool) -> dict:
+    """The full-matrix profile a *verifier* should expect from an archive,
+    given whether the archive says (via its own recorded host-check.json
+    benchmark_rehearsal flag, not this process's own BENCHMARK_REHEARSAL)
+    it is a rehearsal or a real capture. The FAKE dimension is still read
+    ambiently (_FAKE) rather than taking a second explicit parameter: a
+    SELFTEST_FAKE_PREFIX fake-binaries archive is always verified
+    in-process, on the same host, by the same self-test run that produced
+    it (never copied elsewhere the way analyze-raw-archive.sh's rehearsal
+    archives are), so the ambient environment is always correct for that
+    dimension -- unlike BENCHMARK_REHEARSAL, which is not."""
+    return _full_profile(_FAKE, rehearsal)
+
+
+FULL_PROFILE = _full_profile(_FAKE, _REHEARSAL)
+
+# plateau-probe.sh alternates pinned/unpinned sessions this many times
+# each (8 total real sessions); analyze-results.py's verify_plateau_probe()
+# checks the retained pinned_tps/unpinned_tps lists against this same
+# count, so a fake-mode or rehearsal launcher run needs it small too (2
+# total sessions).
+
+
+def _plateau_probe_sessions_per_variant(fake: bool, rehearsal: bool) -> int:
+    return 1 if (fake or rehearsal) else 4
+
+
+def plateau_probe_sessions_per_variant(rehearsal: bool) -> int:
+    """Verifier-facing counterpart of PLATEAU_PROBE_SESSIONS_PER_VARIANT --
+    see full_profile() above for why rehearsal is an explicit parameter
+    but fake is still read ambiently."""
+    return _plateau_probe_sessions_per_variant(_FAKE, rehearsal)
+
+
+PLATEAU_PROBE_SESSIONS_PER_VARIANT = _plateau_probe_sessions_per_variant(_FAKE, _REHEARSAL)
+
+# crossover/protocol.py's SESSIONS (2 fake/rehearsal, 16 real) mirrors this
+# same _FAKE/_REHEARSAL gate for the exact same reason; kept there (not
+# here) because nothing outside crossover/ needs it and protocol.py already
+# carries the other crossover-specific constants (MEASUREMENT_SECONDS etc).
+
+
+def _smoke_profile(fake: bool, rehearsal: bool) -> dict:
+    return {
+        "mode": "smoke",
+        "runs_per_cell": 1,
+        "expected_cells": len(CONFIGS) * len(WORKLOADS),
+        "duration_seconds": 1 if fake else 6,
+        # Same rehearsal-mode widening as FULL_PROFILE above, same reason: the
+        # real host's own smoke matrix already passed all 35 cells at 3s, but
+        # a real rehearsal failed at smoke cell 12 (config=trace, W4) with
+        # "mode proof consumed the entire warmup window" under QEMU emulation.
+        "warmup_seconds": 3 if not rehearsal else 30,
+        "quiescence_seconds": 0,
+        "pgbench_scale": 1,
+        "w1_iterations": 1000 if fake else 100_000,
+    }
+
+
+def smoke_profile(rehearsal: bool) -> dict:
+    """Verifier-facing counterpart of SMOKE_PROFILE -- see full_profile()
+    above for why rehearsal is an explicit parameter but fake is still
+    read ambiently."""
+    return _smoke_profile(_FAKE, rehearsal)
+
+
+SMOKE_PROFILE = _smoke_profile(_FAKE, _REHEARSAL)
 
 SHARED_BUFFERS_FOR_WORKLOAD = {
     "W1": "128MB",

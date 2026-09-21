@@ -18,6 +18,9 @@ from protocol import (
     BLOCKS_PER_SESSION,
     CLIENTS,
     MAX_PGBENCH_CAPACITY_FRACTION,
+    MEASUREMENT_NS_HIGH,
+    MEASUREMENT_NS_LOW,
+    MEASUREMENT_SECONDS,
     RESULT_FIELDS,
     SEQUENCES,
     THREADS,
@@ -137,14 +140,14 @@ def build_session_results(
         start_ns = int(start_event["timestamp_ns"])
         end_ns = int(end_event["timestamp_ns"])
         require(
-            29_500_000_000 <= end_ns - start_ns <= 31_500_000_000,
+            MEASUREMENT_NS_LOW <= end_ns - start_ns <= MEASUREMENT_NS_HIGH,
             "block {} measurement duration differs".format(block_index),
         )
         first_second = (start_ns + 999_999_999) // 1_000_000_000
         last_second = end_ns // 1_000_000_000 - 1
         seconds = list(range(first_second, last_second + 1))
         require(
-            len(seconds) in (29, 30)
+            len(seconds) in (MEASUREMENT_SECONDS - 1, MEASUREMENT_SECONDS)
             and all(
                 second in by_second
                 and by_second[second].get("threads") == THREADS

@@ -34,7 +34,7 @@ TEMP_ARCHIVE=$(mktemp "$DIST_DIR/.$PACKAGE.XXXXXX.tar.gz")
 TEMP_SIDECAR=$(mktemp "$DIST_DIR/.$PACKAGE.XXXXXX.sha256")
 for name in \
   README.md analyze.py extract_blocks.py generate_schedule.py host_state.py \
-  make-package.sh protocol.py run-worker.sh run.sh self-test.py \
+  make-package.sh protocol.py rehearsal.py run-worker.sh run.sh self-test.py \
   verify_affinity.py verify_installs.py verify_runtime.py; do
   [[ -f "$SCRIPT_DIR/$name" && ! -L "$SCRIPT_DIR/$name" ]] ||
     { echo "missing regular input: $name" >&2; exit 1; }

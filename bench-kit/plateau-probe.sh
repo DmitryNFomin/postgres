@@ -178,18 +178,26 @@ print(f"{transactions / measured_interval:.6g}")
 PY
 }
 
+# benchmark_protocol.PLATEAU_PROBE_SESSIONS_PER_VARIANT (4 real, 1 under
+# SELFTEST_FAKE_PREFIX or BENCHMARK_REHEARSAL=1) is the same count
+# analyze-results.py's verify_plateau_probe() checks pinned_tps/
+# unpinned_tps against -- single source, not a hardcoded 8/4 here that
+# could drift from a compressed expectation there.
+SESSIONS_PER_VARIANT=$("$PYTHON_BIN" -c \
+  "from benchmark_protocol import PLATEAU_PROBE_SESSIONS_PER_VARIANT as n; print(n)")
+TOTAL_SESSIONS=$((SESSIONS_PER_VARIANT * 2))
 log "Server NUMA node: $SERVER_NUMA_NODE  numactl available: $NUMACTL_AVAILABLE"
-log "Running 8 vanilla W6c probe sessions (4 pinned, 4 unpinned, alternating)"
+log "Running $TOTAL_SESSIONS vanilla W6c probe sessions ($SESSIONS_PER_VARIANT pinned, $SESSIONS_PER_VARIANT unpinned, alternating)"
 
 PINNED_TPS=()
 UNPINNED_TPS=()
-for i in 1 2 3 4 5 6 7 8; do
+for ((i = 1; i <= TOTAL_SESSIONS; i++)); do
   if (( i % 2 == 1 )); then
     variant=pinned
   else
     variant=unpinned
   fi
-  log "Session $i/8 ($variant)"
+  log "Session $i/$TOTAL_SESSIONS ($variant)"
   tps=$(run_session "$i" "$variant")
   log "  tps=$tps"
   if [[ "$variant" == pinned ]]; then

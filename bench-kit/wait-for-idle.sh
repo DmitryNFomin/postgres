@@ -26,6 +26,17 @@ fi
   exit 2
 }
 
+# SELFTEST_FAKE_PREFIX: fake-binaries self-test mode. This may be running on
+# a dev machine that is not Linux and has no /proc/loadavg; the real idle
+# gate this script implements has nothing real to wait for anyway (nothing
+# it could be co-resident with actually ran). Report idle immediately
+# instead of the real Linux-only load-average poll loop.
+if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+  echo "wait-for-idle.sh: SELFTEST_FAKE_PREFIX fake mode -- reporting idle immediately"
+  echo "Idle gate: PASS (fake mode, 0 stable seconds required)"
+  exit 0
+fi
+
 [[ "$(uname -s)" == Linux ]] || {
   echo "wait-for-idle.sh: ERROR: Linux is required" >&2
   exit 1

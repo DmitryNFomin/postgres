@@ -5,6 +5,34 @@ byte of evidence is generated data (brief-v11-wpc-kit.md hard rule)."""
 
 from __future__ import annotations
 
+import os
+
+# This script's own synthetic 560-cell (7x5x16) clean-room tree is always
+# real-shaped and has nothing to do with fake binaries -- it must not
+# react to SELFTEST_FAKE_PREFIX just because it happens to be present in
+# this process's environment (e.g. self-test.py runs nested, as
+# run-benchmark.sh's own "kit-self-test" phase, inside a launcher-level
+# fake-binaries self-test that legitimately has the variable set for its
+# OWN fake-binary phases). Pop it before importing benchmark_protocol (or
+# anything that imports it), whose FULL_PROFILE/SMOKE_PROFILE/
+# EARLY_AA_GATE_REPETITIONS/PLATEAU_PROBE_SESSIONS_PER_VARIANT are
+# compressed based on exactly this variable -- and before spawning any
+# subprocess (analyze-results.py, 03-collect.sh, analyze-raw-archive.sh),
+# which would otherwise inherit it too. run-selftest.sh (launched below,
+# skipped when SELFTEST_NESTED is set) sets its own copy of this variable
+# fresh for its own child processes regardless of what this process had.
+os.environ.pop("SELFTEST_FAKE_PREFIX", None)
+# Same leak, same fix, for BENCHMARK_REHEARSAL=1: this script is exactly
+# run-benchmark.sh's "kit-self-test" phase, so a real VM rehearsal runs it
+# with BENCHMARK_REHEARSAL=1 already in the environment. Without this pop,
+# benchmark_protocol.FULL_PROFILE's rehearsal-compressed runs_per_cell (1)
+# would leak into analyze-results.py's verify_protocol() when this script
+# spawns it as a subprocess to check the synthetic tree below -- which was
+# built with the unconditional, always-16 RUNS constant -- and fail with
+# "protocol runs_per_cell is 16, expected 1" on every real rehearsal,
+# before a single real PostgreSQL build even started.
+os.environ.pop("BENCHMARK_REHEARSAL", None)
+
 import csv
 import datetime
 import hashlib
@@ -679,22 +707,34 @@ def main() -> int:
     # --- the plateau scenario itself (both a unit check and end-to-end) ---
     test_plateau_scenario_end_to_end(source_kit, analyzer)
 
-    # --- fake-binaries self-test: real shell control flow (01-build-all.sh
-    # -> plateau-probe.sh -> 01b-disassemble.sh -> 02-run-matrix.sh smoke ->
-    # 03-collect.sh) against stub pg_ctl/initdb/pgbench/psql binaries, plus
-    # a standing regression check that reverting plateau-probe.sh's
-    # run_session() pg_ctl-stop fix reproduces the exact
-    # "ValueError: could not convert string to float" this self-test exists
-    # for. Still no real PostgreSQL server anywhere. ------------------------
-    run_selftest = source_kit / "selftest-fakebin" / "run-selftest.sh"
-    print("self-test: running fake-binaries self-test "
-          f"({run_selftest.relative_to(source_kit)})...")
-    result = subprocess.run([str(run_selftest)], cwd=source_kit)
-    if result.returncode != 0:
-        raise RuntimeError(
-            "fake-binaries self-test failed (see output above); "
-            "run selftest-fakebin/run-selftest.sh directly for details"
-        )
+    # --- fake-binaries self-test: drives the REAL run-benchmark.sh launcher
+    # (preflight, kit-self-test, idle checks, build, disassembly, plateau
+    # probe, smoke, smoke-verification, cooldown, final host check, the
+    # full matrix, collection, crossover smoke, crossover full) against
+    # selftest-fakebin/'s stub binaries, plus a standing regression check
+    # that reverting plateau-probe.sh's run_session() pg_ctl-stop fix
+    # reproduces the exact "ValueError: could not convert string to float"
+    # this self-test exists for. Still no real PostgreSQL server anywhere.
+    #
+    # run-benchmark.sh's own "kit-self-test" phase runs this very script
+    # (self-test.py) again -- SELFTEST_NESTED (set by run-selftest.sh
+    # before it launches run-benchmark.sh) tells that nested invocation to
+    # skip this block instead of recursing into run-selftest.sh forever.
+    # ------------------------------------------------------------------
+    if os.environ.get("SELFTEST_NESTED"):
+        print("self-test: SELFTEST_NESTED is set -- skipping the recursive "
+              "fake-binaries self-test (this invocation IS one of its "
+              "run-benchmark.sh kit-self-test phases)")
+    else:
+        run_selftest = source_kit / "selftest-fakebin" / "run-selftest.sh"
+        print("self-test: running fake-binaries self-test "
+              f"({run_selftest.relative_to(source_kit)})...")
+        result = subprocess.run([str(run_selftest)], cwd=source_kit)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "fake-binaries self-test failed (see output above); "
+                "run selftest-fakebin/run-selftest.sh directly for details"
+            )
 
     print(
         "self-test: PASS "

@@ -39,9 +39,48 @@ if [[ "$RUN_MODE" == smoke ]]; then
   BLOCK_SECONDS=1
   SETTLE_SECONDS=0
   INITIAL_WARMUP_SECONDS=2
+elif [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+  # Fake-binaries self-test, "full" mode: SESSIONS must match protocol.py's
+  # own SESSIONS (2 fake, 16 real) exactly -- the schedule run.sh/
+  # run-worker.sh actually process is generated from that python constant,
+  # and this bash SESSIONS is only ever used to sanity-check the schedule
+  # has that many rows ("schedule is incomplete" otherwise). Unlike
+  # 02-run-matrix.sh's DURATION/WARMUP_SECONDS (which analyze-results.py
+  # verifies against a FIXED profile dict regardless of fake mode), this
+  # crossover's session count and block/settle/warmup windows are checked
+  # against protocol.py's OWN constants -- which are gated on
+  # SELFTEST_FAKE_PREFIX the same way, in the same numbers -- so shrinking
+  # them here stays consistent with what analyze.py expects.
+  # analyze.py's real-nanosecond block-duration check is also derived from
+  # MEASUREMENT_SECONDS, not a magic number, for the same reason. 3, not
+  # 2: see protocol.py's matching MEASUREMENT_SECONDS comment (stdev()
+  # needs 2+ per-second samples after boundary trimming). Never used for
+  # a real run.
+  SESSIONS=2
+  BLOCK_SECONDS=3
+  SETTLE_SECONDS=0
+  INITIAL_WARMUP_SECONDS=1
+elif [[ "${BENCHMARK_REHEARSAL:-0}" == 1 ]]; then
+  # Real rehearsal (real builds, real pgbench, real timing) against real
+  # PostgreSQL, typically inside a VM: SESSIONS must match protocol.py's
+  # own SESSIONS (2 under BENCHMARK_REHEARSAL=1, same value and same
+  # "analyze.py requires an even A/B split" reason as the fake-binaries
+  # self-test above), but unlike that fake path, there IS something real
+  # to wait out per block, so BLOCK_SECONDS/SETTLE_SECONDS/
+  # INITIAL_WARMUP_SECONDS stay at their real (already-set-above) values.
+  SESSIONS=2
 fi
-SERVER_CPUS=""
-PGBENCH_CPUS=""
+# Pre-existing bug, found the first time this launcher-level fake run
+# actually reached the crossover worker: SERVER_CPUS/PGBENCH_CPUS are
+# supposed to be inherited from the environment (run-benchmark.sh ->
+# run.sh -> here; see the "SERVER_CPUS must be set" check below, which
+# only makes sense as an environment-inheritance check), but
+# unconditional "="" clobbered whatever the environment actually had
+# before that check ever ran it always failed, real runs included -- this
+# was simply never exercised end-to-end before. ${VAR:-} preserves an
+# inherited value and only defaults to empty if truly unset.
+SERVER_CPUS=${SERVER_CPUS:-}
+PGBENCH_CPUS=${PGBENCH_CPUS:-}
 EXECUTOR_USER=""
 active_prefix=""
 active_datadir=""
@@ -198,6 +237,15 @@ write_event() {
 }
 pgbench_cpu_snapshot() {
   local pid=$1 stat_line rest
+  if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+    # /proc/PID/stat is Linux-only (this may be running on macOS) and
+    # meaningless against a fake pgbench that is really just a sleep
+    # loop anyway. A fixed, identical before/after tick count gives a
+    # real (not synthetic-event) capacity_fraction of exactly 0, which
+    # 0 <= capacity < MAX_PGBENCH_CAPACITY_FRACTION always accepts.
+    printf '%s\t%s\t%s\n' 0 0 "$CLOCK_TICKS_PER_SECOND"
+    return 0
+  fi
   IFS= read -r stat_line <"/proc/$pid/stat" || return 1
   rest=${stat_line##*) }
   set -- $rest
@@ -356,7 +404,11 @@ append_mode_proof() {
   local client_count clients_recording calls_before calls_after trace_records
   assert_same_backends "$prefix" "$appname" "$backends"
   before=$(capture_snapshot "$prefix" "$appname")
-  sleep 1
+  if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+    sleep 0.05
+  else
+    sleep 1
+  fi
   assert_same_backends "$prefix" "$appname" "$backends"
   after=$(capture_snapshot "$prefix" "$appname")
   IFS=, read -r client_count clients_recording calls_before _ <<<"$before"
@@ -436,7 +488,11 @@ run_session() {
     die "could not create tracing SQL extension"
   psql_control_for "$prefix" -qAtc "CHECKPOINT" >/dev/null ||
     die "pre-measurement checkpoint failed"
-  sleep 5
+  if [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]]; then
+    sleep 0.1
+  else
+    sleep 5
+  fi
 
   run_pgbench_from_prefix "$prefix" "$appname" \
     taskset -c "$PGBENCH_CPUS" "$prefix/bin/pgbench" -n \
@@ -456,7 +512,11 @@ run_session() {
   backend_snapshot "$prefix" "$appname" "$backends" ||
     die "pgbench did not create exactly 32 persistent backends"
   mapfile -t backend_pids <"$backends"
-  python_run "$SCRIPT_DIR/verify_affinity.py" \
+  # Same reasoning as the AFFINITY_HELPER skip above: fake backend PIDs
+  # are plain `sleep` processes with no real CPU affinity applied, and
+  # os.sched_getaffinity() does not even exist on non-Linux (e.g. macOS,
+  # where this launcher-level fake run may be exercised).
+  [[ -n "${SELFTEST_FAKE_PREFIX:-}" ]] || python_run "$SCRIPT_DIR/verify_affinity.py" \
     "$SERVER_CPUS" "${backend_pids[@]}" ||
     die "a pgbench backend CPU affinity differs"
 

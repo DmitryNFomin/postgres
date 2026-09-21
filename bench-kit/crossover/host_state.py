@@ -10,7 +10,11 @@ import os
 import platform
 import re
 import socket
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rehearsal  # noqa: E402
 
 
 def parse_cpu_list(text: str) -> set[int]:
@@ -37,7 +41,32 @@ def _read_optional(path: str) -> str:
         return ""
 
 
+def _fake_capture() -> dict:
+    """SELFTEST_FAKE_PREFIX: this may be running on a dev machine with no
+    /sys/devices/system/cpu (e.g. macOS) and no "performance" governor to
+    report -- there is no real hardware state to capture against fake
+    binaries anyway. Return a fixed, internally-consistent synthetic
+    report instead; validate_host_state() (analyze.py) only requires the
+    non-timestamp fields to be byte-identical before/after, which a fixed
+    dict trivially satisfies. Never used for a real run."""
+    return {
+        "schema_version": 2,
+        "timestamp_utc": datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat(),
+        "hostname": "selftest-fakebin",
+        "kernel": "selftest-fakebin (no real kernel)",
+        "load_average": [0.0, 0.0, 0.0],
+        "online_cpus": "0-63",
+        "smt_active": "",
+        "intel_pstate_no_turbo": "",
+        "governors": ["performance"],
+    }
+
+
 def capture() -> dict:
+    if os.environ.get("SELFTEST_FAKE_PREFIX"):
+        return _fake_capture()
     governor_paths = sorted(
         Path("/sys/devices/system/cpu").glob(
             "cpu[0-9]*/cpufreq/scaling_governor"
@@ -93,8 +122,17 @@ def validate(state: dict) -> None:
         raise RuntimeError("host-state timestamp is not UTC")
     if not parse_cpu_list(state.get("online_cpus", "")):
         raise RuntimeError("online CPU set is empty or malformed")
-    if not state.get("governors") or set(state["governors"]) != {"performance"}:
-        raise RuntimeError("CPU governors are not all performance")
+    governors = state.get("governors") or []
+    if set(governors) != {"performance"}:
+        if rehearsal.governor_check_relaxed(governors):
+            sys.stderr.write(
+                "\n*** REHEARSAL NOTE (not evidence, not blocking): no "
+                "cpufreq governor is exposed on this host "
+                "(BENCHMARK_REHEARSAL=1) -- 00-check-host.sh's preflight "
+                "already relaxed the same check earlier in this run ***\n\n"
+            )
+        else:
+            raise RuntimeError("CPU governors are not all performance")
 
 
 def main() -> int:

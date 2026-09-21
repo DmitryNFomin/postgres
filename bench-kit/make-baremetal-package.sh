@@ -257,7 +257,30 @@ for name in "${WORKLOAD_FILES[@]}"; do
   cp "$SCRIPT_DIR/workloads/$name" "$STAGE/$PACKAGE_NAME/workloads/"
 done
 cp -a "$SCRIPT_DIR/crossover/." "$STAGE/$PACKAGE_NAME/crossover/"
+# A stray __pycache__/ (from running python3 -m py_compile, importing a
+# module directly, etc. in the dev checkout) would otherwise be copied by
+# the blanket cp -a above, get hashed into CROSSOVER-MANIFEST.sha256 below,
+# and then be refused by crossover/run.sh's own manifest-path-safety check
+# ("unsafe crossover manifest path: ./__pycache__/....pyc") on the
+# executor host -- found via the fake-binaries self-test after a
+# BENCHMARK_REHEARSAL isolation test happened to leave one behind.
+find "$STAGE/$PACKAGE_NAME/crossover" -name '__pycache__' -type d -prune -exec rm -rf -- {} +
+# crossover/run.sh refuses to run without crossover/CROSSOVER-MANIFEST.sha256
+# next to it (its own integrity gate, checked at run-benchmark.sh's
+# crossover phases on the target host) -- generate it here, the same way
+# crossover/make-package.sh generates it for its own separate distribution
+# tarball, since the copy above never carries one (it is not checked into
+# the dev checkout; a run-benchmark.sh crossover phase against an
+# un-packaged crossover/ directory has no manifest to check against).
+rm -f -- "$STAGE/$PACKAGE_NAME/crossover/CROSSOVER-MANIFEST.sha256"
+(
+  cd "$STAGE/$PACKAGE_NAME/crossover"
+  find . -type f ! -name CROSSOVER-MANIFEST.sha256 -print0 |
+    sort -z |
+    xargs -0 "${SHA256[@]}" >CROSSOVER-MANIFEST.sha256
+)
 cp -a "$SCRIPT_DIR/selftest-fakebin/." "$STAGE/$PACKAGE_NAME/selftest-fakebin/"
+find "$STAGE/$PACKAGE_NAME/selftest-fakebin" -name '__pycache__' -type d -prune -exec rm -rf -- {} +
 cp "$V11_ROOT/bench-kit/BAREMETAL-RUNBOOK-v11.md" "$STAGE/$PACKAGE_NAME/"
 
 MASTER_ARCHIVE="$STAGE/$PACKAGE_NAME/source/postgres-master.tar.gz"
@@ -362,6 +385,49 @@ chmod 755 \
   "$STAGE/$PACKAGE_NAME/sources_conf.py" \
   "$STAGE/$PACKAGE_NAME/self-test.py" \
   "$STAGE/$PACKAGE_NAME/run-benchmark.sh"
+
+# Run self-test.py against a disposable copy of the fully-staged package
+# content, BEFORE PACKAGE-MANIFEST.sha256 is generated over it, and record
+# the pass as PACKAGE-SELFTEST.json inside the staged package itself --
+# so that file, once generated, immediately becomes one more entry
+# PACKAGE-MANIFEST.sha256 covers below, tying the attestation to this
+# exact package's own already-verified integrity chain (no separate
+# manifest of its own, no way to copy it onto a different package).
+# run-benchmark.sh's BENCHMARK_REHEARSAL_SKIP_SELFTEST=1 (rehearsal-only,
+# never honoured in real mode) trusts this to skip re-running the ~26
+# minute nested fake-binaries self-test on every rehearsal attempt against
+# an unchanged package -- the skip is justified by this data, not by the
+# operator's say-so. self-test.py's own throwaway artifacts (results,
+# __pycache__, etc.) stay confined to the disposable copy and never touch
+# the staged package.
+SELFTEST_PRECHECK=$(mktemp -d)
+cp -a "$STAGE/$PACKAGE_NAME" "$SELFTEST_PRECHECK/$PACKAGE_NAME"
+(
+  cd "$SELFTEST_PRECHECK/$PACKAGE_NAME"
+  PYTHONDONTWRITEBYTECODE=1 python3 ./self-test.py
+)
+rm -rf -- "$SELFTEST_PRECHECK"
+python3 - "$STAGE/$PACKAGE_NAME/PACKAGE-SELFTEST.json" <<'PY'
+import datetime
+import json
+import platform
+import sys
+
+out = sys.argv[1]
+data = {
+    "passed": True,
+    "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "packaging_host": platform.node(),
+    "note": (
+        "self-test.py ran against this exact staged package content "
+        "before PACKAGE-MANIFEST.sha256 was generated over it. See "
+        "BENCHMARK_REHEARSAL_SKIP_SELFTEST in BAREMETAL-RUNBOOK-v11.md."
+    ),
+}
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
 
 (
   cd "$STAGE/$PACKAGE_NAME"
