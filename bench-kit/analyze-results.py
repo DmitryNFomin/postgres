@@ -469,10 +469,12 @@ def verify_early_aa(results_dir: Path, protocol: dict, rehearsal: bool) -> None:
             "early A/A gate ran on the wrong workload")
 
 
-def verify_runtime_evidence(results_dir: Path, rows: list, protocol: dict) -> dict:
+def verify_runtime_evidence(results_dir: Path, rows: list, protocol: dict,
+                            rehearsal: bool) -> dict:
     by_index = {int(row["run_index"]): row for row in rows}
     max_capacity = 0.0
     saturated = []
+    w3_rehearsal_failures = []
     for index, row in by_index.items():
         server_log = results_dir / row["server_log"]
         require(server_log.is_file(), f"missing server log for run {index}")
@@ -538,8 +540,22 @@ def verify_runtime_evidence(results_dir: Path, rows: list, protocol: dict) -> di
             recomputed = analyze_file(raw_path, float(qualification["snapshot_seconds"]))
             require(evidence_equal(qualification, recomputed),
                     f"W3 summary does not match raw evidence for run {index}")
-            require(qualification.get("passed") is True,
-                    f"W3 qualification failed for run {index}")
+            if qualification.get("passed") is not True:
+                # REPORTED, not enforced, under BENCHMARK_REHEARSAL=1 (same
+                # rule 02-run-matrix.sh's own W3 gate already applies at
+                # smoke/full-matrix time -- this is the analysis-time
+                # re-check of the same evidence, so it must not be
+                # stricter than the run that produced it): require()'s
+                # condition is `rehearsal` itself, so real mode (rehearsal
+                # False) still raises here exactly as before, unchanged
+                # and fail-closed, while a rehearsal only records which
+                # run failed, and against which threshold, for the report.
+                require(rehearsal, f"W3 qualification failed for run {index}")
+                w3_rehearsal_failures.append({
+                    "run_index": index,
+                    "config": row["config"],
+                    **qualification,
+                })
 
     for name in ("baseline-a", "baseline-b", "patched", "control"):
         path = results_dir / "pg-test-timing" / f"{name}.txt"
@@ -549,6 +565,7 @@ def verify_runtime_evidence(results_dir: Path, rows: list, protocol: dict) -> di
     return {
         "max_pgbench_thread_capacity_fraction": max_capacity,
         "cells_at_or_above_90_percent_client_capacity": len(saturated),
+        "w3_qualification_rehearsal_failures": w3_rehearsal_failures,
     }
 
 
@@ -657,16 +674,46 @@ def render_markdown(report: dict) -> str:
             "**REHEARSAL, NOT EVIDENCE.** This run was produced with "
             "`BENCHMARK_REHEARSAL=1` set, which relaxes a handful of "
             "checks that a VM can never satisfy (core/RAM floors, cpufreq "
-            "governor exposure, dedicated-bare-metal detection) so the "
-            "real launcher can be rehearsed end to end against real "
-            "PostgreSQL builds before trusting it on real hardware. "
-            "Every other check -- mode proofs, hashes, CPU-affinity "
-            "disjointness, statistics -- ran unrelaxed against this "
-            "host's real numbers below, but those numbers describe a "
-            "shared, virtualized, resource-constrained host and must "
-            "not be cited as performance evidence for the patch.",
+            "governor exposure, dedicated-bare-metal detection, and W3's "
+            "own qualification gate -- see below) so the real launcher "
+            "can be rehearsed end to end against real PostgreSQL builds "
+            "before trusting it on real hardware. Every other check -- "
+            "mode proofs, hashes, CPU-affinity disjointness, statistics "
+            "-- ran unrelaxed against this host's real numbers below, but "
+            "those numbers describe a shared, virtualized, "
+            "resource-constrained host and must not be cited as "
+            "performance evidence for the patch.",
             "",
         ])
+        w3_failures = report.get("client_load", {}).get(
+            "w3_qualification_rehearsal_failures", [])
+        if w3_failures:
+            lines.extend([
+                "W3 qualification (a short, heavily contended ProcArrayLock "
+                "storm) failed its own thresholds on "
+                f"{len(w3_failures)} of this rehearsal's W3 run(s); "
+                "REPORTED here, not enforced, since a rehearsal VM/emulation "
+                "may simply be unable to drive the transaction rate W3's "
+                "thresholds were calibrated against, and this v11 series' "
+                "own deferred accounting can legitimately LOWER "
+                "`lwlock_calls_per_second` even on real hardware (a "
+                "shorter critical-section hold time lets more acquisitions "
+                "succeed uncontended, so fewer of them wait at all -- see "
+                "DECISION-deferred-accounting.md):",
+                "",
+            ])
+            for failure in w3_failures:
+                failed_checks = ", ".join(
+                    name for name, ok in failure.get("checks", {}).items()
+                    if not ok
+                )
+                lines.append(
+                    f"- run {failure['run_index']} (config={failure['config']}): "
+                    f"failed [{failed_checks}]; lwlock_calls_per_second="
+                    f"{failure['lwlock_calls_per_second']:.1f} vs threshold "
+                    f"{failure['thresholds']['min_lwlock_calls_per_second']}"
+                )
+            lines.append("")
     lines.extend([
         "Evidence completeness and integrity: **PASS**",
         "",
@@ -821,7 +868,7 @@ def main() -> int:
         verify_completion(results_dir, rows)
         verify_progress(results_dir, rows)
         verify_early_aa(results_dir, protocol, rehearsal)
-        client_load = verify_runtime_evidence(results_dir, rows, protocol)
+        client_load = verify_runtime_evidence(results_dir, rows, protocol, rehearsal)
         statistics_report = statistical_analysis(rows, protocol)
         diagnostics = block_diagnostics(rows, protocol)
 
@@ -850,6 +897,17 @@ def main() -> int:
         print(f"verification: PASS ({len(rows)} complete cells)")
         if report["benchmark_rehearsal"]:
             print("verification: REHEARSAL, NOT EVIDENCE (BENCHMARK_REHEARSAL=1)")
+            w3_failures = client_load.get("w3_qualification_rehearsal_failures", [])
+            for failure in w3_failures:
+                print(
+                    "verification: REHEARSAL NOTE: W3 qualification failed "
+                    f"for run {failure['run_index']} (config={failure['config']}); "
+                    f"lwlock_calls_per_second={failure['lwlock_calls_per_second']:.1f} "
+                    f"vs threshold {failure['thresholds']['min_lwlock_calls_per_second']} "
+                    "-- reported, not enforced; see client_load."
+                    "w3_qualification_rehearsal_failures in the JSON report "
+                    "for every measured value"
+                )
         print(f"analysis JSON: {output_json}")
         print(f"analysis report: {output_md}")
         return 0

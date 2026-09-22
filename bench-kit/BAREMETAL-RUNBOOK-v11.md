@@ -325,6 +325,54 @@ durations) stays at its real value, with two exceptions:
   hand -- seven W1 cells (one per configuration) would have added
   roughly six hours. `SMOKE_PROFILE`'s `w1_iterations` (1e5 real) was
   never a problem and is unchanged.
+- W3's own qualification gate (`w3_qualification.py`, checking that the
+  cell actually produced a short, heavily contended ProcArrayLock storm
+  -- `lwlock_calls_per_second` and six other thresholds) is REPORTED, not
+  enforced, under `BENCHMARK_REHEARSAL=1`, at BOTH points that check it.
+  `w3_qualification.py` itself is never made lenient and its exit status
+  is unchanged at either point; only the caller's reaction to a failing
+  exit status differs by mode:
+  - `02-run-matrix.sh`, live, right after each W3 cell: real mode still
+    `die()`s the run, exactly as before; rehearsal instead logs one
+    REHEARSAL NOTE per measured value against its threshold (parsed
+    straight out of the qualification JSON, which `w3_qualification.py`
+    writes before checking pass/fail either way) and the matrix
+    continues.
+  - `analyze-results.py`'s `verify_runtime_evidence()`, at
+    `smoke-verification`/`full-verification` time, re-checking the same
+    retained evidence: real mode still raises exactly as before
+    (`require(rehearsal, ...)`, so a real, non-rehearsal run gets
+    `rehearsal == False` and the same failure it always did); rehearsal
+    instead collects every failing run into
+    `client_load.w3_qualification_rehearsal_failures` in `analysis.json`,
+    prints one REHEARSAL NOTE per failing run to the console, and adds a
+    section to `analysis.md` listing each one's failed checks and its
+    `lwlock_calls_per_second` against the threshold -- this is the gate
+    that would otherwise turn a smoke phase that completed all 35/35
+    cells (already past the first, live gate) into a failed rehearsal at
+    the verification step right after, which is exactly what happened
+    before this fix.
+
+  Found live: two independent fresh
+  rehearsal attempts on a QEMU x86_64-on-Apple-Silicon VM (effective
+  clock speed ~1 GHz per `lscpu`) both failed only
+  `lwlock_calls_per_second` (564 and 355 calls/s against a 1000 floor;
+  every other check -- `lwlock_fraction`, `procarray_fraction`,
+  `io_fraction`, `histogram_coverage`, `p50`, `p95` -- passed both times),
+  the second time with the host otherwise idle, so this is a genuine
+  emulation throughput ceiling, not host contention or flakiness. Two
+  things can each independently push this number down without saying
+  anything about the module under test: an emulated/VM host simply
+  cannot drive as many transactions per second as the throughput W3's
+  threshold was calibrated against, and -- on real hardware too, not
+  only under emulation -- this v11 series' own deferred accounting
+  (see DECISION-deferred-accounting.md) can legitimately LOWER
+  `lwlock_calls_per_second` by shortening ProcArrayLock's hold time, since
+  a shorter hold time lets more acquisitions succeed uncontended and so
+  never generate a wait at all. A rehearsal run's own recorded W3
+  qualification numbers (`smoke-results/w3-qualification/cell-<N>.json`)
+  should still be read and sanity-checked against past runs on the same
+  VM, just not treated as a pass/fail gate the way real-mode evidence is.
 
 Independently of both of the above, every matrix cell (`run_cell()` in
 `02-run-matrix.sh`, wrapping server start through server stop) now has a

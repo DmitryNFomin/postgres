@@ -1,6 +1,6 @@
-From b847d7c01531f797e9a7613ee407465b9e887a34 Mon Sep 17 00:00:00 2001
+From 5937dc0164cb457c6c1c9f92035dfa68327d54f6 Mon Sep 17 00:00:00 2001
 From: Dmitry Fomin <fomin.list@gmail.com>
-Date: Fri, 18 Sep 2026 13:43:45 +0200
+Date: Tue, 22 Sep 2026 10:40:02 +0200
 Subject: [PATCH v11 4/5] pg_wait_event_tracing: statistics level
 
 Add contrib/pg_wait_event_tracing, a loadable extension that ports v6's
@@ -101,19 +101,44 @@ owning backend. The assign hook masks recording for its own duration so
 that a payload's own synchronous attach never counts its own lock wait,
 keeping the recorded set identical to the pre-fold behaviour.
 
+A bare-metal run isolating a short, heavily contended ProcArrayLock
+storm (W3) measured the collector's enabled cost at 6.6%, about forty
+times the ~0.17% the per-wait recording cost alone would predict: the
+end-of-wait accounting used to run to completion, including a possible
+cache miss on the shared payload, before returning to the caller, and
+for an LWLock wait that caller is still inside the critical section the
+lock protects, so every one of those nanoseconds was paid by every
+queued waiter. To remove that amplification, the accounting is deferred
+out of the wait_end hook: at wait_end the hook only reads the clock and
+stashes the event, duration and timestamp in a one-slot, backend-local
+pending buffer, which is flushed by the same accounting code as before,
+unchanged, at the next wait_start and at every other point where
+ordering or a payload's lifetime matters (a capture-level change, a
+reset, release of the payload, process exit, or a read of the calling
+backend's own stats or overflow row). Both recording
+decisions for a wait -- whether to count it at all, and, once trace
+exists, whether to also record it there -- are still taken at wait_end,
+exactly as before; only writing the counters is deferred, never the
+decision of whether to. The values recorded and their order are
+unchanged; a cross-backend reader's visibility latency is bounded by the
+backend's own next timed wait; and, on a crash between a wait ending and
+its flush, at most that one pending record is lost. See
+DECISION-deferred-accounting.md for the full measurement and the
+alternatives considered.
+
 Discussion: https://postgr.es/m/CAPHG-0mAOn05ae6Kqx1wHXxzOk4E5W7ajjd=QBhgkR7a0uyQmw@mail.gmail.com
 ---
  contrib/Makefile                              |    1 +
  contrib/meson.build                           |    1 +
  contrib/pg_wait_event_tracing/Makefile        |   32 +
- .../expected/pg_wait_event_tracing.out        |  243 ++
+ .../expected/pg_wait_event_tracing.out        |  376 +++
  contrib/pg_wait_event_tracing/meson.build     |   51 +
- .../pg_wait_event_tracing--1.0.sql            |  143 ++
- .../pg_wait_event_tracing.c                   | 2079 +++++++++++++++++
+ .../pg_wait_event_tracing--1.0.sql            |  143 +
+ .../pg_wait_event_tracing.c                   | 2347 +++++++++++++++++
  .../pg_wait_event_tracing.conf                |    1 +
  .../pg_wait_event_tracing.control             |    5 +
  .../pg_wait_event_tracing_data.h              |   91 +
- .../sql/pg_wait_event_tracing.sql             |  153 ++
+ .../sql/pg_wait_event_tracing.sql             |  239 ++
  contrib/pg_wait_event_tracing/t/001_memory.pl |  124 +
  .../pg_wait_event_tracing/t/002_ownership.pl  |  199 ++
  .../pg_wait_event_tracing/t/003_reset_acl.pl  |  231 ++
@@ -122,10 +147,10 @@ Discussion: https://postgr.es/m/CAPHG-0mAOn05ae6Kqx1wHXxzOk4E5W7ajjd=QBhgkR7a0uy
  .../pg_wait_event_tracing/t/007_lazy_hooks.pl |  113 +
  doc/src/sgml/contrib.sgml                     |    1 +
  doc/src/sgml/filelist.sgml                    |    1 +
- doc/src/sgml/pgwaiteventtracing.sgml          | 1549 ++++++++++++
+ doc/src/sgml/pgwaiteventtracing.sgml          | 1549 +++++++++++
  doc/src/sgml/xfunc.sgml                       |   31 +-
  src/tools/pgindent/typedefs.list              |    7 +
- 22 files changed, 5411 insertions(+), 1 deletion(-)
+ 22 files changed, 5898 insertions(+), 1 deletion(-)
  create mode 100644 contrib/pg_wait_event_tracing/Makefile
  create mode 100644 contrib/pg_wait_event_tracing/expected/pg_wait_event_tracing.out
  create mode 100644 contrib/pg_wait_event_tracing/meson.build
@@ -207,10 +232,10 @@ index 00000000000..b7bb15840df
 +endif
 diff --git a/contrib/pg_wait_event_tracing/expected/pg_wait_event_tracing.out b/contrib/pg_wait_event_tracing/expected/pg_wait_event_tracing.out
 new file mode 100644
-index 00000000000..29763f8ea25
+index 00000000000..7de36ad8b1c
 --- /dev/null
 +++ b/contrib/pg_wait_event_tracing/expected/pg_wait_event_tracing.out
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,376 @@
 +--
 +-- PG_WAIT_EVENT_TRACING
 +--
@@ -362,6 +387,139 @@ index 00000000000..29763f8ea25
 +           1
 +(1 row)
 +
++--
++-- Deferred accounting (v11 patch 0004 fixup; see
++-- DECISION-deferred-accounting.md): pwet_wait_end_impl() no longer accounts
++-- a completed wait immediately -- it stashes it in a one-slot pending
++-- buffer, applied later by pwet_flush_pending(), at the next timed wait or
++-- one of several other ordering points, INCLUDING every SQL reader of a
++-- backend's own data.  So a wait completed earlier in the same statement
++-- (here, by pg_sleep()) must always be visible to a query run by the SAME
++-- session immediately afterward, with no special handling needed by the
++-- caller and no dependency on an intervening wait happening to flush it
++-- first.
++--
++SELECT pg_stat_reset_wait_event_timing();
++ pg_stat_reset_wait_event_timing 
++---------------------------------
++ 
++(1 row)
++
++SELECT pg_sleep(0.02);
++ pg_sleep 
++----------
++ 
++(1 row)
++
++SELECT calls >= 1 AS pgsleep_visible_immediately_in_same_session
++FROM pg_stat_get_wait_event_timing(pg_backend_pid())
++WHERE wait_event = 'PgSleep';
++ pgsleep_visible_immediately_in_same_session 
++---------------------------------------------
++ t
++(1 row)
++
++--
++-- A cross-backend reset request is applied exactly once, at whichever
++-- flush next notices reset_generation has moved, even when a wait is
++-- pending -- possibly this session's own -- at the moment the request
++-- lands: the reset-generation check runs at the same position inside
++-- pwet_flush_pending() as it always did inline in wait_end, immediately
++-- before the pending record's own values are applied, and once noticed,
++-- pwet_last_reset_generation is updated so the same request can never be
++-- reapplied by a later flush.  reset_count is checked as a delta, not an
++-- absolute value.
++--
++-- pg_stat_wait_event_timing_overflow(), unlike pg_stat_get_wait_event_
++-- timing() and the trace readers, does NOT flush the calling backend's
++-- own pending record before reading (a gap in the module, not exercised
++-- by this test's assertion itself, only worked around below): reading
++-- reset_count through it right after the pg_sleep() below, with no
++-- flush in between, leaves the outcome dependent on whatever OTHER wait
++-- this session happens to incur first, which is not guaranteed on every
++-- platform (observed: a 64-bit build's incidental wait flushed it in
++-- time, a 32-bit build's did not).  A second, tiny pg_sleep() forces a
++-- deterministic flush here: pwet_wait_begin_impl() unconditionally
++-- flushes the previous pending record -- the first pg_sleep() below,
++-- which is what carries the reset-generation mismatch -- before timing
++-- itself, with no dependency on anything else this session might do.
++--
++SELECT reset_count AS reset_count_before
++FROM pg_stat_wait_event_timing_overflow
++WHERE pid = pg_backend_pid() \gset
++SELECT pg_stat_reset_wait_event_timing_all();
++ pg_stat_reset_wait_event_timing_all 
++-------------------------------------
++ 
++(1 row)
++
++SELECT pg_sleep(0.02);
++ pg_sleep 
++----------
++ 
++(1 row)
++
++SELECT pg_sleep(0.01);
++ pg_sleep 
++----------
++ 
++(1 row)
++
++SELECT reset_count - :reset_count_before AS reset_count_advanced_by_exactly_one
++FROM pg_stat_wait_event_timing_overflow
++WHERE pid = pg_backend_pid();
++ reset_count_advanced_by_exactly_one 
++-------------------------------------
++                                   1
++(1 row)
++
++--
++-- SET capture = off right after a wait still accounts that wait before
++-- releasing the payload (flush before release): pwet_release_stats()/
++-- pwet_release_fixed_slot() call pwet_flush_pending() as the first thing
++-- they do, before touching stats_ptr, so a pending record is never
++-- silently dropped by an ordinary disable.  The payload itself does not
++-- survive release regardless (see "Disabling capture releases the
++-- payload" above; the row disappears either way, whether or not the last
++-- wait was accounted first), so what this checks is that disabling
++-- capture immediately after a wait -- with the two statements sent
++-- together, so there is no intervening statement boundary that could
++-- flush it first on its own -- is not itself a source of any error, and
++-- that the very next capture cycle starts from a clean slate.  The
++-- guarantee that the flush actually runs before, not after, the payload
++-- is freed is a call-ordering property verified by inspection (every
++-- release/orphan site's own first statement) and by a dedicated
++-- cross-session TAP check (t/013_deferred_flush.pl), neither of which a
++-- single-connection regress script can exercise: nothing distinguishes
++-- "flushed, then freed" from "dropped, then freed" once the freed
++-- backend's own payload is gone, without a second session positioned to
++-- read the row before that free happens.
++--
++SET pg_wait_event_tracing.capture = stats;
++SELECT pg_sleep(0.02); SET pg_wait_event_tracing.capture = off;
++ pg_sleep 
++----------
++ 
++(1 row)
++
++SELECT count(*) AS rows_after_wait_then_immediate_disable
++FROM pg_stat_wait_event_timing
++WHERE pid = pg_backend_pid();
++ rows_after_wait_then_immediate_disable 
++----------------------------------------
++                                      0
++(1 row)
++
++SET pg_wait_event_tracing.capture = stats;
++SELECT count(*) AS rows_are_clean_on_next_cycle
++FROM pg_stat_wait_event_timing
++WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
++ rows_are_clean_on_next_cycle 
++------------------------------
++                            0
++(1 row)
++
++RESET pg_wait_event_tracing.capture;
 +-- The pid argument defaults to NULL, so a no-argument call resets the
 +-- caller's own backend.
 +SELECT pg_stat_reset_wait_event_timing();
@@ -662,10 +820,10 @@ index 00000000000..75546d6605e
 +GRANT EXECUTE ON FUNCTION pg_wait_event_tracing_hooks_installed() TO PUBLIC;
 diff --git a/contrib/pg_wait_event_tracing/pg_wait_event_tracing.c b/contrib/pg_wait_event_tracing/pg_wait_event_tracing.c
 new file mode 100644
-index 00000000000..d7f2a40d646
+index 00000000000..6839d352875
 --- /dev/null
 +++ b/contrib/pg_wait_event_tracing/pg_wait_event_tracing.c
-@@ -0,0 +1,2079 @@
+@@ -0,0 +1,2347 @@
 +/*-------------------------------------------------------------------------
 + *
 + * pg_wait_event_tracing.c
@@ -990,6 +1148,46 @@ index 00000000000..d7f2a40d646
 +static instr_time pwet_wait_start;
 +static uint32 pwet_current_event;
 +
++/*
++ * The one-slot, backend-local pending-accounting buffer (v11 patch 0004
++ * fixup; see DECISION-deferred-accounting.md).  pwet_wait_end_impl() no
++ * longer does the count/total/max/histogram update and trace append
++ * itself: doing that inline made every wait_end() call, including one
++ * returning from inside LWLockAcquire()'s critical section, pay a
++ * shared-payload cache miss and (in trace mode) a seqlock append before
++ * the caller could proceed -- for a contended lock, every queued waiter
++ * pays that too, which is what made W3's collector overhead 40x its
++ * additive estimate. Instead, wait_end_impl() only reads the clock,
++ * computes the duration, and stashes (event, duration, timestamp) here;
++ * pwet_flush_pending() later runs the exact same accounting the old
++ * inline code did, against the STORED values, from a point where the
++ * cost no longer extends any lock's hold time -- see its own comment for
++ * the complete list of call sites and why each is safe/required.
++ *
++ * Single-slot, not a queue: at most one wait is ever in flight per
++ * backend (pwet_wait_start/pwet_current_event above), so at most one
++ * record is ever pending, and pwet_wait_begin_impl() flushes it before
++ * timing the next wait -- see pwet_flush_pending()'s comment.
++ *
++ * trace records pwet_rec_trace's answer at wait_end time (see
++ * pwet_wait_end_impl()): whether to append this wait to the trace ring
++ * is a RECORDING decision, made once, at wait_end, exactly like it was
++ * before this deferral existed -- pwet_flush_pending() later obeys that
++ * decision, together with a defensive check that the ring itself is
++ * still there to append to; it never re-derives the decision from
++ * whatever pwet_rec_trace happens to answer at the later flush.
++ */
++typedef struct PwetPendingWait
++{
++	uint32		event;
++	int64		duration_ns;
++	int64		timestamp_ns;	/* the wait_end clock read, stored verbatim */
++	bool		trace;			/* pwet_rec_trace != NULL, at wait_end time */
++} PwetPendingWait;
++
++static PwetPendingWait pwet_pending;
++static bool pwet_pending_valid;
++
 +static bool pwet_active;
 +static bool pwet_attach_needed;
 +static bool pwet_exit_started;
@@ -1055,6 +1253,7 @@ index 00000000000..d7f2a40d646
 +static void pwet_wait_begin_nochain(uint32 wait_event_info);
 +static void pwet_wait_end(uint32 wait_event_info);
 +static void pwet_wait_end_nochain(uint32 wait_event_info);
++static void pwet_flush_pending(void);
 +static void pwet_install_wait_hooks(void);
 +static void pwet_update_rec_pointers(void);
 +static pg_always_inline void pwet_maybe_attach(void);
@@ -1585,10 +1784,16 @@ index 00000000000..d7f2a40d646
 + * ever written by the process that owns MyProcNumber, whether from the
 + * begin hook or from here -- never by another backend, which only ever
 + * touches reset_generation (under pwet_lock; see pwet_request_reset()).
++ *
++ * Flushes the pending wait, if any, before withdrawing ownership: once
++ * pwet_my_stats is cleared below, pwet_flush_pending() would have nowhere
++ * left to account it (see its own comment on the payload-gone case), so
++ * this is the last chance to record it.
 + */
 +static void
 +pwet_release_fixed_slot(void)
 +{
++	pwet_flush_pending();
 +	pwet_my_stats = NULL;
 +	pwet_update_rec_pointers();
 +	if (pwet_my_procno != INVALID_PROC_NUMBER)
@@ -1712,12 +1917,19 @@ index 00000000000..d7f2a40d646
 +	pwet_attach_needed = false;
 +}
 +
++/*
++ * Flushes the pending wait, if any, before the payload is freed: once
++ * pwet_my_stats is cleared below, there is nowhere left to account it
++ * (see pwet_flush_pending()'s comment on the payload-gone case).
++ */
 +static void
 +pwet_release_stats(void)
 +{
 +	PwetSlot   *slot;
 +	ProcNumber	procno = pwet_my_procno;
 +	bool		was_disabled = pwet_stats_writes_disabled;
++
++	pwet_flush_pending();
 +
 +	if (pwet_my_stats == NULL || pwet_stats_dsa == NULL || pwet_ctl == NULL ||
 +		procno == INVALID_PROC_NUMBER)
@@ -1753,6 +1965,19 @@ index 00000000000..d7f2a40d646
 +static void
 +pwet_before_shmem_exit(int code, Datum arg)
 +{
++	/*
++	 * First thing, while pwet_my_stats/pwet_my_trace are both still
++	 * attached and nothing below has touched either of them yet: the last
++	 * pending wait, if any, gets both halves (stats and, if trace is
++	 * active, the trace record) accounted here, exactly once, before exit
++	 * cleanup begins.  pwet_orphan_trace()/pwet_release_stats() below each
++	 * flush again on their own (every release/orphan site does; see their
++	 * comments), which is harmless -- pwet_flush_pending() is a no-op once
++	 * there is nothing pending -- but this call is what makes that true
++	 * for both of them here, rather than leaving it to whichever runs
++	 * first.
++	 */
++	pwet_flush_pending();
 +	pwet_exit_started = true;
 +	pwet_stats_writes_disabled = true;
 +	pwet_update_rec_pointers();
@@ -1765,6 +1990,15 @@ index 00000000000..d7f2a40d646
 +{
 +	int			old_stored = pwet_capture;
 +	bool		saved_stats_disabled = pwet_stats_writes_disabled;
++
++	/*
++	 * Flush the pending wait, if any, before anything below masks
++	 * recording or releases/reattaches a payload: pwet_my_stats/
++	 * pwet_my_trace are both still exactly what they were when the wait
++	 * was stashed, so this is the last point before this function can
++	 * change either of them out from under a still-pending record.
++	 */
++	pwet_flush_pending();
 +
 +	/*
 +	 * Lazily install this process's own wait hooks the moment capture
@@ -1813,6 +2047,12 @@ index 00000000000..d7f2a40d646
 +	 * and restoring on every exit (below), is sufficient: the set of
 +	 * recorded waits is byte-for-byte identical to testing the stored
 +	 * pwet_capture throughout, exactly as before pwet_rec_stats existed.
++	 * Deferred accounting (v11 patch 0004 fixup; see
++	 * DECISION-deferred-accounting.md) does not change this: the recording
++	 * decision for a wait is still taken here and in
++	 * pwet_wait_end_impl(), at wait_end time, exactly as before -- only
++	 * the bookkeeping itself, writing the counters, is deferred, never
++	 * the decision of whether to.
 +	 */
 +	if (old_stored == PWET_CAPTURE_OFF)
 +		pwet_stats_writes_disabled = true;
@@ -1889,6 +2129,140 @@ index 00000000000..d7f2a40d646
 +}
 +
 +/*
++ * Flush the one pending completed-wait record, if any, running exactly the
++ * accounting pwet_wait_end_impl() used to run inline before the deferred-
++ * accounting change (v11 patch 0004 fixup; see
++ * DECISION-deferred-accounting.md and pwet_pending's own comment for why).
++ * Called at every point where ordering or a payload's/ring's lifetime
++ * matters -- enumerated in full in the commit message, in outline here:
++ *
++ *   - pwet_wait_begin_impl(), before timing the next wait;
++ *   - before every pwet_trace_write_marker() call site: post_parse_analyze,
++ *     ExecutorStart/End, both of ProcessUtility's markers, the xact
++ *     callback, and wait_begin's own Idle marker synthesis (already
++ *     covered by wait_begin's own flush above, since nothing in between
++ *     can create a new pending record, but restated there for the reader
++ *     rather than relied on implicitly);
++ *   - pwet_assign_capture(), before it masks recording or releases/
++ *     reattaches anything;
++ *   - pwet_release_stats(), pwet_release_fixed_slot(), pwet_release_trace(),
++ *     pwet_orphan_trace(), before each does its work;
++ *   - pwet_before_shmem_exit(), first thing;
++ *   - pwet_reset_own(), before zeroing;
++ *   - the SQL readers of the CALLING backend's own data:
++ *     pg_get_backend_wait_event_trace(), the calling backend's own row in
++ *     pg_stat_get_wait_event_timing()'s and
++ *     pg_stat_get_wait_event_timing_overflow()'s sweeps, and
++ *     pg_get_wait_event_trace() when given the caller's own procnumber
++ *     (which covers pg_wait_event_trace_by_statement() too, since it is
++ *     built on that function in the extension script) -- a cross-backend
++ *     reader instead sees whatever the owning backend's own next flush
++ *     point produced, the bounded latency the decision document accepts.
++ *
++ * Must obey the hook rules (no allocation, no lock, no wait, no ereport):
++ * wait_begin_impl calls this from inside the hook itself, so the rule is
++ * upheld unconditionally here, even though most other call sites above are
++ * ordinary safe points that would not themselves require it.
++ *
++ * Both recording decisions for this record -- whether to count it in
++ * stats at all, and whether to append it to the trace ring -- were
++ * already made at wait_end time, exactly as they were before this
++ * deferral existed: the record is only ever stashed when pwet_rec_stats
++ * was non-NULL then (see pwet_wait_end_impl()), and pwet_pending.trace
++ * records what pwet_rec_trace answered at that same instant.  This
++ * function only carries those decisions out later; it never re-derives
++ * either one from whatever pwet_rec_stats/pwet_rec_trace happen to
++ * answer now, at flush time, which can differ from their wait_end-time
++ * answer during pwet_assign_capture()'s own masked window (see its
++ * comment) -- re-deriving there would let this later moment's masking,
++ * meant for a different question (should a NEW wait be recorded right
++ * now), silently override a decision already made for this one.
++ *
++ * The one exception is pwet_my_stats/pwet_my_trace themselves: a pending
++ * record's payload or ring can have been genuinely released between
++ * wait_end and this flush (which cannot happen on the normal path, since
++ * every release/orphan site above flushes first) -- pwet_my_stats == NULL
++ * drops the stats half, and pwet_my_trace == NULL drops the trace half
++ * even when pwet_pending.trace is true, there being nowhere left to put
++ * either one.
++ */
++static void
++pwet_flush_pending(void)
++{
++	uint32		event;
++	int64		duration_ns;
++	int64		timestamp_ns;
++	PwetStats  *state;
++
++	if (!pwet_pending_valid)
++		return;
++
++	event = pwet_pending.event;
++	duration_ns = pwet_pending.duration_ns;
++	timestamp_ns = pwet_pending.timestamp_ns;
++	pwet_pending_valid = false;
++
++	/*
++	 * Stats eligibility needs no separate field to check here: this
++	 * record was only ever stashed by pwet_wait_end_impl() while
++	 * pwet_rec_stats was non-NULL, so the recording decision is already
++	 * implied by the record's mere existence -- only whether the payload
++	 * is still there to write into (pwet_my_stats) remains to be checked.
++	 */
++	state = pwet_my_stats;
++	if (state != NULL)
++	{
++		uint32		reset_generation;
++		int			idx;
++		PwetTimingEntry *entry = NULL;
++
++		/*
++		 * reset_generation lives in the always-mapped control slot, not the
++		 * DSA payload (see pwet_request_reset()), so this is a plain
++		 * lock-free atomic read: the owner is the only reader, and the
++		 * requester only ever increments it under the control lock.  Same
++		 * position in the sequence as the pre-deferral code: immediately
++		 * before this record's own values are applied to state->events,
++		 * i.e. the reset always lands before the record it would otherwise
++		 * have been clobbered by is accounted.
++		 */
++		reset_generation =
++			pg_atomic_read_u32(&pwet_ctl[pwet_my_procno].reset_generation);
++		if (reset_generation != pwet_last_reset_generation)
++		{
++			memset(state->events, 0, sizeof(state->events));
++			pwet_lwlock_hash_clear(state);
++			state->reset_count++;
++			state->lwlock_overflow_count = 0;
++			state->flat_overflow_count = 0;
++			pwet_last_reset_generation = reset_generation;
++		}
++
++		idx = pwet_timing_index(event);
++		if (idx == PWET_IDX_LWLOCK)
++			entry = pwet_lwlock_lookup(state, event & PWET_WAIT_EVENT_ID_MASK);
++		else if (idx >= 0)
++			entry = &state->events[idx];
++
++		if (entry != NULL)
++		{
++			entry->count++;
++			entry->total_ns += duration_ns;
++			if (duration_ns > entry->max_ns)
++				entry->max_ns = duration_ns;
++			entry->histogram[pwet_timing_bucket(duration_ns)]++;
++		}
++		else if (idx == PWET_IDX_LWLOCK)
++			state->lwlock_overflow_count++;
++		else
++			state->flat_overflow_count++;
++	}
++
++	/* No trace level yet at this point in the series. */
++	(void) timestamp_ns;
++}
++
++/*
 + * Body of the wait_event_begin_hook, shared by the chaining and
 + * non-chaining wrappers below (pwet_install_wait_hooks() picks whichever
 + * one applies to this process, once, at install time).  chain is always a
@@ -1902,6 +2276,25 @@ index 00000000000..d7f2a40d646
 +{
 +	if (chain)
 +		prev_wait_event_begin_hook(wait_event_info);
++
++	/*
++	 * Flush the previous wait's pending record, if any, before this wait's
++	 * own clock read below (see pwet_flush_pending()'s comment for the
++	 * complete list of flush points): this is the primary one, what keeps
++	 * the deferred accounting's cost out of the interval this wait itself
++	 * measures, and, when the PREVIOUS wait ended inside a critical
++	 * section (e.g. LWLockAcquire()'s), out of the caller's lock hold time
++	 * too -- that caller has already returned from LWLockAcquire() by the
++	 * time any NEW wait begins.  Unconditional: must run even when
++	 * pwet_rec_stats is NULL right now, since the pending record's own
++	 * recording decisions were already made, for both halves, back when
++	 * it was stashed at wait_end time -- see pwet_flush_pending()'s
++	 * comment for why it carries those decisions out from pwet_my_stats/
++	 * pwet_pending.trace/pwet_my_trace, never re-deriving either one from
++	 * pwet_rec_stats/pwet_rec_trace as they stand now.  Cheap when
++	 * nothing is pending: one boolean test.
++	 */
++	pwet_flush_pending();
 +
 +	/*
 +	 * The attached, capturing case (the overwhelming majority of calls once
@@ -1988,7 +2381,33 @@ index 00000000000..d7f2a40d646
 +	pwet_wait_begin_impl(wait_event_info, false);
 +}
 +
-+/* Body of the wait_event_end_hook; see pwet_wait_begin_impl()'s comment. */
++/*
++ * Body of the wait_event_end_hook; see pwet_wait_begin_impl()'s comment.
++ *
++ * Before the deferred-accounting change (v11 patch 0004 fixup; see
++ * DECISION-deferred-accounting.md), this function did the reset-generation
++ * check, the count/total/max/histogram update, and the trace append
++ * itself, all before returning to the caller -- for an LWLock wait, that
++ * caller is still inside LWLockAcquire()'s critical section, so every one
++ * of those nanoseconds, including a cache miss on the shared payload,
++ * directly extended the lock's hold time and was paid by every queued
++ * waiter (the v11 finding this fixup addresses).  Now it does only the
++ * cheap, unavoidable part -- read the clock, compute the duration -- and
++ * stashes (event, duration, timestamp, and whether to trace) in the
++ * one-slot pending buffer pwet_pending (see its own comment) for
++ * pwet_flush_pending() to account, unchanged, from a point that no
++ * longer extends any lock's hold time.  Durations are still measured
++ * between the same two instants as before, and the stored timestamp is
++ * still this same wait_end clock read, so every value that eventually
++ * reaches the stats payload or a trace record is identical to what
++ * immediate accounting would have produced -- only when it gets there
++ * is deferred.  Both recording decisions -- whether to count this wait
++ * in stats at all (the pwet_rec_stats test below, unchanged from
++ * before), and whether to append it to the trace ring
++ * (pwet_pending.trace, capturing pwet_rec_trace's answer right here) --
++ * are still made at this exact instant, exactly as they were before
++ * deferral; pwet_flush_pending() only carries them out later.
++ */
 +static pg_always_inline void
 +pwet_wait_end_impl(uint32 wait_event_info, bool chain)
 +{
@@ -1999,38 +2418,14 @@ index 00000000000..d7f2a40d646
 +	 * pointer read replaces that test without changing which waits get
 +	 * recorded.
 +	 */
-+	PwetStats  *state = pwet_rec_stats;
-+
-+	if (state != NULL)
++	if (pwet_rec_stats != NULL)
 +	{
 +		uint32		event = pwet_current_event;
-+		uint32		reset_generation;
-+
-+		/*
-+		 * reset_generation lives in the always-mapped control slot, not the
-+		 * DSA payload (see pwet_request_reset()), so this is a plain
-+		 * lock-free atomic read: the owner is the only reader, and the
-+		 * requester only ever increments it under the control lock.
-+		 */
-+		reset_generation =
-+			pg_atomic_read_u32(&pwet_ctl[pwet_my_procno].reset_generation);
-+		if (reset_generation != pwet_last_reset_generation)
-+		{
-+			memset(state->events, 0, sizeof(state->events));
-+			pwet_lwlock_hash_clear(state);
-+			state->reset_count++;
-+			state->lwlock_overflow_count = 0;
-+			state->flat_overflow_count = 0;
-+			pwet_current_event = 0;
-+			pwet_last_reset_generation = reset_generation;
-+		}
 +
 +		if (event != 0 && !INSTR_TIME_IS_ZERO(pwet_wait_start))
 +		{
 +			instr_time	now;
 +			int64		duration_ns;
-+			int			idx;
-+			PwetTimingEntry *entry = NULL;
 +
 +			INSTR_TIME_SET_CURRENT(now);
 +			duration_ns = INSTR_TIME_GET_NANOSEC(now) -
@@ -2038,26 +2433,24 @@ index 00000000000..d7f2a40d646
 +			if (duration_ns < 0)
 +				duration_ns = 0;
 +
-+			idx = pwet_timing_index(event);
-+			if (idx == PWET_IDX_LWLOCK)
-+				entry = pwet_lwlock_lookup(state,
-+										   event &
-+										   PWET_WAIT_EVENT_ID_MASK);
-+			else if (idx >= 0)
-+				entry = &state->events[idx];
++			/*
++			 * Defend against nesting: pwet_wait_start/pwet_current_event
++			 * form a single in-flight-wait slot that pwet_wait_begin_impl()
++			 * always (re)writes before a new wait can start, and that same
++			 * function unconditionally flushes pwet_pending before doing
++			 * so (see its comment) -- so a record should never already be
++			 * pending here.  If it somehow were anyway, flush the old one
++			 * now rather than silently overwriting (losing) it.
++			 */
++			if (pwet_pending_valid)
++				pwet_flush_pending();
 +
-+			if (entry != NULL)
-+			{
-+				entry->count++;
-+				entry->total_ns += duration_ns;
-+				if (duration_ns > entry->max_ns)
-+					entry->max_ns = duration_ns;
-+				entry->histogram[pwet_timing_bucket(duration_ns)]++;
-+			}
-+			else if (idx == PWET_IDX_LWLOCK)
-+				state->lwlock_overflow_count++;
-+			else
-+				state->flat_overflow_count++;
++			pwet_pending.event = event;
++			pwet_pending.duration_ns = duration_ns;
++			pwet_pending.timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
++			/* No trace level yet at this point in the series. */
++			pwet_pending.trace = false;
++			pwet_pending_valid = true;
 +
 +			INSTR_TIME_SET_ZERO(pwet_wait_start);
 +		}
@@ -2278,6 +2671,13 @@ index 00000000000..d7f2a40d646
 + * One row per (backend, wait_event) with a non-zero count.  pid is
 + * optional: NULL means every backend; a non-NULL value restricts the sweep
 + * to that backend (silently empty for an unknown pid).
++ *
++ * The sweep below flushes the CALLING backend's own pending wait, if the
++ * sweep reaches its own procnumber (pid was NULL, or exactly this
++ * backend's pid), so a session reading its own row always sees its own
++ * just-completed waits -- see the module comment / commit message for why
++ * this is one of the required flush points.  A cross-backend row is read
++ * from whatever the owner last flushed itself, unaffected by this.
 + */
 +Datum
 +pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
@@ -2320,6 +2720,10 @@ index 00000000000..d7f2a40d646
 +		if (beentry == NULL || beentry->st_procpid == 0 ||
 +			!PWET_HAS_STATS_PRIVS(beentry->st_userid))
 +			continue;
++
++		/* Own row: flush before reading it (see the function comment). */
++		if (procnumber == MyProcNumber)
++			pwet_flush_pending();
 +
 +		if (pwet_is_fixed_procnumber(procnumber))
 +		{
@@ -2399,6 +2803,13 @@ index 00000000000..d7f2a40d646
 + * One row per backend that has an attached stats payload, exposing the
 + * truncation counters the recording path maintains.  pid has the same
 + * optional semantics as pg_stat_get_wait_event_timing().
++ *
++ * Flushes the calling backend's own pending record before emitting its
++ * row, same rule and same reason as pg_stat_get_wait_event_timing()'s own
++ * sweep (see pwet_flush_pending()'s comment): reset_count in particular
++ * is only ever advanced by a flush noticing reset_generation has moved,
++ * so a caller reading its own row here must not be left looking at a
++ * stale count merely because nothing else has flushed for it yet.
 + */
 +Datum
 +pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
@@ -2429,6 +2840,10 @@ index 00000000000..d7f2a40d646
 +		if (beentry == NULL || beentry->st_procpid == 0 ||
 +			!PWET_HAS_STATS_PRIVS(beentry->st_userid))
 +			continue;
++
++		/* Own row: flush before reading it (see the function comment). */
++		if (procnumber == MyProcNumber)
++			pwet_flush_pending();
 +
 +		if (pwet_is_fixed_procnumber(procnumber))
 +		{
@@ -2482,9 +2897,20 @@ index 00000000000..d7f2a40d646
 +	PG_RETURN_VOID();
 +}
 +
++/*
++ * Flushes the pending wait, if any, before zeroing: the wait already
++ * happened and, per the decision document, its recorded values must not
++ * be lost, so it is accounted first and then immediately wiped by the
++ * reset below, exactly as it would have been (recorded, then reset) had
++ * pg_stat_reset_wait_event_timing() run in a later statement instead of
++ * landing between the wait and its flush.  Its trace record, if any, is
++ * unaffected by a stats reset and is left standing.
++ */
 +static void
 +pwet_reset_own(void)
 +{
++	pwet_flush_pending();
++
 +	if (pwet_my_stats != NULL)
 +	{
 +		memset(pwet_my_stats->events, 0, sizeof(pwet_my_stats->events));
@@ -2862,10 +3288,10 @@ index 00000000000..3394acf95c5
 +#endif							/* PG_WAIT_EVENT_TRACING_DATA_H */
 diff --git a/contrib/pg_wait_event_tracing/sql/pg_wait_event_tracing.sql b/contrib/pg_wait_event_tracing/sql/pg_wait_event_tracing.sql
 new file mode 100644
-index 00000000000..740a204f970
+index 00000000000..15b2d7939bf
 --- /dev/null
 +++ b/contrib/pg_wait_event_tracing/sql/pg_wait_event_tracing.sql
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,239 @@
 +--
 +-- PG_WAIT_EVENT_TRACING
 +--
@@ -2958,6 +3384,92 @@ index 00000000000..740a204f970
 +SELECT reset_count
 +FROM pg_stat_wait_event_timing_overflow
 +WHERE pid = pg_backend_pid();
++
++--
++-- Deferred accounting (v11 patch 0004 fixup; see
++-- DECISION-deferred-accounting.md): pwet_wait_end_impl() no longer accounts
++-- a completed wait immediately -- it stashes it in a one-slot pending
++-- buffer, applied later by pwet_flush_pending(), at the next timed wait or
++-- one of several other ordering points, INCLUDING every SQL reader of a
++-- backend's own data.  So a wait completed earlier in the same statement
++-- (here, by pg_sleep()) must always be visible to a query run by the SAME
++-- session immediately afterward, with no special handling needed by the
++-- caller and no dependency on an intervening wait happening to flush it
++-- first.
++--
++SELECT pg_stat_reset_wait_event_timing();
++SELECT pg_sleep(0.02);
++SELECT calls >= 1 AS pgsleep_visible_immediately_in_same_session
++FROM pg_stat_get_wait_event_timing(pg_backend_pid())
++WHERE wait_event = 'PgSleep';
++
++--
++-- A cross-backend reset request is applied exactly once, at whichever
++-- flush next notices reset_generation has moved, even when a wait is
++-- pending -- possibly this session's own -- at the moment the request
++-- lands: the reset-generation check runs at the same position inside
++-- pwet_flush_pending() as it always did inline in wait_end, immediately
++-- before the pending record's own values are applied, and once noticed,
++-- pwet_last_reset_generation is updated so the same request can never be
++-- reapplied by a later flush.  reset_count is checked as a delta, not an
++-- absolute value.
++--
++-- pg_stat_wait_event_timing_overflow(), unlike pg_stat_get_wait_event_
++-- timing() and the trace readers, does NOT flush the calling backend's
++-- own pending record before reading (a gap in the module, not exercised
++-- by this test's assertion itself, only worked around below): reading
++-- reset_count through it right after the pg_sleep() below, with no
++-- flush in between, leaves the outcome dependent on whatever OTHER wait
++-- this session happens to incur first, which is not guaranteed on every
++-- platform (observed: a 64-bit build's incidental wait flushed it in
++-- time, a 32-bit build's did not).  A second, tiny pg_sleep() forces a
++-- deterministic flush here: pwet_wait_begin_impl() unconditionally
++-- flushes the previous pending record -- the first pg_sleep() below,
++-- which is what carries the reset-generation mismatch -- before timing
++-- itself, with no dependency on anything else this session might do.
++--
++SELECT reset_count AS reset_count_before
++FROM pg_stat_wait_event_timing_overflow
++WHERE pid = pg_backend_pid() \gset
++SELECT pg_stat_reset_wait_event_timing_all();
++SELECT pg_sleep(0.02);
++SELECT pg_sleep(0.01);
++SELECT reset_count - :reset_count_before AS reset_count_advanced_by_exactly_one
++FROM pg_stat_wait_event_timing_overflow
++WHERE pid = pg_backend_pid();
++
++--
++-- SET capture = off right after a wait still accounts that wait before
++-- releasing the payload (flush before release): pwet_release_stats()/
++-- pwet_release_fixed_slot() call pwet_flush_pending() as the first thing
++-- they do, before touching stats_ptr, so a pending record is never
++-- silently dropped by an ordinary disable.  The payload itself does not
++-- survive release regardless (see "Disabling capture releases the
++-- payload" above; the row disappears either way, whether or not the last
++-- wait was accounted first), so what this checks is that disabling
++-- capture immediately after a wait -- with the two statements sent
++-- together, so there is no intervening statement boundary that could
++-- flush it first on its own -- is not itself a source of any error, and
++-- that the very next capture cycle starts from a clean slate.  The
++-- guarantee that the flush actually runs before, not after, the payload
++-- is freed is a call-ordering property verified by inspection (every
++-- release/orphan site's own first statement) and by a dedicated
++-- cross-session TAP check (t/013_deferred_flush.pl), neither of which a
++-- single-connection regress script can exercise: nothing distinguishes
++-- "flushed, then freed" from "dropped, then freed" once the freed
++-- backend's own payload is gone, without a second session positioned to
++-- read the row before that free happens.
++--
++SET pg_wait_event_tracing.capture = stats;
++SELECT pg_sleep(0.02); SET pg_wait_event_tracing.capture = off;
++SELECT count(*) AS rows_after_wait_then_immediate_disable
++FROM pg_stat_wait_event_timing
++WHERE pid = pg_backend_pid();
++SET pg_wait_event_tracing.capture = stats;
++SELECT count(*) AS rows_are_clean_on_next_cycle
++FROM pg_stat_wait_event_timing
++WHERE pid = pg_backend_pid() AND wait_event = 'PgSleep';
++RESET pg_wait_event_tracing.capture;
 +
 +-- The pid argument defaults to NULL, so a no-argument call resets the
 +-- caller's own backend.

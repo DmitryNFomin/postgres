@@ -978,7 +978,46 @@ PY
         fi
         if ! "$PYTHON_BIN" "$SCRIPT_DIR/w3_qualification.py" \
           "$w3_raw" "$w3_summary" "$w3_elapsed"; then
-          die "W3 did not qualify as short ProcArray LWLock contention; see $w3_summary"
+          if [[ "$REHEARSAL" -eq 1 ]]; then
+            # REPORTED, not enforced, under BENCHMARK_REHEARSAL=1: real
+            # mode is unchanged and still fail-closed above (w3_qualification.py
+            # itself is never patched to be lenient; only this call site's
+            # reaction to its exit status differs). A rehearsal VM/emulation
+            # can genuinely fail to reach the contention rate this gate
+            # requires without that saying anything about the patch under
+            # test -- and deferred accounting itself (this v11 series) can
+            # legitimately LOWER lwlock_calls_per_second on real hardware
+            # too, since shorter critical-section hold times mean more
+            # acquisitions succeed uncontended and so never wait at all;
+            # see DECISION-deferred-accounting.md. $w3_summary was still
+            # written (w3_qualification.py writes it before checking
+            # "passed"), so every measured value is logged here against
+            # its threshold rather than only the boolean verdict.
+            rehearsal_note "W3 qualification failed for $CURRENT_CELL; reporting every measured value against its threshold below (see $w3_summary for the full record) instead of failing the rehearsal:"
+            while IFS= read -r qual_line; do
+              rehearsal_note "  $qual_line"
+            done < <("$PYTHON_BIN" -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+th = d['thresholds']
+rows = [
+    ('lwlock_calls_per_second', 'min_lwlock_calls_per_second', '>='),
+    ('lwlock_fraction', 'min_lwlock_fraction', '>='),
+    ('procarray_fraction_of_lwlock', 'min_procarray_fraction_of_lwlock', '>='),
+    ('io_fraction', 'max_io_fraction', '<='),
+    ('histogram_coverage', 'min_histogram_coverage', '>='),
+    ('p50_us_upper', 'max_p50_us_upper', '<='),
+    ('p95_us_upper', 'max_p95_us_upper', '<='),
+]
+for value_key, threshold_key, op in rows:
+    value = d[value_key]
+    threshold = th[threshold_key]
+    ok = (value >= threshold) if op == '>=' else (value <= threshold)
+    print(f'{value_key}: {value} {op} {threshold} [{\"OK\" if ok else \"MISS\"}]')
+" "$w3_summary")
+          else
+            die "W3 did not qualify as short ProcArray LWLock contention; see $w3_summary"
+          fi
         fi
       fi
 

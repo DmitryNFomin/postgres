@@ -2,7 +2,7 @@
 
 `v11` is a five-patch series on top of PostgreSQL master
 `311df1dc0392f06973cf98eac51d63cb007267ce`, with tip
-`96c24a28006fb6ff66264998c698f5230d32ad26` on branch `wet-v11`. It adds
+`e26e633332292da0a104b22ad8c38282346faf8d` on branch `wet-v11`. It adds
 begin/end hooks for timed wait events, converts the wait_start/end call
 sites to the timed pair, and layers a `pg_wait_event_tracing` module
 (statistics level, then trace level) on top, plus a `test_wait_hook`
@@ -12,7 +12,11 @@ fixture carried inside the kit. A companion branch, `bench-v11-control`, carries
 extra commit that strips the hook-pointer test and slow-path call back
 out of the timed pair (leaving only the volatile store); it is the
 layout control used for the hook-null contrast in the benchmark and is
-not part of the submitted series.
+not part of the submitted series. `bench-v11-control` is expected to
+fail this fork's CI: the module's own regress/TAP suites require the
+hook sites this branch deliberately compiles out. Its commit message
+ends with `[skip ci]` for exactly that reason, and it is excluded from
+CI on that basis, not omitted by oversight.
 
 ## What v11 contains beyond v8
 
@@ -98,10 +102,10 @@ crossover archive/checksum, unedited.
 
 The package produced from this exact tree, with `sources.conf` pinned
 to the three SHAs above, has this SHA-256 (`wet-v11-baremetal-r2.tar.gz`,
-92958571 bytes):
+93009599 bytes):
 
 ```
-217c3a29a3606b3d2b313e455e9ab5665d2dc98f752887d32f350f1aa8ccab7a
+a241464d1cd6dfbdc680ce781b78efccc6784f23697ec90d1c036ca7fd74f408
 ```
 
 The outer `.tar.gz` embeds each file's mtime and is not byte-for-byte

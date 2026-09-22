@@ -1,4 +1,4 @@
-From 96c24a28006fb6ff66264998c698f5230d32ad26 Mon Sep 17 00:00:00 2001
+From e26e633332292da0a104b22ad8c38282346faf8d Mon Sep 17 00:00:00 2001
 From: Dmitry Fomin <fomin.list@gmail.com>
 Date: Fri, 18 Sep 2026 13:51:19 +0200
 Subject: [PATCH v11 5/5] pg_wait_event_tracing: trace level
@@ -69,23 +69,26 @@ Discussion: https://postgr.es/m/CAPHG-0mAOn05ae6Kqx1wHXxzOk4E5W7ajjd=QBhgkR7a0uy
 ---
  contrib/pg_wait_event_tracing/Makefile        |    2 +-
  .../expected/pg_wait_event_tracing_trace.out  |  255 +++
- contrib/pg_wait_event_tracing/meson.build     |    5 +
+ contrib/pg_wait_event_tracing/meson.build     |    6 +
  .../pg_wait_event_tracing--1.0.sql            |  156 ++
- .../pg_wait_event_tracing.c                   | 1601 +++++++++++++++--
+ .../pg_wait_event_tracing.c                   | 1705 +++++++++++++++--
  .../sql/pg_wait_event_tracing_trace.sql       |  186 ++
- .../t/005_orphan_reuse.pl                     |  203 +++
+ .../t/005_orphan_reuse.pl                     |  203 ++
  .../t/006_server_processes.pl                 |   51 +-
  .../t/010_trace_seqlock.pl                    |  131 ++
  .../pg_wait_event_tracing/t/011_trace_wrap.pl |  143 ++
  .../t/012_trace_markers.pl                    |  222 +++
+ .../t/013_deferred_flush.pl                   |  206 ++
+ doc/src/sgml/pgwaiteventtracing.sgml          |   56 +
  src/tools/pgindent/typedefs.list              |    4 +
- 12 files changed, 2837 insertions(+), 122 deletions(-)
+ 14 files changed, 3194 insertions(+), 132 deletions(-)
  create mode 100644 contrib/pg_wait_event_tracing/expected/pg_wait_event_tracing_trace.out
  create mode 100644 contrib/pg_wait_event_tracing/sql/pg_wait_event_tracing_trace.sql
  create mode 100644 contrib/pg_wait_event_tracing/t/005_orphan_reuse.pl
  create mode 100644 contrib/pg_wait_event_tracing/t/010_trace_seqlock.pl
  create mode 100644 contrib/pg_wait_event_tracing/t/011_trace_wrap.pl
  create mode 100644 contrib/pg_wait_event_tracing/t/012_trace_markers.pl
+ create mode 100644 contrib/pg_wait_event_tracing/t/013_deferred_flush.pl
 
 diff --git a/contrib/pg_wait_event_tracing/Makefile b/contrib/pg_wait_event_tracing/Makefile
 index b7bb15840df..ef8522ebea6 100644
@@ -362,7 +365,7 @@ index 00000000000..dc14a3fc055
 +
 +RESET pg_wait_event_tracing.capture;
 diff --git a/contrib/pg_wait_event_tracing/meson.build b/contrib/pg_wait_event_tracing/meson.build
-index e7e2928f921..aca1ff9f0bd 100644
+index e7e2928f921..fef28bccc8a 100644
 --- a/contrib/pg_wait_event_tracing/meson.build
 +++ b/contrib/pg_wait_event_tracing/meson.build
 @@ -29,6 +29,7 @@ tests += {
@@ -373,7 +376,7 @@ index e7e2928f921..aca1ff9f0bd 100644
      ],
      'regress_args': ['--temp-config', files('pg_wait_event_tracing.conf')],
      # Needs shared_preload_libraries, which typical runningcheck users do
-@@ -44,8 +45,12 @@ tests += {
+@@ -44,8 +45,13 @@ tests += {
        't/002_ownership.pl',
        't/003_reset_acl.pl',
        't/004_reset_race.pl',
@@ -383,6 +386,7 @@ index e7e2928f921..aca1ff9f0bd 100644
 +      't/010_trace_seqlock.pl',
 +      't/011_trace_wrap.pl',
 +      't/012_trace_markers.pl',
++      't/013_deferred_flush.pl',
      ],
    },
  }
@@ -554,7 +558,7 @@ index 75546d6605e..92a1fd34e3e 100644
  -- per-class capacities are compile-time limits of this module; neither
  -- says anything about any session, so both stay readable by everyone,
 diff --git a/contrib/pg_wait_event_tracing/pg_wait_event_tracing.c b/contrib/pg_wait_event_tracing/pg_wait_event_tracing.c
-index d7f2a40d646..e84d385379e 100644
+index 6839d352875..7f8917a4432 100644
 --- a/contrib/pg_wait_event_tracing/pg_wait_event_tracing.c
 +++ b/contrib/pg_wait_event_tracing/pg_wait_event_tracing.c
 @@ -36,15 +36,29 @@
@@ -902,9 +906,9 @@ index d7f2a40d646..e84d385379e 100644
   */
  static int	pwet_capture_effective = PWET_CAPTURE_OFF;
  
-@@ -322,23 +514,58 @@ static uint32 pwet_last_reset_generation;
- static instr_time pwet_wait_start;
- static uint32 pwet_current_event;
+@@ -362,23 +554,58 @@ typedef struct PwetPendingWait
+ static PwetPendingWait pwet_pending;
+ static bool pwet_pending_valid;
  
 +static dsa_area *pwet_trace_dsa;
 +static PwetTraceState *pwet_my_trace;
@@ -965,7 +969,7 @@ index d7f2a40d646..e84d385379e 100644
  
  /*
   * Per-process, computed at most once per process (see pwet_wait_begin()):
-@@ -380,6 +607,8 @@ static bool pwet_wait_hooks_installed;
+@@ -420,6 +647,8 @@ static bool pwet_wait_hooks_installed;
  
  static post_parse_analyze_hook_type prev_post_parse_analyze_hook;
  static ExecutorStart_hook_type prev_ExecutorStart_hook;
@@ -974,7 +978,7 @@ index d7f2a40d646..e84d385379e 100644
  static shmem_request_hook_type prev_shmem_request_hook;
  static shmem_startup_hook_type prev_shmem_startup_hook;
  
-@@ -401,6 +630,12 @@ static bool pwet_is_fixed_procnumber(int procnumber);
+@@ -442,6 +671,12 @@ static bool pwet_is_fixed_procnumber(int procnumber);
  static PwetStats *pwet_fixed_payload(int procnumber);
  static void pwet_claim_fixed_slot(void);
  static void pwet_release_fixed_slot(void);
@@ -987,7 +991,7 @@ index d7f2a40d646..e84d385379e 100644
  
  static Size
  pwet_control_size(int nslots)
-@@ -552,6 +787,8 @@ pwet_control_init(PwetSlot *slots)
+@@ -593,6 +828,8 @@ pwet_control_init(PwetSlot *slots)
  		slots[i].owner_start = 0;
  		pg_atomic_init_u32(&slots[i].generation, 0);
  		pg_atomic_init_u32(&slots[i].reset_generation, 0);
@@ -996,7 +1000,7 @@ index d7f2a40d646..e84d385379e 100644
  	}
  }
  
-@@ -754,17 +991,42 @@ pwet_fixed_payload(int procnumber)
+@@ -795,17 +1032,42 @@ pwet_fixed_payload(int procnumber)
  						  pwet_server_stride);
  }
  
@@ -1043,7 +1047,7 @@ index d7f2a40d646..e84d385379e 100644
  
  	/*
  	 * A ProcNumber inside the reserved region never takes the DSA path
-@@ -775,36 +1037,62 @@ pwet_can_attach(void)
+@@ -816,36 +1078,62 @@ pwet_can_attach(void)
  	 * pwet_is_fixed_procnumber() call sites), so anything recorded there
  	 * would silently never be shown.  When the region does not exist
  	 * (capture was off at postmaster start), this is unreachable and
@@ -1123,7 +1127,7 @@ index d7f2a40d646..e84d385379e 100644
   *
   * Outside the assign hook's own synchronous call chain,
   * pwet_capture_effective == pwet_capture always (guc.c has, by then,
-@@ -813,18 +1101,18 @@ pwet_can_attach(void)
+@@ -854,18 +1142,18 @@ pwet_can_attach(void)
   * is NOT merely academic: pwet_wait_begin_impl()/pwet_wait_end_impl() can
   * run synchronously from inside it, because pwet_maybe_attach() (called
   * from pwet_assign_capture() when capture is becoming non-off) reaches
@@ -1154,7 +1158,7 @@ index d7f2a40d646..e84d385379e 100644
   *
   * The set of recorded waits is therefore unchanged, byte for byte, in
   * both cases: outside the chain by the pwet_capture_effective ==
-@@ -837,6 +1125,11 @@ pwet_update_rec_pointers(void)
+@@ -878,6 +1166,11 @@ pwet_update_rec_pointers(void)
  					  !pwet_stats_writes_disabled &&
  					  pwet_my_stats != NULL)
  		? pwet_my_stats : NULL;
@@ -1166,7 +1170,7 @@ index d7f2a40d646..e84d385379e 100644
  }
  
  /*
-@@ -901,6 +1194,27 @@ pwet_claim_fixed_slot(void)
+@@ -942,6 +1235,27 @@ pwet_claim_fixed_slot(void)
  	pwet_my_procno = MyProcNumber;
  	pwet_last_reset_generation = pg_atomic_read_u32(&slot->reset_generation);
  	pwet_update_rec_pointers();
@@ -1194,7 +1198,7 @@ index d7f2a40d646..e84d385379e 100644
  }
  
  /*
-@@ -933,6 +1247,349 @@ pwet_release_fixed_slot(void)
+@@ -980,6 +1294,366 @@ pwet_release_fixed_slot(void)
  	}
  }
  
@@ -1336,6 +1340,12 @@ index d7f2a40d646..e84d385379e 100644
 + * fix-3 commit).  The operator has affirmatively disabled trace, so,
 + * like v6, we honour that and reclaim the memory immediately rather than
 + * leaving a multi-MiB ring pinned for the rest of the session.
++ *
++ * Flushes the pending wait, if any, before the ring is freed: a pending
++ * record's trace half can only be appended while pwet_my_trace still
++ * points at a live ring, so this is the last chance to write it (the
++ * stats half, if the payload is still attached, is unaffected by trace
++ * being released and is accounted the same way regardless).
 + */
 +static void
 +pwet_release_trace(void)
@@ -1343,6 +1353,8 @@ index d7f2a40d646..e84d385379e 100644
 +	PwetSlot   *slot;
 +	ProcNumber	procno = pwet_my_procno;
 +	bool		was_disabled = pwet_trace_writes_disabled;
++
++	pwet_flush_pending();
 +
 +	if (pwet_my_trace == NULL || pwet_trace_dsa == NULL ||
 +		procno == INVALID_PROC_NUMBER)
@@ -1518,6 +1530,13 @@ index d7f2a40d646..e84d385379e 100644
 + * pg_wait_event_trace_by_statement() in the extension script.
 + * XACT_EVENT_PREPARE (two-phase commit's PREPARE TRANSACTION) is treated
 + * as a commit-like boundary: the local transaction branch is over.
++ *
++ * Each marker-writing branch below flushes the pending wait first: the
++ * commit WAL-flush wait this comment already describes as preceding the
++ * call is, under deferred accounting, sitting in the pending buffer, not
++ * yet in the trace ring -- flushing it before the marker is what keeps it
++ * ordered (and attributed) before TxnCommit/TxnAbort, exactly as if
++ * accounting had not been deferred.
 + */
 +static void
 +pwet_xact_callback(XactEvent event, void *arg)
@@ -1530,10 +1549,12 @@ index d7f2a40d646..e84d385379e 100644
 +		case XACT_EVENT_COMMIT:
 +		case XACT_EVENT_PARALLEL_COMMIT:
 +		case XACT_EVENT_PREPARE:
++			pwet_flush_pending();
 +			pwet_marker_txn_commit();
 +			break;
 +		case XACT_EVENT_ABORT:
 +		case XACT_EVENT_PARALLEL_ABORT:
++			pwet_flush_pending();
 +			pwet_marker_txn_abort();
 +			break;
 +		default:
@@ -1544,7 +1565,7 @@ index d7f2a40d646..e84d385379e 100644
  static bool
  pwet_attach_stats(void)
  {
-@@ -1021,19 +1678,40 @@ pwet_maybe_attach(void)
+@@ -1068,19 +1742,40 @@ pwet_maybe_attach(void)
  static void
  pwet_maybe_attach_slow(void)
  {
@@ -1594,7 +1615,7 @@ index d7f2a40d646..e84d385379e 100644
  	 */
  	if (!pwet_exit_callback_registered)
  	{
-@@ -1041,7 +1719,50 @@ pwet_maybe_attach_slow(void)
+@@ -1088,7 +1783,50 @@ pwet_maybe_attach_slow(void)
  		pwet_exit_callback_registered = true;
  	}
  
@@ -1645,9 +1666,9 @@ index d7f2a40d646..e84d385379e 100644
 +		pwet_attach_needed = false;
  }
  
- static void
-@@ -1087,7 +1808,9 @@ pwet_before_shmem_exit(int code, Datum arg)
- {
+ /*
+@@ -1154,7 +1892,9 @@ pwet_before_shmem_exit(int code, Datum arg)
+ 	pwet_flush_pending();
  	pwet_exit_started = true;
  	pwet_stats_writes_disabled = true;
 +	pwet_trace_writes_disabled = true;
@@ -1656,15 +1677,15 @@ index d7f2a40d646..e84d385379e 100644
  	pwet_release_stats();
  	pwet_my_procno = INVALID_PROC_NUMBER;
  }
-@@ -1097,6 +1820,7 @@ pwet_assign_capture(int newval, void *extra)
+@@ -1164,6 +1904,7 @@ pwet_assign_capture(int newval, void *extra)
  {
  	int			old_stored = pwet_capture;
  	bool		saved_stats_disabled = pwet_stats_writes_disabled;
 +	bool		saved_trace_disabled = pwet_trace_writes_disabled;
  
  	/*
- 	 * Lazily install this process's own wait hooks the moment capture
-@@ -1113,30 +1837,44 @@ pwet_assign_capture(int newval, void *extra)
+ 	 * Flush the pending wait, if any, before anything below masks
+@@ -1189,30 +1930,44 @@ pwet_assign_capture(int newval, void *extra)
  	/*
  	 * Mask recording, for the rest of this function only, to exactly what
  	 * old_stored (the value guc.c has NOT yet overwritten pwet_capture
@@ -1730,19 +1751,34 @@ index d7f2a40d646..e84d385379e 100644
  	 *
  	 * The window between this function returning and guc.c actually
  	 * storing newval into pwet_capture contains no wait sites (nothing in
-@@ -1144,8 +1882,10 @@ pwet_assign_capture(int newval, void *extra)
+@@ -1220,14 +1975,19 @@ pwet_assign_capture(int newval, void *extra)
  	 * waits on anything), so masking exactly the inside of this function,
  	 * and restoring on every exit (below), is sufficient: the set of
  	 * recorded waits is byte-for-byte identical to testing the stored
 -	 * pwet_capture throughout, exactly as before pwet_rec_stats existed.
+-	 * Deferred accounting (v11 patch 0004 fixup; see
+-	 * DECISION-deferred-accounting.md) does not change this: the recording
+-	 * decision for a wait is still taken here and in
+-	 * pwet_wait_end_impl(), at wait_end time, exactly as before -- only
+-	 * the bookkeeping itself, writing the counters, is deferred, never
+-	 * the decision of whether to.
 +	 * pwet_capture throughout, exactly as before pwet_rec_stats/
-+	 * pwet_rec_trace existed.
++	 * pwet_rec_trace existed.  Deferred accounting (v11 patch 0004 fixup;
++	 * see DECISION-deferred-accounting.md) does not change this: both
++	 * halves of the recording decision for a wait are still taken here
++	 * and in pwet_wait_end_impl(), at wait_end time, exactly as before --
++	 * pwet_pending.trace records what pwet_rec_trace answered at that
++	 * instant (see pwet_wait_end_impl()'s comment), so nothing about a
++	 * wait recorded (or not) during this masked window depends on when
++	 * pwet_flush_pending() later happens to run; only the bookkeeping
++	 * itself -- writing the counters, appending the ring record -- is
++	 * deferred, never the decision of whether to.
  	 */
 +	pwet_trace_writes_disabled = true;
  	if (old_stored == PWET_CAPTURE_OFF)
  		pwet_stats_writes_disabled = true;
  
-@@ -1165,6 +1905,17 @@ pwet_assign_capture(int newval, void *extra)
+@@ -1247,6 +2007,17 @@ pwet_assign_capture(int newval, void *extra)
  
  	if (pwet_active && !pwet_exit_started)
  	{
@@ -1760,7 +1796,7 @@ index d7f2a40d646..e84d385379e 100644
  		if (newval == PWET_CAPTURE_OFF)
  		{
  			/*
-@@ -1199,24 +1950,30 @@ pwet_assign_capture(int newval, void *extra)
+@@ -1281,24 +2052,30 @@ pwet_assign_capture(int newval, void *extra)
  	}
  
  	/*
@@ -1804,7 +1840,83 @@ index d7f2a40d646..e84d385379e 100644
  	pwet_update_rec_pointers();
  }
  
-@@ -1304,6 +2061,24 @@ pwet_wait_begin_impl(uint32 wait_event_info, bool chain)
+@@ -1432,8 +2209,73 @@ pwet_flush_pending(void)
+ 			state->flat_overflow_count++;
+ 	}
+ 
+-	/* No trace level yet at this point in the series. */
+-	(void) timestamp_ns;
++	/*
++	 * Trace: append one 32-byte record for this completed wait, using the
++	 * STORED timestamp -- the same wait_end clock read the duration above
++	 * was computed from, per the decision document's "the trace record's
++	 * timestamp is the same wait_end clock read" invariant -- rather than a
++	 * fresh one.  No allocation, no lock, no wait, no ereport -- single
++	 * writer, lock-free, exactly like the stats accounting above.
++	 *
++	 * pwet_pending.trace is the recording decision, taken at wait_end
++	 * time (see pwet_wait_end_impl()); pwet_my_trace != NULL here only
++	 * guards the ring's continued existence, not a second recording
++	 * decision -- every release/orphan site flushes before nulling
++	 * pwet_my_trace, so on the normal path a record with trace == true
++	 * always finds pwet_my_trace still non-NULL.
++	 */
++	if (pwet_pending.trace && pwet_my_trace != NULL)
++	{
++		PwetTraceState *trace = pwet_my_trace;
++		uint64		pos;
++		PwetTraceRecord *rec;
++		uint32		seq;
++
++		pos = pg_atomic_read_u64(&trace->write_pos);
++		pg_atomic_write_u64(&trace->write_pos, pos + 1);
++		rec = &trace->records[pos & trace->ring_mask];
++		seq = (uint32) (pos * 2 + 1);
++
++		/*
++		 * Test hazard window for t/010_trace_seqlock.pl (the
++		 * position-encoded identity seqlock, ported from v6): at this
++		 * instant, write_pos has already advanced past this position, but
++		 * rec->seq has not been touched yet -- it still holds whatever a
++		 * PREVIOUS cycle at this same ring slot last completed it to (an
++		 * even value, but the wrong one for THIS position).  A
++		 * cross-backend reader that reads write_pos right now and walks
++		 * back exactly one ring's worth of positions lands on this slot
++		 * and, without an identity check (the expected seq for this exact
++		 * position, not just parity), would emit that stale prior-cycle
++		 * record as if it belonged to the new cycle.  INJECTION_POINT()
++		 * compiles to nothing unless this build was configured with
++		 * injection points (see utils/injection_point.h), and even then is
++		 * a cheap no-op unless a test has explicitly attached an action to
++		 * this exact point name from another session -- which is the only
++		 * reason an INJECTION_POINT() call is acceptable here, in a
++		 * function that must obey the same no-allocation/no-lock/no-wait/
++		 * no-ereport rules as the wait-event hooks themselves (see this
++		 * function's own comment above): unlike before this change, this
++		 * code no longer runs only from inside wait_event_end_hook, but
++		 * from every flush point enumerated there, several of which are
++		 * ordinary safe points -- the rule is upheld everywhere regardless.
++		 * pwet_trace_write_marker() stamps a marker record's seq with the
++		 * same two-store bracketing pattern as below, but is not
++		 * separately instrumented: one hazard-window test is enough to
++		 * cover the shared protocol.
++		 */
++		INJECTION_POINT("pg-wait-event-tracing-trace-after-write-pos", NULL);
++
++		rec->seq = seq;
++		pg_write_barrier();
++		rec->record_type = PWET_TRACE_WAIT;
++		rec->timestamp_ns = timestamp_ns;
++		rec->data.wait.event = event;
++		rec->data.wait.pad2 = 0;
++		rec->data.wait.duration_ns = duration_ns;
++		pg_write_barrier();
++		rec->seq = seq + 1;
++	}
+ }
+ 
+ /*
+@@ -1539,6 +2381,28 @@ pwet_wait_begin_impl(uint32 wait_event_info, bool chain)
  			return;
  	}
  
@@ -1816,7 +1928,11 @@ index d7f2a40d646..e84d385379e 100644
 +	 * not at any parse/executor/utility/xact hook (none of them fire
 +	 * while a backend is simply waiting for its next message).  Obeys the
 +	 * hook rules: pwet_trace_write_marker() only appends to an
-+	 * already-allocated ring, no allocation/lock/wait/ereport.
++	 * already-allocated ring, no allocation/lock/wait/ereport.  The
++	 * pending wait, if any, was already flushed by this function's own
++	 * flush call above, before this or anything else in this function
++	 * could write a marker -- see pwet_flush_pending()'s comment, which
++	 * lists this Idle marker as one of the ordering points it covers.
 +	 */
 +	if (pwet_capture == PWET_CAPTURE_TRACE &&
 +		pwet_marker_state == PWET_MARKER_AFTER_STATEMENT &&
@@ -1829,74 +1945,18 @@ index d7f2a40d646..e84d385379e 100644
  	INSTR_TIME_SET_CURRENT(pwet_wait_start);
  	pwet_current_event = wait_event_info;
  }
-@@ -1391,6 +2166,66 @@ pwet_wait_end_impl(uint32 wait_event_info, bool chain)
- 			else
- 				state->flat_overflow_count++;
+@@ -1622,8 +2486,8 @@ pwet_wait_end_impl(uint32 wait_event_info, bool chain)
+ 			pwet_pending.event = event;
+ 			pwet_pending.duration_ns = duration_ns;
+ 			pwet_pending.timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
+-			/* No trace level yet at this point in the series. */
+-			pwet_pending.trace = false;
++			/* The trace recording decision, taken here, not at flush. */
++			pwet_pending.trace = (pwet_rec_trace != NULL);
+ 			pwet_pending_valid = true;
  
-+			/*
-+			 * Trace: append one 32-byte record for this completed wait.
-+			 * No allocation, no lock, no wait, no ereport -- single writer,
-+			 * lock-free, exactly like the stats accounting above.
-+			 * pwet_rec_trace is non-NULL exactly when the old three-way
-+			 * test (pwet_capture == TRACE, !pwet_trace_writes_disabled,
-+			 * pwet_my_trace != NULL) held -- see
-+			 * pwet_update_rec_pointers()'s comment.
-+			 */
-+			if (pwet_rec_trace != NULL)
-+			{
-+				PwetTraceState *trace = pwet_rec_trace;
-+				uint64		pos;
-+				PwetTraceRecord *rec;
-+				uint32		seq;
-+
-+				pos = pg_atomic_read_u64(&trace->write_pos);
-+				pg_atomic_write_u64(&trace->write_pos, pos + 1);
-+				rec = &trace->records[pos & trace->ring_mask];
-+				seq = (uint32) (pos * 2 + 1);
-+
-+				/*
-+				 * Test hazard window for t/010_trace_seqlock.pl (the
-+				 * position-encoded identity seqlock, ported from v6): at
-+				 * this instant, write_pos has already advanced past this
-+				 * position, but rec->seq has not been touched yet -- it
-+				 * still holds whatever a PREVIOUS cycle at this same ring
-+				 * slot last completed it to (an even value, but the wrong
-+				 * one for THIS position).  A cross-backend reader that
-+				 * reads write_pos right now and walks back exactly one
-+				 * ring's worth of positions lands on this slot and, without
-+				 * an identity check (the expected seq for this exact
-+				 * position, not just parity), would emit that stale
-+				 * prior-cycle record as if it belonged to the new cycle.
-+				 * INJECTION_POINT() compiles to nothing unless this build
-+				 * was configured with injection points (see
-+				 * utils/injection_point.h), and even then is a cheap no-op
-+				 * unless a test has explicitly attached an action to this
-+				 * exact point name from another session -- which is the
-+				 * only reason an INJECTION_POINT() call is acceptable here,
-+				 * inside a hook that must otherwise never allocate, lock,
-+				 * wait, or ereport.  pwet_trace_write_marker() stamps a
-+				 * marker record's seq with the same two-store bracketing
-+				 * pattern as below, but is not separately instrumented:
-+				 * one hazard-window test is enough to cover the shared
-+				 * protocol.
-+				 */
-+				INJECTION_POINT("pg-wait-event-tracing-trace-after-write-pos", NULL);
-+
-+				rec->seq = seq;
-+				pg_write_barrier();
-+				rec->record_type = PWET_TRACE_WAIT;
-+				rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
-+				rec->data.wait.event = event;
-+				rec->data.wait.pad2 = 0;
-+				rec->data.wait.duration_ns = duration_ns;
-+				pg_write_barrier();
-+				rec->seq = seq + 1;
-+			}
-+
  			INSTR_TIME_SET_ZERO(pwet_wait_start);
- 		}
- 	}
-@@ -1449,6 +2284,23 @@ pwet_install_wait_hooks(void)
+@@ -1684,6 +2548,28 @@ pwet_install_wait_hooks(void)
  	pwet_wait_hooks_installed = true;
  }
  
@@ -1916,17 +1976,25 @@ index d7f2a40d646..e84d385379e 100644
 + * pg_stat_statements) already turned jumbling on for its own reasons.
 + * The documentation notes this trade-off; a 0 query_id here does not
 + * mean "no statement", it means "no id available for this statement".
++ *
++ * Flushes the pending wait before the marker: a wait completed since the
++ * last flush point (typically the backend's own ClientRead, ending as
++ * this statement's bytes arrived) must land in the trace ring before
++ * QueryStart, not after, to preserve the recorded order.
 + */
  static void
  pwet_post_parse_analyze(ParseState *pstate, Query *query,
  						const JumbleState *jstate)
-@@ -1457,19 +2309,77 @@ pwet_post_parse_analyze(ParseState *pstate, Query *query,
+@@ -1692,19 +2578,103 @@ pwet_post_parse_analyze(ParseState *pstate, Query *query,
  		prev_post_parse_analyze_hook(pstate, query, jstate);
  
  	pwet_maybe_attach();
 +
 +	if (pwet_capture == PWET_CAPTURE_TRACE)
++	{
++		pwet_flush_pending();
 +		pwet_marker_query_start(query->queryId);
++	}
  }
  
 +/*
@@ -1936,6 +2004,11 @@ index d7f2a40d646..e84d385379e 100644
 + * Emitted before calling into the standard/chained implementation (and,
 + * for End, after it returns) so a nested invocation's own ExecStart/
 + * ExecEnd pair is correctly bracketed inside the outer one's.
++ *
++ * Each flushes the pending wait immediately before its own marker write,
++ * for the same ordering reason as pwet_post_parse_analyze(): ExecutorEnd's
++ * flush in particular is what orders a wait completed during execution
++ * itself before the ExecEnd marker that closes the statement's interval.
 + */
  static void
  pwet_ExecutorStart(QueryDesc *queryDesc, int eflags)
@@ -1943,7 +2016,10 @@ index d7f2a40d646..e84d385379e 100644
  	pwet_maybe_attach();
  
 +	if (pwet_capture == PWET_CAPTURE_TRACE)
++	{
++		pwet_flush_pending();
 +		pwet_marker_exec_start(queryDesc->plannedstmt->queryId);
++	}
 +
  	if (prev_ExecutorStart_hook != NULL)
  		prev_ExecutorStart_hook(queryDesc, eflags);
@@ -1962,7 +2038,10 @@ index d7f2a40d646..e84d385379e 100644
 +		standard_ExecutorEnd(queryDesc);
 +
 +	if (pwet_capture == PWET_CAPTURE_TRACE)
++	{
++		pwet_flush_pending();
 +		pwet_marker_exec_end(query_id);
++	}
 +}
 +
 +/*
@@ -1972,6 +2051,12 @@ index d7f2a40d646..e84d385379e 100644
 + * ExecEnd on error -- TxnAbort (from the xact callback) closes the open
 + * interval either way, so there is one uniform error rule for every
 + * statement kind rather than a special case for utility statements.
++ *
++ * Two separate flush points, one before each marker: UtilityStart's flush
++ * orders a wait already pending when the utility begins (same reasoning
++ * as post_parse_analyze's); UtilityEnd's flush is required separately
++ * because the utility's own execution, in between, can itself complete
++ * waits that must be ordered before UtilityEnd closes the interval.
 + */
 +static void
 +pwet_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
@@ -1982,7 +2067,10 @@ index d7f2a40d646..e84d385379e 100644
 +	int64		query_id = pstmt->queryId;
 +
 +	if (pwet_capture == PWET_CAPTURE_TRACE)
++	{
++		pwet_flush_pending();
 +		pwet_marker_utility_start(query_id);
++	}
 +
 +	if (prev_ProcessUtility_hook != NULL)
 +		prev_ProcessUtility_hook(pstmt, queryString, readOnlyTree, context,
@@ -1992,13 +2080,16 @@ index d7f2a40d646..e84d385379e 100644
 +								params, queryEnv, dest, qc);
 +
 +	if (pwet_capture == PWET_CAPTURE_TRACE)
++	{
++		pwet_flush_pending();
 +		pwet_marker_utility_end(query_id);
++	}
 +}
 +
  /*
   * Resolve the optional pid SRF argument to a ProcNumber range
   * [out_start, out_end).  Returns false if the SRF should emit zero rows
-@@ -2024,6 +2934,457 @@ pg_wait_event_tracing_hooks_installed(PG_FUNCTION_ARGS)
+@@ -2292,6 +3262,481 @@ pg_wait_event_tracing_hooks_installed(PG_FUNCTION_ARGS)
  	PG_RETURN_BOOL(pwet_wait_hooks_installed);
  }
  
@@ -2143,7 +2234,10 @@ index d7f2a40d646..e84d385379e 100644
 + * SQL function: pg_get_backend_wait_event_trace()
 + *
 + * Own-session trace ring reader.  No lock needed: this backend is the
-+ * ring's sole writer, and it is reading its own memory.
++ * ring's sole writer, and it is reading its own memory.  Flushes its own
++ * pending wait first, so a wait completed by, e.g., pg_sleep() earlier in
++ * the same statement is always visible here immediately, without waiting
++ * for the next flush point (see the module comment / commit message).
 + */
 +Datum
 +pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
@@ -2157,6 +2251,7 @@ index d7f2a40d646..e84d385379e 100644
 +	InitMaterializedSRF(fcinfo, 0);
 +
 +	pwet_maybe_attach();
++	pwet_flush_pending();
 +	if (pwet_my_trace == NULL)
 +		PG_RETURN_VOID();
 +
@@ -2323,6 +2418,16 @@ index d7f2a40d646..e84d385379e 100644
 + * trace leaves its ring ORPHANED, readable here (with its last-known pid
 + * still attached) until a successor reclaims the slot or
 + * pg_stat_clear_orphaned_wait_event_rings() sweeps it.
++ *
++ * When procnumber is the CALLING backend's own, this flushes its own
++ * pending wait first, for the same reason pg_get_backend_wait_event_trace()
++ * does: this function (and pg_wait_event_trace_by_statement(), built on
++ * top of it in the extension script) is the only way a backend can read
++ * its own ring by procnumber rather than through the dedicated own-session
++ * reader, and it must show the same "always see your own completed waits"
++ * behavior either way.  A procnumber belonging to any other backend is
++ * the genuine cross-backend case, unaffected: only that backend's own next
++ * flush point can ever move its own pending record into its own ring.
 + */
 +Datum
 +pg_get_wait_event_trace(PG_FUNCTION_ARGS)
@@ -2334,6 +2439,9 @@ index d7f2a40d646..e84d385379e 100644
 +
 +	if (procnumber < 0 || procnumber >= PWET_NUM_SLOTS)
 +		PG_RETURN_VOID();
++
++	if (procnumber == MyProcNumber)
++		pwet_flush_pending();
 +
 +	/* Unlocked fast-path: skip a FREE slot without taking the lock. */
 +	if (pwet_ctl[procnumber].trace_state == PWET_TRACE_FREE)
@@ -2363,12 +2471,19 @@ index d7f2a40d646..e84d385379e 100644
 + * successor's own trace attach, which is always a safe point -- so
 + * EXEC_BACKEND's relative ordering of shared-memory attachment and
 + * backend initialization cannot matter here.
++ *
++ * Flushes the pending wait, if any, before orphaning: the ring is about
++ * to become immutable post-mortem data, so this is the last chance to
++ * append a still-pending trace record to it (see pwet_flush_pending()'s
++ * comment).
 + */
 +static void
 +pwet_orphan_trace(void)
 +{
 +	PwetSlot   *slot;
 +	ProcNumber	procno = pwet_my_procno;
++
++	pwet_flush_pending();
 +
 +	if (pwet_my_trace == NULL || procno == INVALID_PROC_NUMBER)
 +	{
@@ -2456,7 +2571,7 @@ index d7f2a40d646..e84d385379e 100644
  void
  _PG_init(void)
  {
-@@ -2055,6 +3416,18 @@ _PG_init(void)
+@@ -2323,6 +3768,18 @@ _PG_init(void)
  							NULL,
  							NULL,
  							NULL);
@@ -2475,7 +2590,7 @@ index d7f2a40d646..e84d385379e 100644
  	MarkGUCPrefixReserved("pg_wait_event_tracing");
  
  	prev_shmem_request_hook = shmem_request_hook;
-@@ -2073,6 +3446,10 @@ _PG_init(void)
+@@ -2341,6 +3798,10 @@ _PG_init(void)
  	post_parse_analyze_hook = pwet_post_parse_analyze;
  	prev_ExecutorStart_hook = ExecutorStart_hook;
  	ExecutorStart_hook = pwet_ExecutorStart;
@@ -3465,6 +3580,285 @@ index 00000000000..9d0398ab087
 +$node->stop;
 +
 +done_testing();
+diff --git a/contrib/pg_wait_event_tracing/t/013_deferred_flush.pl b/contrib/pg_wait_event_tracing/t/013_deferred_flush.pl
+new file mode 100644
+index 00000000000..3e9cb9f6872
+--- /dev/null
++++ b/contrib/pg_wait_event_tracing/t/013_deferred_flush.pl
+@@ -0,0 +1,206 @@
++# Copyright (c) 2026, PostgreSQL Global Development Group
++
++# pg_wait_event_tracing: deferred accounting (v11 patch 0004 fixup; see
++# DECISION-deferred-accounting.md).  pwet_wait_end_impl() no longer accounts
++# a completed wait immediately: it stashes it in a one-slot, backend-local
++# pending buffer, applied later by pwet_flush_pending() at the next timed
++# wait or one of several other ordering/lifetime points (every SQL reader
++# of a backend's own data, a marker write, a capture change, a reset, a
++# release/orphan, and process exit).  This file exercises the one
++# consequence a single-session regress script cannot: bounded visibility
++# latency for a CROSS-BACKEND reader, and the two corners that latency
++# touches:
++#
++#   (a) a wait completed by session A, immediately followed by ~2 seconds
++#       of pure CPU work with no further wait of its OWN in it, becomes
++#       visible to session B once that one statement finishes (in trace
++#       mode, ExecutorEnd's own flush-before-marker; either way, well
++#       before A next goes idle).  The decision document promises a
++#       BOUNDED delay, not invisibility in the meantime: this file does
++#       not assert that B sees nothing before the statement finishes,
++#       because A performing some OTHER timed wait during the same
++#       statement -- outside this test's control, and observed in
++#       practice on at least one platform -- would flush the record
++#       earlier, which is equally correct and not a bug;
++#   (b) when A then exits with nothing further pending of its own, the
++#       ALREADY-flushed wait is not the interesting case -- this instead
++#       confirms that ordinary exit cleanup (pwet_before_shmem_exit()'s
++#       own flush, then pwet_orphan_trace()'s) does not somehow lose or
++#       duplicate a wait that a peer's own read had already flushed
++#       earlier, complementing t/005_orphan_reuse.pl's own, differently-
++#       timed orphan checks (there, the record is still pending at exit;
++#       here, it never is).
++#
++# A third, independent case (marker ordering in trace mode) closes with a
++# statement-boundary check: a completed wait must be flushed into the
++# ring before the marker that follows it, even though the two are now
++# produced by different code paths (pwet_wait_begin_impl()'s flush for an
++# ordinary inter-statement gap vs. post_parse_analyze's flush-before-
++# marker for the next statement's own QueryStart -- see
++# pwet_flush_pending()'s comment for the full list of call sites).
++
++use strict;
++use warnings FATAL => 'all';
++
++use PostgreSQL::Test::Cluster;
++use PostgreSQL::Test::Utils;
++use Test::More;
++
++my $node = PostgreSQL::Test::Cluster->new('main');
++$node->init;
++$node->append_conf(
++	'postgresql.conf', q(
++shared_preload_libraries = 'pg_wait_event_tracing'
++debug_parallel_query = off
++));
++$node->start;
++$node->safe_psql('postgres', 'CREATE EXTENSION pg_wait_event_tracing;');
++
++# ---------------------------------------------------------------------
++# (a)/(b): cross-backend visibility gap while A computes, closing once
++# A's long statement finishes; A's exit afterward does not lose or
++# duplicate anything.  capture = trace throughout, so pg_stat_wait_event_
++# timing (trace "implies stats") covers the visibility-gap check and
++# pg_get_wait_event_trace() covers the post-exit orphan check, in the
++# same session, matching the scenario as a single continuous story.
++# ---------------------------------------------------------------------
++my $A = $node->background_psql('postgres');
++$A->query_safe('SET pg_wait_event_tracing.capture = trace;');
++my $a_pid = $A->query_safe('SELECT pg_backend_pid();');
++
++# A's ProcNumber, needed later to read its ring post-mortem.  Looked up
++# via the backend id set, not pg_stat_wait_event_timing (which would
++# still be empty here: A has not completed a wait yet, so it has no row
++# there until the statement below runs).
++my $a_procnumber = $A->query_safe(
++	'SELECT id FROM pg_stat_get_backend_idset() AS id '
++	  . 'WHERE pg_stat_get_backend_pid(id) = pg_backend_pid();');
++
++# One wait, then ~2 seconds of pure CPU work with no wait event in it at
++# all, both inside the body of ONE plain SQL statement -- deliberately
++# NOT a PL/pgSQL DO block: a plpgsql PERFORM (the only way to call
++# pg_sleep() from inside one) always runs through SPI, which means its
++# own separate, nested ExecutorStart/ExecutorEnd -- and so, in trace
++# mode, this module's own flush-before-marker at THAT ExecutorEnd -- would
++# flush the wait immediately after the PERFORM returns, before any
++# surrounding loop even started.  A single top-level statement instead
++# has exactly one ExecutorStart/ExecutorEnd pair for the whole thing:
++# pg_sleep() runs (and completes, becoming pending) while evaluating the
++# target list, then the count(*) subquery runs entirely inside the SAME
++# executor invocation, and only THAT statement's own ExecutorEnd -- once
++# everything is done -- triggers a flush.  AND's left-to-right, short-
++# circuiting evaluation (only reached because pg_sleep() IS NULL is true)
++# is what guarantees the sleep completes before the counting starts.
++# generate_series(1, 30_000_000) is calibrated to run several seconds on
++# this module's own debugoptimized+cassert build (the only kind these
++# suites run under; see the module's own build instructions), giving
++# poll_query_until below something real to poll for rather than finding
++# the record already flushed on its very first check.
++my $cpu_bound_rows = 30_000_000;
++$A->query_until(
++	qr/deferred_flush_started/, qq(
++\\echo deferred_flush_started
++SELECT pg_sleep(0.05) IS NULL AND
++       (SELECT count(*) FROM generate_series(1, $cpu_bound_rows)) IS NOT NULL;
++));
++
++# B, a completely separate session, does NOT check here that A's PgSleep
++# wait is invisible yet: DECISION-deferred-accounting.md promises only a
++# bounded visibility delay, never that a cross-backend reader sees
++# nothing in the meantime.  A itself may incur some OTHER timed wait
++# while evaluating this same statement -- nothing in its text rules that
++# out, and it has been observed in practice on at least one platform (a
++# wait bound up in generate_series()'s own execution, or in this
++# process's ordinary background activity) -- and any such wait's own
++# wait_begin would flush the pending PgSleep record right then, well
++# before the statement finishes.  That is not a bug: it only makes the
++# delay shorter than the worst case this test is about to confirm, so
++# asserting non-visibility here would be asserting a guarantee the
++# module never made, flaky on any platform where it happens to be false.
++#
++# Once A's statement finishes, its own ExecutorEnd flushes the pending
++# PgSleep record (trace mode's flush-before-marker, ahead of writing that
++# statement's own ExecEnd marker).  Poll rather than a fixed sleep: this
++# is the actual event under test, not a guessed delay.
++$node->poll_query_until(
++	'postgres',
++	"SELECT count(*) > 0 FROM pg_stat_wait_event_timing "
++	  . "WHERE pid = $a_pid AND wait_event = 'PgSleep';"
++) or die "A's PgSleep wait never became visible to B after A's statement finished";
++
++pass("A's completed wait becomes visible to B once its long statement finishes");
++
++# A exits with nothing further pending of its own (the visibility check
++# above already consumed/flushed the record, well before this point).
++# Ordinary exit cleanup must not disturb it: still exactly one PgSleep
++# record in the now-orphaned ring, neither lost nor duplicated.
++$A->quit;
++$node->poll_query_until(
++	'postgres',
++	"SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $a_pid);"
++) or die "backend $a_pid did not disappear from pg_stat_activity";
++
++is( $node->safe_psql(
++		'postgres',
++		"SELECT count(*) FROM pg_get_wait_event_trace($a_procnumber) "
++		  . "WHERE wait_event = 'PgSleep';"
++	),
++	'1',
++	"A's orphaned trace ring still holds exactly the one PgSleep wait "
++	  . "after A's exit");
++
++# ---------------------------------------------------------------------
++# Marker ordering: a wait completed just before a statement boundary must
++# be flushed into the ring before that statement's own QueryStart marker,
++# even though the two are produced by different flush call sites
++# (pwet_wait_begin_impl()'s own flush for the ordinary inter-statement
++# gap, post_parse_analyze's flush-before-marker for the QueryStart).  A
++# real client-side pause (as in t/012_trace_markers.pl) forces a genuine
++# ClientRead wait between the two statements, so the ordering is
++# exercised by the SAME mechanism a real idle gap would use, not a
++# same-message shortcut.
++#
++# Every statement issued to read the ring is itself self-referential
++# (post_parse_analyze/ExecutorStart write its own QueryStart+ExecStart
++# before its body runs) -- same caveat sql/pg_wait_event_tracing_trace.sql
++# documents at length -- so the mark-fetching statement's own trailing
++# ExecEnd/TxnCommit, and the observing statement's own leading
++# QueryStart/ExecStart, both land inside the naive "seq > mark" window.
++# The standard [3:count(*)-2] trim removes exactly those, in order,
++# leaving only what the statements under test actually wrote; Idle is
++# filtered out separately since whether it fires is not this test's
++# concern.  What is checked afterward, in Perl, is only the ordering
++# invariant: a real QueryStart -- there are two in the trimmed sequence:
++# the PgSleep statement's own (necessarily before its wait, no news
++# there) and the following "SELECT 1"'s (the one actually under test) --
++# appears strictly after the single PgSleep wait record.
++# ---------------------------------------------------------------------
++my $B = $node->background_psql('postgres');
++$B->query_safe('SET pg_wait_event_tracing.capture = trace;');
++my $mark = $B->query_safe(
++	'SELECT coalesce(max(seq), -1) FROM pg_backend_wait_event_trace;');
++$B->query_safe('SELECT pg_sleep(0.02);');
++sleep(2);
++$B->query_safe('SELECT 1;');
++
++my $trimmed = $B->query_safe(
++	"SELECT array_to_string("
++	  . "(array_agg(wait_event ORDER BY seq))[3:count(*)-2], ',') "
++	  . "FROM pg_backend_wait_event_trace "
++	  . "WHERE seq > $mark AND wait_event <> 'Idle';");
++my @events = split /,/, $trimmed;
++my ($pgsleep_idx) = grep { $events[$_] eq 'PgSleep' } 0 .. $#events;
++ok(defined $pgsleep_idx, "the PgSleep wait record is present in the ring")
++  or diag("trimmed ring contents: $trimmed");
++my $querystart_after = defined $pgsleep_idx
++  && $pgsleep_idx < $#events
++  && grep { $_ eq 'QueryStart' } @events[($pgsleep_idx + 1) .. $#events];
++ok($querystart_after,
++	"the pending wait is flushed into the ring before the next "
++	  . "statement's own QueryStart marker")
++  or diag("trimmed ring contents: $trimmed");
++
++$B->quit;
++$node->stop;
++
++done_testing();
+diff --git a/doc/src/sgml/pgwaiteventtracing.sgml b/doc/src/sgml/pgwaiteventtracing.sgml
+index e0854fc919b..7bce4236cc0 100644
+--- a/doc/src/sgml/pgwaiteventtracing.sgml
++++ b/doc/src/sgml/pgwaiteventtracing.sgml
+@@ -900,6 +900,62 @@ shared_preload_libraries = 'pg_wait_event_tracing'
+    a future release plans to change.
+   </para>
+ 
++  <para>
++   Accounting a completed wait is deferred, not immediate: at the moment
++   a wait ends, the collector only reads the clock and stashes the
++   event, its duration, and that timestamp in a one-slot, backend-local
++   buffer; the count/total/maximum/histogram update (and, at the
++   <literal>trace</literal> level, the ring append) run later, at the
++   backend's own next timed wait, or at one of several other points where
++   ordering matters (a query/transaction boundary in trace mode, a
++   capture-level change, a reset, disabling capture, or process exit).
++   This is what keeps the collector's cost out of the interval a
++   contended lock's waiters are queued on: recording a wait's end used to
++   run to completion before returning control to the caller, which for an
++   <literal>LWLock</literal> wait is still inside the critical section
++   the lock protects.  Two consequences follow, both bounded:
++  </para>
++
++  <itemizedlist>
++   <listitem>
++    <para>
++     <emphasis>Visibility latency.</emphasis>  A backend reading its own
++     data (<structname>pg_stat_wait_event_timing</structname>,
++     <structname>pg_backend_wait_event_trace</structname>,
++     <function>pg_wait_event_trace_by_statement()</function> called with
++     its own process number) always flushes its own pending wait first,
++     so it never observes a delay: an own-session read always reflects
++     every wait that has already completed.  A different session reading
++     that backend's row or ring, however, can see a wait appear only once
++     the owning backend's own next flush point is reached &mdash;
++     typically microseconds later, at its next wait, but possibly as late
++     as the end of the current statement, since a backend computing for a
++     long stretch with no further wait (a long CPU-bound query, for
++     instance) does not flush again until it does wait, or until that
++     statement ends.  A cross-backend reader should treat what it sees as
++     current up to a small, bounded lag behind the owning backend's own
++     view, not as exactly real-time.
++    </para>
++   </listitem>
++   <listitem>
++    <para>
++     <emphasis>Crash loss.</emphasis>  If a backend is terminated
++     abruptly (killed, or a crash that takes the whole cluster down) in
++     the narrow window between a wait ending and that backend's own next
++     flush, that one pending wait is lost: it was never applied to the
++     statistics payload and never appended to the trace ring.  This is
++     strictly narrower than existing loss on a normal exit or crash
++     already implies &mdash; the statistics payload is released (and, on
++     a whole-cluster crash restart, every trace ring is discarded
++     regardless; see <xref linkend="pgwaiteventtracing-trace-ring"/>)
++     &mdash; it is called out here only because it is new: an orderly
++     exit's own cleanup flushes any still-pending wait first, so this
++     narrow loss window is specific to an abrupt kill, and affects at
++     most the single most recently completed wait.
++    </para>
++   </listitem>
++  </itemizedlist>
++
+   <sect3 id="pgwaiteventtracing-aux-processes">
+    <title>Server-Side (Non-Client) Processes</title>
+ 
 diff --git a/src/tools/pgindent/typedefs.list b/src/tools/pgindent/typedefs.list
 index a5ad5a85d36..6a14f217862 100644
 --- a/src/tools/pgindent/typedefs.list
