@@ -1,0 +1,157 @@
+Host check for the wait-event-tracing benchmark kit
+Run at: 2026-09-21T13:12:39Z
+Hostname: benchmark-host
+
+This is a read-only report. Nothing on this machine is changed.
+
+== Required tools ==
+python3: /usr/bin/python3
+perl: /usr/bin/perl
+bison: /usr/bin/bison
+flex: /usr/bin/flex
+make: /usr/bin/make
+cc: /usr/bin/cc
+ar: /usr/bin/ar
+ranlib: /usr/bin/ranlib
+objdump: /usr/bin/objdump
+sha256sum: /usr/bin/sha256sum
+tar: /usr/bin/tar
+awk: /usr/bin/awk
+sed: /usr/bin/sed
+grep: /usr/bin/grep
+find: /usr/bin/find
+ps: /usr/bin/ps
+pgrep: /usr/bin/pgrep
+df: /usr/bin/df
+hostname: /usr/bin/hostname
+systemd-detect-virt: /usr/bin/systemd-detect-virt
+sort: /usr/bin/sort
+wc: /usr/bin/wc
+tr: /usr/bin/tr
+paste: /usr/bin/paste
+lscpu: /usr/bin/lscpu
+taskset: /usr/bin/taskset
+stat: /usr/bin/stat
+xargs: /usr/bin/xargs
+cp: /usr/bin/cp
+chmod: /usr/bin/chmod
+rm: /usr/bin/rm
+readlink: /usr/bin/readlink
+mktemp: /usr/bin/mktemp
+mv: /usr/bin/mv
+mkdir: /usr/bin/mkdir
+dirname: /usr/bin/dirname
+date: /usr/bin/date
+Selected Python interpreter: /usr/bin/python3.9 (version 3.9.25)
+C compiler:              cc (GCC) 8.5.0 20210514 (Red Hat 8.5.0-28)
+
+== CPU ==
+CPU model:              Intel(R) Xeon(R) Platinum 8462Y+
+Sockets:                2
+Physical cores:         64
+Threads per core:       1
+Logical CPUs:           64
+SMT (hyperthreading):   off
+
+== CPU affinity (configurable) ==
+Full topology (lscpu -e):
+CPU NODE SOCKET CORE L1d:L1i:L2:L3 ONLINE MAXMHZ    MINMHZ
+0   0    0      0    0:0:0:0       yes    4100.0000 800.0000
+1   1    1      1    1:1:1:1       yes    4100.0000 800.0000
+2   0    0      2    2:2:2:0       yes    4100.0000 800.0000
+3   1    1      3    3:3:3:1       yes    4100.0000 800.0000
+4   0    0      4    4:4:4:0       yes    4100.0000 800.0000
+5   1    1      5    5:5:5:1       yes    4100.0000 800.0000
+6   0    0      6    6:6:6:0       yes    4100.0000 800.0000
+7   1    1      7    7:7:7:1       yes    4100.0000 800.0000
+8   0    0      8    8:8:8:0       yes    4100.0000 800.0000
+9   1    1      9    9:9:9:1       yes    4100.0000 800.0000
+10  0    0      10   10:10:10:0    yes    4100.0000 800.0000
+11  1    1      11   11:11:11:1    yes    4100.0000 800.0000
+12  0    0      12   12:12:12:0    yes    4100.0000 800.0000
+13  1    1      13   13:13:13:1    yes    4100.0000 800.0000
+14  0    0      14   14:14:14:0    yes    4100.0000 800.0000
+15  1    1      15   15:15:15:1    yes    4100.0000 800.0000
+16  0    0      16   16:16:16:0    yes    4100.0000 800.0000
+17  1    1      17   17:17:17:1    yes    4100.0000 800.0000
+18  0    0      18   18:18:18:0    yes    4100.0000 800.0000
+19  1    1      19   19:19:19:1    yes    4100.0000 800.0000
+20  0    0      20   20:20:20:0    yes    4100.0000 800.0000
+21  1    1      21   21:21:21:1    yes    4100.0000 800.0000
+22  0    0      22   22:22:22:0    yes    4100.0000 800.0000
+23  1    1      23   23:23:23:1    yes    4100.0000 800.0000
+24  0    0      24   24:24:24:0    yes    4100.0000 800.0000
+25  1    1      25   25:25:25:1    yes    4100.0000 800.0000
+26  0    0      26   26:26:26:0    yes    4100.0000 800.0000
+27  1    1      27   27:27:27:1    yes    4100.0000 800.0000
+28  0    0      28   28:28:28:0    yes    4100.0000 800.0000
+29  1    1      29   29:29:29:1    yes    4100.0000 800.0000
+30  0    0      30   30:30:30:0    yes    4100.0000 800.0000
+31  1    1      31   31:31:31:1    yes    4100.0000 800.0000
+32  0    0      32   32:32:32:0    yes    4100.0000 800.0000
+33  1    1      33   33:33:33:1    yes    4100.0000 800.0000
+34  0    0      34   34:34:34:0    yes    4100.0000 800.0000
+35  1    1      35   35:35:35:1    yes    4100.0000 800.0000
+36  0    0      36   36:36:36:0    yes    4100.0000 800.0000
+37  1    1      37   37:37:37:1    yes    4100.0000 800.0000
+38  0    0      38   38:38:38:0    yes    4100.0000 800.0000
+39  1    1      39   39:39:39:1    yes    4100.0000 800.0000
+40  0    0      40   40:40:40:0    yes    4100.0000 800.0000
+41  1    1      41   41:41:41:1    yes    4100.0000 800.0000
+42  0    0      42   42:42:42:0    yes    4100.0000 800.0000
+43  1    1      43   43:43:43:1    yes    4100.0000 800.0000
+44  0    0      44   44:44:44:0    yes    4100.0000 800.0000
+45  1    1      45   45:45:45:1    yes    4100.0000 800.0000
+46  0    0      46   46:46:46:0    yes    4100.0000 800.0000
+47  1    1      47   47:47:47:1    yes    4100.0000 800.0000
+48  0    0      48   48:48:48:0    yes    4100.0000 800.0000
+49  1    1      49   49:49:49:1    yes    4100.0000 800.0000
+50  0    0      50   50:50:50:0    yes    4100.0000 800.0000
+51  1    1      51   51:51:51:1    yes    4100.0000 800.0000
+52  0    0      52   52:52:52:0    yes    4100.0000 800.0000
+53  1    1      53   53:53:53:1    yes    4100.0000 800.0000
+54  0    0      54   54:54:54:0    yes    4100.0000 800.0000
+55  1    1      55   55:55:55:1    yes    4100.0000 800.0000
+56  0    0      56   56:56:56:0    yes    4100.0000 800.0000
+57  1    1      57   57:57:57:1    yes    4100.0000 800.0000
+58  0    0      58   58:58:58:0    yes    4100.0000 800.0000
+59  1    1      59   59:59:59:1    yes    4100.0000 800.0000
+60  0    0      60   60:60:60:0    yes    4100.0000 800.0000
+61  1    1      61   61:61:61:1    yes    4100.0000 800.0000
+62  0    0      62   62:62:62:0    yes    4100.0000 800.0000
+63  1    1      63   63:63:63:1    yes    4100.0000 800.0000
+Requested PostgreSQL taskset: 1-15:2
+Requested pgbench taskset:    17-31:2
+NUMA nodes present: 2
+Affinity topology:      verified (masks disjoint, no shared physical core, taskset confirmed)
+
+== CPU frequency governor and turbo/boost ==
+  performance: 64 core(s)
+Turbo/boost state:      DISABLED (intel_pstate no_turbo=1)
+
+== Kernel ==
+Linux benchmark-host 4.18.0-553.36.1.el8_10.x86_64 #1 SMP Wed Jan 22 16:34:48 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux
+
+== Memory ==
+Total RAM:  1031065 MiB
+Free RAM:   882396 MiB (MemAvailable)
+
+== Swap ==
+Swap: configured, 4095 MiB total, 0 MiB in use
+
+== Disk space (kit directory) ==
+Free disk under /home/benchmark-user/wet-v11-baremetal.SANITIZED: 862040 MiB
+
+== Load average and other activity ==
+Load average (1/5/15 min): 0.26 5.29 7.37
+
+Top processes by CPU (a busy host here means the run will be noisy):
+    PID    PPID %CPU %MEM COMMAND
+  (unrelated process rows redacted for privacy)
+Virtualization: none
+Co-resident PostgreSQL processes: none
+
+== Summary ==
+Warnings: 0
+Report written to: /home/benchmark-user/wet-v11-baremetal.SANITIZED/host-check.txt
+Machine-readable copy: /home/benchmark-user/wet-v11-baremetal.SANITIZED/host-check.json

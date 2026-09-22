@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "source_archives": {
+    "matrix": {
+      "filename": "results-<hostname-redacted>-20260921T223220Z.tar.gz",
+      "sha256": "be95e6198f955d5c7ff234df26d0690eabc0e3ec812c6420217cd5915d3e386c",
+      "sanitized_filename": "results-benchmark-host-20260921T223220Z-sanitized.tar.gz",
+      "sanitized_sha256": "45d789ab375be6a5fb7b65b3a7b41503a453f8319625b49a40d5cb6beb53a212"
+    },
+    "crossover": {
+      "filename": "w6c-persistent-crossover-20260921T223345Z.tar.gz",
+      "sha256": "b255770758432b343212836ff07afffb4aee77c68ab745dbabab48dd828f7606",
+      "sanitized_filename": "w6c-persistent-crossover-20260921T223345Z-sanitized.tar.gz",
+      "sanitized_sha256": "a0a919a75b58a8565d563fc3df510266be0aa94082793ac859f9ddba70725dff"
+    }
+  },
+  "transformations": {
+    "hostname": "full FQDN (host name plus employer domain) replaced with 'benchmark-host' everywhere it appeared (host-check.txt/json, build/provenance manifest.json, kernel string)",
+    "username": "OS account name replaced with 'benchmark-user' everywhere it appeared (log paths, initdb ownership lines, executor= fields, disassembly toolchain paths)",
+    "home_and_staging_paths": "matrix-stage staging directory replaced with /home/benchmark-user/wet-v11-baremetal.SANITIZED; crossover-stage mktemp staging directories (multiple random suffixes) collapsed to /var/tmp/w6c-persistent-crossover.SANITIZED",
+    "process_list": "unrelated host process rows (osqueryd, node_exporter, process-exporte, systemd, lldpad, consul, auditbeat) removed from every copy of host-check.txt; column header kept with a redaction note",
+    "bytecode": "generated __pycache__/*.pyc files removed from the crossover archive's tools/ directory (and from any pycache created transiently by this sanitization's own verification runs)"
+  },
+  "measurement_integrity": {
+    "results_csv": "byte-identical (matrix and crossover)",
+    "w1_detail_json": "byte-identical (all 112 files)",
+    "schedule_csv": "byte-identical",
+    "aa_early_jsonl": "byte-identical",
+    "plateau_probe_result_json": "byte-identical",
+    "analysis_outputs": "matrix-analysis.md and crossover-analysis.md reproduce byte-identical from the sanitized archives via the archive's own frozen kit copy; the JSON analysis outputs differ only in the manifest/host-check hash fields described below (values legitimately changed because the underlying sanitized files changed) plus, for the crossover JSON only, floating point differences in the 16th significant digit that also appear when the unmodified original archive is re-analyzed on this machine (a platform floating-point artifact, not a sanitization effect)",
+    "protocol_json_rebinding": "results/protocol.json (matrix) and worker/protocol.json (crossover) each embed a sha256 of build/provenance manifest.json; matrix protocol.json also embeds a sha256 of host-check.txt and host-check.json. These four hash fields were recomputed against the sanitized files they bind to and updated in place; every other field (experiment constants, schedule seed, bound_file_sha256 for kit modules that were not touched) is unchanged. matrix results/matrix-complete.json's recorded sha256 of protocol.json was updated to match in the same way."
+  },
+  "manifest_policy": {
+    "matrix/MANIFEST.sha256": "regenerated for the sanitized archive (top-level manifest covering every file in the matrix archive)",
+    "crossover/evidence/EVIDENCE-MANIFEST.sha256": "regenerated for the sanitized archive (top-level manifest covering every file under evidence/)",
+    "crossover/evidence/tools/CROSSOVER-MANIFEST.sha256": "regenerated because tools/README.md, tools/run.sh, and tools/self-test.py contained the (sanitized) staging-path example text",
+    "crossover/evidence/provenance/CROSSOVER-MANIFEST.sha256": "preserved as the original acquisition-time manifest; no longer validates the live (now sanitized) tools/ copy, by design, matching the v10 publication's precedent",
+    "crossover/evidence/provenance/PACKAGE-MANIFEST.sha256": "preserved unchanged; lists kit scripts that are not archived in this evidence subtree",
+    "kit/*.py trusted modules": "left byte-for-byte untouched (benchmark_protocol.py, cpu_affinity.py, w3_qualification.py, wilcoxon.py, stats_common.py, latin_square.py, sources_conf.py); none contained the replaced strings"
+  },
+  "not_sanitized": {
+    "backend_and_pgbench_process_ids": "left untouched (worker/backend-pids/*, aggregate-log filename suffixes, mode-proofs.csv backend_pid_sha256); these are ephemeral run-time process ids, not personally identifying, and the publication brief did not request their pseudonymization",
+    "public_fork_url": "github.com/DmitryNFomin/postgres.git references (matrix/kit/sources.conf, matrix/build/manifest.json, BAREMETAL-RUNBOOK-v11.md) are the public GitHub fork this evidence is itself being published to; left as-is"
+  },
+  "counts": {
+    "matrix_files_content_changed": 1608,
+    "crossover_files_content_changed": 62,
+    "crossover_bytecode_files_removed": 4,
+    "process_list_rows_removed": 14,
+    "protocol_or_manifest_hash_fields_rebound": 4
+  }
+}

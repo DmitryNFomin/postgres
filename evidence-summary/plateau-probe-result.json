@@ -1,0 +1,19 @@
+{
+  "numactl_available": true,
+  "pinned_spread_percent": 0.2946908230780005,
+  "pinned_tps": [
+    241066.0,
+    239556.0,
+    239803.0,
+    239640.0
+  ],
+  "selected_variant": "pinned",
+  "server_numa_node": 1,
+  "unpinned_spread_percent": 0.6280937356821042,
+  "unpinned_tps": [
+    240033.0,
+    237262.0,
+    240103.0,
+    240564.0
+  ]
+}

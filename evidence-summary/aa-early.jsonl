@@ -1,0 +1,2 @@
+{"checked_utc": "2026-09-21T16:42:52.344038+00:00", "half_width_percent": 0.94568283466213, "limit_percent": 1.0, "mean_paired_percent": 0.25238415879045584, "passed": true, "repetitions_complete": 6, "workload": "W4"}
+{"checked_utc": "2026-09-21T19:02:39.498387+00:00", "half_width_percent": 0.6187258800222812, "limit_percent": 1.0, "mean_paired_percent": 0.44773558400733493, "passed": true, "repetitions_complete": 10, "workload": "W4"}
