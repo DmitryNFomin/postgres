@@ -22,10 +22,11 @@ from protocol import (
     BLOCKS_PER_SESSION,
     CLIENTS,
     EQUIVALENCE_MARGIN_PERCENT,
+    FULL_SECONDS_MAX,
+    FULL_SECONDS_MIN,
     MAX_PGBENCH_CAPACITY_FRACTION,
     MEASUREMENT_NS_HIGH as _MEASUREMENT_NS_HIGH,
     MEASUREMENT_NS_LOW as _MEASUREMENT_NS_LOW,
-    MEASUREMENT_SECONDS,
     PLACEBO_MARGIN_PERCENT,
     PROOF_FIELDS,
     RESULT_FIELDS,
@@ -129,7 +130,7 @@ def validate_results(rows: list[dict[str, str]], schedule: list[dict[str, str]])
             require(math.isfinite(float(row[field])),
                     "non-finite result field {}".format(field))
         require(
-            int(row["full_seconds"]) in (MEASUREMENT_SECONDS - 1, MEASUREMENT_SECONDS)
+            FULL_SECONDS_MIN <= int(row["full_seconds"]) <= FULL_SECONDS_MAX
             and int(row["transactions"]) > 0
             and float(row["tps"]) > 0
             and float(row["latency_ms"]) >= 0

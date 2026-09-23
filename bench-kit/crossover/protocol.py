@@ -81,8 +81,56 @@ else:
 # -0.5s/+1.5s slack, so a fake-mode MEASUREMENT_SECONDS caused each
 # independent copy to disagree with the others instead of just this one
 # constant changing everywhere at once.
-MEASUREMENT_NS_LOW = int((MEASUREMENT_SECONDS - 0.5) * 1_000_000_000)
-MEASUREMENT_NS_HIGH = int((MEASUREMENT_SECONDS + 1.5) * 1_000_000_000)
+#
+# Mode-aware, not just MEASUREMENT_SECONDS-aware: real and
+# BENCHMARK_REHEARSAL=1 both measure a real pgbench block with a real
+# 30-second sleep (see MEASUREMENT_SECONDS above -- rehearsal only
+# compresses SESSIONS, never the block length itself), so both keep
+# exactly the historical -0.5s/+1.5s slack, expressed relative to
+# whatever MEASUREMENT_SECONDS this mode actually measures rather than a
+# hardcoded 30 -- this is what already made it apply correctly to a
+# rehearsal without a separate branch, and keeps doing so if a
+# rehearsal-only block length is ever introduced. SELFTEST_FAKE_PREFIX is
+# different in kind, not just in duration: its "block" is a bash `sleep
+# 3` (run-worker.sh) with only trivial stub work around it, and on a
+# slow or busy laptop that sleep -- plus the real (if cheap) overhead of
+# writing/parsing the surrounding JSON events -- can run noticeably
+# longer than the tight real-mode slack tolerates without meaning
+# anything about the code under test (observed: "block 4 measurement
+# duration differs" on a busy macOS laptop, the fake block having taken a
+# few hundred ms longer than the -0.5s/+1.5s window around its 3-second
+# nominal length allowed). A generous 0.5x-5x multiplicative window still
+# catches a genuinely broken block boundary (a lost/duplicated
+# measurement event, or a block that did not run at all) while tolerating
+# anything a busy laptop can plausibly add to a few-second sleep.
+if _FAKE:
+    MEASUREMENT_NS_LOW = int(MEASUREMENT_SECONDS * 0.5 * 1_000_000_000)
+    MEASUREMENT_NS_HIGH = int(MEASUREMENT_SECONDS * 5.0 * 1_000_000_000)
+else:
+    MEASUREMENT_NS_LOW = int((MEASUREMENT_SECONDS - 0.5) * 1_000_000_000)
+    MEASUREMENT_NS_HIGH = int((MEASUREMENT_SECONDS + 1.5) * 1_000_000_000)
+
+# Single source for the "how many full aggregate-log seconds a block must
+# contain" tolerance -- extract_blocks.py's build_session_results() (the
+# live count, from real per-second aggregate rows) and analyze.py's
+# validate_results() (the archived "full_seconds" field) must agree on
+# this the same way they agree on MEASUREMENT_NS_LOW/HIGH above. This is
+# really the same duration tolerance expressed in whole seconds rather
+# than nanoseconds -- a block that ran anywhere from MEASUREMENT_NS_LOW to
+# MEASUREMENT_NS_HIGH real nanoseconds legitimately captures a
+# correspondingly different count of full real seconds of aggregate data,
+# so widening one without the other would just move a slow fake block's
+# failure from "measurement duration differs" to "lacks full aggregate
+# seconds" instead of actually fixing it. Real and BENCHMARK_REHEARSAL=1
+# keep the exact historical two-value range (MEASUREMENT_SECONDS - 1,
+# MEASUREMENT_SECONDS); SELFTEST_FAKE_PREFIX widens to match its own
+# generous MEASUREMENT_NS_HIGH ceiling.
+if _FAKE:
+    FULL_SECONDS_MIN = 1
+    FULL_SECONDS_MAX = MEASUREMENT_NS_HIGH // 1_000_000_000 + 1
+else:
+    FULL_SECONDS_MIN = MEASUREMENT_SECONDS - 1
+    FULL_SECONDS_MAX = MEASUREMENT_SECONDS
 CLIENTS = 32
 THREADS = 8
 SCALE = 100

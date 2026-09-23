@@ -97,6 +97,20 @@ log() { printf '%s\n' "[$(date -u +%H:%M:%S)] $*"; }
 REHEARSAL=0
 [[ "${BENCHMARK_REHEARSAL:-0}" == 1 ]] && REHEARSAL=1
 rehearsal_note() { log "*** REHEARSAL NOTE (not evidence, not blocking): $* ***"; }
+# The W3/mode-proof warmup-window budget checks below (w3_elapsed,
+# proof_elapsed against WARMUP_SECONDS) compare real wall-clock ($SECONDS)
+# to a real-time budget, same as a real rehearsal against a slow/emulated
+# VM -- and SELFTEST_FAKE_PREFIX's WARMUP_SECONDS=3 is tight enough that a
+# slow or busy laptop's real subprocess/psql-stub overhead during that
+# window can plausibly exceed it too, without meaning anything about the
+# code under test (the same class of fake-mode fragility fixed in
+# crossover/protocol.py's MEASUREMENT_NS_LOW/HIGH and
+# benchmark_protocol.duration_interval_bounds() above). Both checks
+# already downgrade to a non-blocking rehearsal_note() instead of die()
+# under BENCHMARK_REHEARSAL=1; widen that same leniency to
+# SELFTEST_FAKE_PREFIX rather than adding a second, fake-specific branch.
+TIMING_LENIENT=$REHEARSAL
+[[ -z "${SELFTEST_FAKE_PREFIX:-}" ]] || TIMING_LENIENT=1
 
 # Per-cell wall-time budget: a real host runs a W1 cell (a single backend
 # looping over test_wait_primitive, no pgbench, no warmup/duration window
@@ -970,8 +984,8 @@ PY
         w3_elapsed=$((SECONDS - proof_start))
         if (( w3_elapsed > 0 && w3_elapsed < WARMUP_SECONDS )); then
           : # normal case
-        elif [[ "$REHEARSAL" -eq 1 ]]; then
-          rehearsal_note "W3 qualification took ${w3_elapsed}s against a ${WARMUP_SECONDS}s warmup window for $CURRENT_CELL -- this VM/emulation may be slower than the intended target; measure real proof durations under $RECORDING_DIR before trusting a shorter warmup there"
+        elif [[ "$TIMING_LENIENT" -eq 1 ]]; then
+          rehearsal_note "W3 qualification took ${w3_elapsed}s against a ${WARMUP_SECONDS}s warmup window for $CURRENT_CELL -- this VM/emulation (or, under a fake-binaries self-test, a slow/busy host) may be slower than the intended target; measure real proof durations under $RECORDING_DIR before trusting a shorter warmup there"
           (( w3_elapsed > 0 )) || w3_elapsed=1
         else
           die "W3 qualification consumed the warmup window"
@@ -1030,18 +1044,19 @@ for value_key, threshold_key, op in rows:
     local proof_elapsed=$((SECONDS - proof_start))
     echo "$proof_elapsed" >"$proof_file.duration_s"
     if (( proof_elapsed >= WARMUP_SECONDS )); then
-      if [[ "$REHEARSAL" -eq 1 ]]; then
+      if [[ "$TIMING_LENIENT" -eq 1 ]]; then
         # The guard itself is unchanged and still fail-closed outside
-        # BENCHMARK_REHEARSAL=1 (a real host passing this means the
-        # warmup budget has real headroom); a VM/emulated rehearsal can
-        # legitimately run the same proof query slower without that
-        # meaning anything about the patch, so this is a REHEARSAL NOTE
-        # instead of a die() -- benchmark_protocol.py already widens
-        # WARMUP_SECONDS under BENCHMARK_REHEARSAL=1 for exactly this;
-        # reaching this branch means even that wider budget wasn't enough
-        # on this host, which is itself useful to know before trusting a
-        # real run's tighter real-mode budget.
-        rehearsal_note "mode proof took ${proof_elapsed}s against a ${WARMUP_SECONDS}s warmup window for $CURRENT_CELL (config=$config workload=$workload) -- exceeds even the widened rehearsal budget; this VM/emulation is slower than the intended target for this configuration"
+        # BENCHMARK_REHEARSAL=1/SELFTEST_FAKE_PREFIX (a real host passing
+        # this means the warmup budget has real headroom); a VM/emulated
+        # rehearsal, or a slow/busy laptop running the fake-binaries
+        # self-test, can legitimately run the same proof query slower
+        # without that meaning anything about the patch, so this is a
+        # REHEARSAL NOTE instead of a die() -- benchmark_protocol.py
+        # already widens WARMUP_SECONDS under BENCHMARK_REHEARSAL=1 for
+        # exactly this; reaching this branch means even that wider budget
+        # wasn't enough on this host, which is itself useful to know
+        # before trusting a real run's tighter real-mode budget.
+        rehearsal_note "mode proof took ${proof_elapsed}s against a ${WARMUP_SECONDS}s warmup window for $CURRENT_CELL (config=$config workload=$workload) -- exceeds even the widened rehearsal/fake-mode budget; this VM/emulation (or slow/busy host) is slower than the intended target for this configuration"
       else
         die "mode proof consumed the entire warmup window and could contaminate the measured samples"
       fi
@@ -1055,9 +1070,11 @@ for value_key, threshold_key, op in rows:
   active_pgbench_pid=""
 
   local parsed
-  parsed=$("$PYTHON_BIN" - "$logfile" "$WARMUP_SECONDS" "$DURATION" <<'PY'
+  parsed=$("$PYTHON_BIN" - "$logfile" "$WARMUP_SECONDS" "$DURATION" "$SCRIPT_DIR" <<'PY'
 import re
 import sys
+sys.path.insert(0, sys.argv[4])
+from benchmark_protocol import duration_interval_bounds
 path, warmup_s, duration_s = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 text = open(path, encoding="utf-8", errors="replace").read()
 matches = re.findall(
@@ -1093,10 +1110,11 @@ if not selected:
           file=sys.stderr)
     raise SystemExit(1)
 measured_interval = sum(item[0] for item in selected)
-if measured_interval < duration_s - 2 or measured_interval > duration_s + 1:
+low, high = duration_interval_bounds(duration_s)
+if measured_interval < low or measured_interval > high:
     raise SystemExit(
         f"post-warmup progress covers {measured_interval:.3f}s, "
-        f"expected approximately {duration_s}s")
+        f"expected approximately {duration_s}s (tolerance [{low:.3f}, {high:.3f}]s)")
 failures = sum(item[3] for item in selected)
 if failures:
     raise SystemExit(f"pgbench reported {failures} failed transactions")

@@ -20,6 +20,16 @@
 # wall-clock pacing (the warmup "still running" proof point, $SECONDS-
 # based W3-window elapsed math) in ways a fixed, small, real profile does
 # not. Never connects to a real server.
+#
+# SELFTEST_PGBENCH_EXTRA_SLEEP_MS (default 0): extra milliseconds of real
+# sleep added after every simulated second, honoured only here -- lets a
+# self-test deliberately simulate a slow/busy laptop (a real pgbench run
+# has no such knob) without touching any real timing constant, so the
+# consumer under test (02-run-matrix.sh's measured-interval check,
+# analyze-results.py's verify_rows(), both via
+# benchmark_protocol.duration_interval_bounds()) sees a genuinely slower
+# real-time interval instead of a synthetic timestamp. Never set outside
+# a self-test.
 set -euo pipefail
 
 init_mode=0
@@ -67,6 +77,10 @@ fi
 stop_requested=0
 trap 'stop_requested=1' ALRM TERM
 
+extra_sleep_ms=${SELFTEST_PGBENCH_EXTRA_SLEEP_MS:-0}
+[[ "$extra_sleep_ms" =~ ^[0-9]+$ ]] ||
+  { echo "fake pgbench: SELFTEST_PGBENCH_EXTRA_SLEEP_MS must be a non-negative integer" >&2; exit 1; }
+
 # Deterministic-ish pseudo-tps derived from the seed, just so different
 # sessions/cells do not all print byte-identical numbers.
 base_tps=$(( 4000 + (seed * 37) % 500 ))
@@ -102,6 +116,10 @@ last_logged=$(($(date +%s) - 1))
 while [[ "$elapsed" -lt "$duration" && "$stop_requested" -eq 0 ]]; do
   sleep 1 &
   wait $! 2>/dev/null || true
+  if [[ "$stop_requested" -eq 0 && "$extra_sleep_ms" -gt 0 ]]; then
+    sleep "$((extra_sleep_ms / 1000)).$(printf '%03d' $((extra_sleep_ms % 1000)))" &
+    wait $! 2>/dev/null || true
+  fi
   [[ "$stop_requested" -eq 0 ]] || break
   elapsed=$((elapsed + 1))
   tps=$((base_tps + (elapsed * 13) % 97))

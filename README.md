@@ -55,6 +55,17 @@ patch 0004. On top of those, v11 adds:
 
 ## Producing the benchmark package
 
+The preferred way to obtain the package is the GitHub release built from
+this exact tree: [`v11-kit-r2-20260923`](https://github.com/DmitryNFomin/postgres/releases/tag/v11-kit-r2-20260923)
+on `DmitryNFomin/postgres` carries `wet-v11-baremetal-r2.tar.gz` and its
+`.sha256` sidecar as release assets -- download both and skip straight to
+`BAREMETAL-RUNBOOK-v11.md` below. It supersedes the prior
+`v11-kit-r2-20260922` release for laptop packaging only (this fixes
+`self-test.py`'s fake-mode timing tolerances so `make-baremetal-package.sh`'s
+own self-test no longer spuriously fails on a slow/busy laptop; the
+host-side kit content executors actually run is unchanged). Building it
+yourself from source, as described below, produces the identical package.
+
 On a machine with GitHub access:
 
 ```
@@ -102,10 +113,10 @@ crossover archive/checksum, unedited.
 
 The package produced from this exact tree, with `sources.conf` pinned
 to the three SHAs above, has this SHA-256 (`wet-v11-baremetal-r2.tar.gz`,
-93009599 bytes):
+93015407 bytes):
 
 ```
-a241464d1cd6dfbdc680ce781b78efccc6784f23697ec90d1c036ca7fd74f408
+ae4f869f97b9d33e4298d7774e915b1266bc43d00d184aae777f75df8d85849b
 ```
 
 The outer `.tar.gz` embeds each file's mtime and is not byte-for-byte

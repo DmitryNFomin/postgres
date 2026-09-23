@@ -308,6 +308,31 @@ def smoke_profile(rehearsal: bool) -> dict:
 
 SMOKE_PROFILE = _smoke_profile(_FAKE, _REHEARSAL)
 
+# Real-time tolerance for a pgbench cell's measured post-warmup progress
+# interval against its configured duration_seconds -- the single source
+# 02-run-matrix.sh's own inline verification and analyze-results.py's
+# verify_rows() both use, so a fake-mode fix to one cannot silently
+# disagree with the other (crossover/protocol.py's MEASUREMENT_NS_LOW/HIGH
+# is the same idea for the persistent-backend crossover's block boundaries).
+# Real and BENCHMARK_REHEARSAL=1 both measure a real pgbench -T run with
+# real wall-clock progress lines, so both keep the historical -2s/+1s
+# absolute window (already comfortably relative-generous for a rehearsal's
+# shorter duration_seconds=5). SELFTEST_FAKE_PREFIX's duration_seconds=1 is
+# a stub pgbench's "sleep 1" per simulated second plus real subprocess/
+# parsing overhead around it, which can run noticeably long on a slow or
+# busy laptop without meaning anything about the code under test -- same
+# fragility as crossover/protocol.py's MEASUREMENT_NS_LOW/HIGH, fixed the
+# same way: a generous multiplicative window instead of a tight absolute
+# one.
+def duration_interval_bounds(
+    duration_seconds: float, fake: bool | None = None,
+) -> tuple[float, float]:
+    if fake is None:
+        fake = _FAKE
+    if fake:
+        return duration_seconds * 0.5, duration_seconds * 5.0
+    return duration_seconds - 2.0, duration_seconds + 1.0
+
 SHARED_BUFFERS_FOR_WORKLOAD = {
     "W1": "128MB",
     "W3": "16MB",

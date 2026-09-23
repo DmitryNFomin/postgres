@@ -17,10 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from protocol import (
     BLOCKS_PER_SESSION,
     CLIENTS,
+    FULL_SECONDS_MAX,
+    FULL_SECONDS_MIN,
     MAX_PGBENCH_CAPACITY_FRACTION,
     MEASUREMENT_NS_HIGH,
     MEASUREMENT_NS_LOW,
-    MEASUREMENT_SECONDS,
     RESULT_FIELDS,
     SEQUENCES,
     THREADS,
@@ -147,7 +148,7 @@ def build_session_results(
         last_second = end_ns // 1_000_000_000 - 1
         seconds = list(range(first_second, last_second + 1))
         require(
-            len(seconds) in (MEASUREMENT_SECONDS - 1, MEASUREMENT_SECONDS)
+            FULL_SECONDS_MIN <= len(seconds) <= FULL_SECONDS_MAX
             and all(
                 second in by_second
                 and by_second[second].get("threads") == THREADS

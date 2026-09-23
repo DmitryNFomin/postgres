@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from benchmark_protocol import (
@@ -60,6 +61,7 @@ from benchmark_protocol import (
     TRACE_CONFIGS,
     W1_FUNCTIONS,
     WORKLOADS,
+    duration_interval_bounds,
     pgbench_margin_log,
 )
 import cpu_affinity
@@ -625,6 +627,51 @@ def test_numa_affinity_guard() -> None:
         raise RuntimeError("expected no recommendation on an undersized topology")
 
 
+def test_fake_pgbench_extra_sleep(source_kit: Path) -> None:
+    """selftest-fakebin/pgbench's SELFTEST_PGBENCH_EXTRA_SLEEP_MS knob
+    (added alongside benchmark_protocol.duration_interval_bounds()'s
+    fake-mode fix) lets a self-test simulate a slow/busy laptop with real
+    extra sleep instead of a synthetic timestamp -- the same class of
+    fake-mode timing fragility fixed in crossover/protocol.py's
+    MEASUREMENT_NS_LOW/HIGH (see crossover/self-test.py's
+    test_extraction_slow_fake_block() for that side). Confirms the stub
+    still behaves like a real pgbench run under injected slowness (exits
+    0, reports zero failed transactions), and that the real wall-clock
+    time such a run takes -- deliberately past the OLD fixed -2s/+1s
+    window's ceiling for a 1-second fake cell -- is accepted by
+    duration_interval_bounds(1, fake=True), the same function
+    02-run-matrix.sh's own cell-timing check and analyze-results.py's
+    verify_rows() both call."""
+    pgbench = source_kit / "selftest-fakebin" / "pgbench"
+    env = dict(os.environ, SELFTEST_PGBENCH_EXTRA_SLEEP_MS="1500")
+    start = time.monotonic()
+    process = subprocess.run(
+        [str(pgbench), "-T", "1", "-c", "1", "-j", "1", "--random-seed=1"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    measured = time.monotonic() - start
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"fake pgbench with extra sleep failed:\n{process.stdout}"
+        )
+    if "number of failed transactions: 0 " not in process.stdout:
+        raise RuntimeError(
+            f"fake pgbench with extra sleep reported failures:\n{process.stdout}"
+        )
+    old_ceiling = 1 + 1  # duration_s=1's OLD fixed "-2s/+1s" window ceiling
+    if measured <= old_ceiling:
+        raise RuntimeError(
+            "extra-sleep knob did not produce a slow enough run to exercise "
+            f"the fix (measured {measured:.3f}s, old ceiling {old_ceiling}s)"
+        )
+    low, high = duration_interval_bounds(1, fake=True)
+    if not (low <= measured <= high):
+        raise RuntimeError(
+            f"a deliberately slow fake pgbench run ({measured:.3f}s) falls "
+            f"outside the fake-mode duration tolerance [{low}, {high}]"
+        )
+
+
 def test_plateau_scenario_end_to_end(source_kit: Path, analyzer: Path) -> None:
     """Build a full synthetic tree with the plateau injected into the
     trace-vs-master W6c contrast and confirm analyze-results.py itself
@@ -657,6 +704,7 @@ def main() -> int:
 
     test_plateau_scenario_unit()
     test_numa_affinity_guard()
+    test_fake_pgbench_extra_sleep(source_kit)
 
     with tempfile.TemporaryDirectory(prefix="wet-v11-self-test-") as temporary:
         root = Path(temporary)

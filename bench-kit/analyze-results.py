@@ -41,6 +41,7 @@ from benchmark_protocol import (
     W1_FUNCTIONS,
     W3_PROTOCOL,
     WORKLOADS,
+    duration_interval_bounds,
     early_aa_gate_repetitions,
     full_profile,
     pgbench_margin_log,
@@ -404,8 +405,9 @@ def verify_rows(rows: list, protocol: dict) -> None:
             require(samples > 0, f"{label}: no progress samples")
             interval = finite_number(row["measurement_interval_s"],
                                       f"{label} measurement interval", positive=True)
+            low, high = duration_interval_bounds(protocol["duration_seconds"])
             require(
-                protocol["duration_seconds"] - 2 <= interval <= protocol["duration_seconds"] + 1,
+                low <= interval <= high,
                 f"{label}: unexpected measurement interval {interval}",
             )
             finite_number(row["pgbench_cpu_percent"], f"{label} pgbench CPU")

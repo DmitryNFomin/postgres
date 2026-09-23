@@ -34,6 +34,15 @@ touching a real cluster):
   the `-f` script's basename for `recording-proof.sql` /
   `w3-qualification.sql`), so a cell's mode proof reflects the config
   that cell's `postgresql.conf` actually requested.
+- `pgbench`'s `SELFTEST_PGBENCH_EXTRA_SLEEP_MS` (default 0): extra real
+  milliseconds of sleep injected after every simulated second, honoured
+  only here. Lets a self-test deliberately simulate a slow/busy laptop
+  with real elapsed time instead of a synthetic timestamp -- see
+  `self-test.py`'s `test_fake_pgbench_extra_sleep()` and
+  `crossover/self-test.py`'s `test_extraction_slow_fake_block()`, both
+  regression tests for `benchmark_protocol.duration_interval_bounds()` /
+  `crossover/protocol.py`'s `MEASUREMENT_NS_LOW`/`HIGH` being mode-aware.
+  Never set outside a self-test.
 
 This directory is not a real PostgreSQL installation and must never be
 pointed at by `PGBENCH_KIT_PREFIX`-style variables outside the self-test.

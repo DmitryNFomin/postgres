@@ -24,6 +24,7 @@ from protocol import (
     BLOCKS_PER_SESSION,
     BOUND_FILES,
     CLIENTS,
+    MEASUREMENT_NS_HIGH,
     MEASUREMENT_SECONDS,
     PROOF_FIELDS,
     RESULT_FIELDS,
@@ -31,6 +32,7 @@ from protocol import (
     SEQUENCES,
     SESSIONS,
     THREADS,
+    _FAKE,
     file_hashes,
     protocol_document,
 )
@@ -417,6 +419,125 @@ def test_extraction() -> None:
         assert all(int(row["failed_transactions"]) == 0 for row in rows)
 
 
+def _extract_with_block_duration(
+    root: Path, slow_block_index: int, duration_ns: int,
+) -> list[dict]:
+    """Like test_extraction() above, except block `slow_block_index`
+    measures for `duration_ns` real nanoseconds instead of the nominal
+    _MEASUREMENT_NS -- simulating a block that ran long in real time (a
+    slow/busy laptop under SELFTEST_FAKE_PREFIX, or an actually-broken
+    block boundary) rather than fabricating a synthetic timestamp that
+    disagrees with real elapsed time. Inter-block spacing is derived from
+    each block's own duration (not a fixed constant) so this works for a
+    deliberately huge duration_ns too, without one block's timestamps
+    overlapping the next."""
+    events_path = root / "events.jsonl"
+    backend_path = root / "backends.txt"
+    result_path = root / "results.csv"
+    prefix = root / "aggregate"
+    backend_path.write_text(
+        "".join("{}\n".format(1000 + index) for index in range(CLIENTS)),
+        encoding="ascii",
+    )
+    events = []
+    seconds_needed: set[int] = set()
+    cursor = 1_800_000_000_000_000_000
+    for block_index, (mode, _) in enumerate(SEQUENCES["A"], 1):
+        duration = duration_ns if block_index == slow_block_index else _MEASUREMENT_NS
+        start = cursor
+        end = start + duration
+        events.extend([
+            {
+                "timestamp_ns": start - 2_000_000_000, "phase": "transition_start",
+                "session_index": 1, "block_index": block_index, "mode": mode,
+            },
+            {
+                "timestamp_ns": start, "phase": "measurement_start",
+                "session_index": 1, "block_index": block_index, "mode": mode,
+                "pgbench_cpu_ticks": 1000, "pgbench_starttime_ticks": 500,
+                "clock_ticks_per_second": 100,
+            },
+            {
+                "timestamp_ns": end, "phase": "measurement_end",
+                "session_index": 1, "block_index": block_index, "mode": mode,
+                "pgbench_cpu_ticks": _MEASUREMENT_END_TICKS, "pgbench_starttime_ticks": 500,
+                "clock_ticks_per_second": 100,
+            },
+        ])
+        first_second = (start + 999_999_999) // 1_000_000_000
+        last_second = end // 1_000_000_000 - 1
+        seconds_needed.update(range(first_second, last_second + 1))
+        cursor = end + 20_000_000_000
+    with events_path.open("w", encoding="utf-8") as stream:
+        for event in events:
+            stream.write(json.dumps(event) + "\n")
+    for thread in range(THREADS):
+        suffix = ".777" if thread == 0 else ".777.{}".format(thread)
+        with Path(str(prefix) + suffix).open("w", encoding="utf-8") as log:
+            for second in sorted(seconds_needed):
+                log.write(aggregate_row(second, 1000))
+    metadata = {
+        "session_index": 1,
+        "sequence": "A",
+        "pgbench_seed": 1,
+        "pgbench_pid": 777,
+        "postmaster_pid": 888,
+        "server_cpus": SERVER_CPUS,
+        "pgbench_cpus": PGBENCH_CPUS,
+        "aggregate_log_prefix": "logs/aggregate-1",
+        "server_log": "logs/server-1.log",
+    }
+    return extract_blocks.append_session_results(
+        result_path, events_path, prefix, backend_path, metadata,
+    )
+
+
+def test_extraction_slow_fake_block() -> None:
+    """Regression test for the exact incident reported on a busy macOS
+    laptop: a fake-mode crossover block's real elapsed time ran a few
+    hundred milliseconds past the OLD (pre-fix) tolerance ceiling --
+    "block 4 measurement duration differs" -- even though the block
+    boundary itself was fine, just slow. protocol.py's
+    MEASUREMENT_NS_LOW/HIGH and FULL_SECONDS_MIN/MAX are now mode-aware:
+    generous under SELFTEST_FAKE_PREFIX, unchanged for real/
+    BENCHMARK_REHEARSAL=1. This must hold in whatever mode this process
+    actually inherits (crossover/run.sh always runs this self-test right
+    before the crossover phase it is about to run, fake or real), so the
+    "an actually-broken block boundary is still rejected" half runs
+    unconditionally, and the "the exact fake-mode incident now passes"
+    half is specific to SELFTEST_FAKE_PREFIX (its MEASUREMENT_SECONDS=3
+    is what defines the incident's old ceiling)."""
+    with tempfile.TemporaryDirectory() as temporary:
+        try:
+            _extract_with_block_duration(
+                Path(temporary), 4, MEASUREMENT_NS_HIGH * 10,
+            )
+        except RuntimeError as error:
+            if "measurement duration differs" not in str(error):
+                raise AssertionError(
+                    f"expected a measurement-duration failure, got: {error}"
+                ) from error
+        else:
+            raise AssertionError(
+                "an absurdly long (10x the ceiling) block boundary was "
+                "accepted -- the fix must not disable this check"
+            )
+
+    if _FAKE:
+        # The OLD formula -- still exactly what real/BENCHMARK_REHEARSAL=1
+        # mode uses today (protocol.py) -- gave a fake-mode
+        # (MEASUREMENT_SECONDS=3) ceiling of (3 + 1.5) * 1e9 =
+        # 4_500_000_000ns. A block that ran 300ms past that old ceiling,
+        # on an otherwise fine block boundary, must now be accepted.
+        old_high = int((MEASUREMENT_SECONDS + 1.5) * 1_000_000_000)
+        with tempfile.TemporaryDirectory() as temporary:
+            rows = _extract_with_block_duration(
+                Path(temporary), 4, old_high + 300_000_000,
+            )
+        assert len(rows) == BLOCKS_PER_SESSION
+        assert int(rows[3]["block_index"]) == 4
+
+
 def test_analysis() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -456,6 +577,7 @@ def main() -> int:
     test_runtime_paths()
     test_shell_nounset_declarations()
     test_extraction()
+    test_extraction_slow_fake_block()
     test_analysis()
     print("w6c-persistent-crossover self-test: PASS")
     return 0
