@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "source_archives": {
+    "matrix": {
+      "filename": "results-<hostname-redacted>-20260923T201507Z.tar.gz",
+      "sha256": "caf3e6162e97dc0296978b401db951c032a5d360c8cb5f415a06d49179351a42",
+      "sanitized_filename": "results-benchmark-host-20260923T201507Z-sanitized.tar.gz",
+      "sanitized_sha256": "f69f67a74e439b4b59b6b3d31ac7fc88f27c607f8693a158fe38367669a69c5b"
+    },
+    "crossover": {
+      "status": "not present when this branch was built; the coordinator will add it in a follow-up commit if/when the 2026-09-23 crossover archive becomes available"
+    }
+  },
+  "transformations": {
+    "hostname": "full FQDN (host name plus employer domain) replaced with 'benchmark-host' everywhere it appeared (host-check.txt/json, build/provenance manifest.json, kernel string) -- same token as v11-evidence-20260921",
+    "username": "OS account name replaced with 'benchmark-user' everywhere it appeared (server/initdb/pgbench log paths, disassembly toolchain paths) -- same token as v11-evidence-20260921",
+    "home_and_staging_paths": "matrix-stage staging directory (/home/<user>/wet-v11-baremetal-r2, distinct from the 2026-09-21 run's staging directory) replaced with /home/benchmark-user/wet-v11-baremetal-r2.SANITIZED everywhere it appeared",
+    "process_list": "every data row under host-check.txt's 'Top processes by CPU' section removed (facter, osqueryd, bash, node_exporter, process-exporte, systemd, lldpad -- none are benchmark processes; host-check runs before the benchmark starts and separately reports 'Co-resident PostgreSQL processes: none'); column header line kept with a redaction note",
+    "bytecode": "no __pycache__ directories were present in this archive"
+  },
+  "measurement_integrity": {
+    "results_csv": "byte-identical to the source archive",
+    "w1_detail_json": "byte-identical (all 112 files)",
+    "schedule_csv": "byte-identical",
+    "aa_early_jsonl": "byte-identical",
+    "plateau_probe_result_json": "byte-identical",
+    "analysis_outputs": "matrix-analysis.md reproduces byte-identical from the sanitized archive via the archive's own frozen kit copy (kit/analyze-results.py); the JSON analysis output differs only in the manifest/host-check hash fields described below (legitimately changed because the underlying sanitized files changed) plus the sanitized string values themselves (hostname, paths) -- confirmed by diffing the two analysis JSON documents with all *hash*/*sha256* fields stripped: the remaining diff touches only fields containing the replaced strings, zero numeric measurement differs"
+  },
+  "protocol_json_rebinding": {
+    "detail": "results/protocol.json embeds a sha256 of build/manifest.json (build_manifest_sha256) and of host-check.txt/host-check.json (host_check_sha256); results/matrix-complete.json embeds a sha256 of results/protocol.json. Sanitizing build/manifest.json and both host-check files changed their bytes, so these three hash fields were recomputed and updated in place; every other field (experiment constants, schedule seed, bound_file_sha256 for the unmodified kit scripts) is unchanged.",
+    "build_manifest_sha256": {
+      "before": "f9c9bb4546c05002d1f9f45d73ab7a4a4e894422827a25770526476b54cdeae5",
+      "after": "2ae8a0e6c51a2e4c6a399e966572eed008af8fb89fd403bf907af70ce24d2a3e"
+    },
+    "host_check_sha256": {
+      "before": {
+        "host-check.json": "7edc23d00e6a9473d17d366dba6eb8ea199ae927892e55d0b2c8f7b9e326de2d",
+        "host-check.txt": "e3176f50beb094fff0560d816b46fefce65712e9341e33142bcd6b5f49b51973"
+      },
+      "after": {
+        "host-check.json": "ebab03c775b9590b225f83e28b5586627d9e8a66eb2e4ec6acbb68ef646e27af",
+        "host-check.txt": "4eefc5e2af379344bcdc40775185dcc9f277b6749d469fb56422e692bc722ac3"
+      }
+    },
+    "matrix_complete_protocol_json_sha256": {
+      "before": "2fb610a1cfd08a3b7eea20d94d507914e2517b448345e7453853d870ee6f2c43",
+      "after": "f51a32fae2fd68ce0c20b7cd19b02c5b0de8d6b7fdaa37cefbdd31159fe281b7"
+    }
+  },
+  "manifest_policy": {
+    "matrix/MANIFEST.sha256": "regenerated for the sanitized archive (top-level manifest covering every file in the matrix archive)",
+    "kit/*.py trusted modules": "left byte-for-byte untouched (benchmark_protocol.py, cpu_affinity.py, w3_qualification.py, wilcoxon.py, stats_common.py, latin_square.py, sources_conf.py, analyze-results.py, build_manifest_rules.py, and the other kit/ scripts and shell files); none contained the replaced strings"
+  },
+  "not_sanitized": {
+    "backend_and_pgbench_process_ids": "left untouched (server/pgbench PIDs embedded in log lines); these are ephemeral run-time process ids, not personally identifying, and the publication brief did not request their pseudonymization",
+    "public_fork_url": "github.com/DmitryNFomin/postgres.git references (kit/sources.conf, build/manifest.json fixture_tree field) are the public GitHub fork this evidence is itself being published to; left as-is"
+  },
+  "counts": {
+    "matrix_files_content_changed": 1604,
+    "hostname_files": 3,
+    "username_files": 1602,
+    "staging_path_files": 1603,
+    "process_list_rows_removed": 7,
+    "protocol_or_manifest_hash_fields_rebound": 3
+  }
+}
