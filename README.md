@@ -19,15 +19,18 @@ deferral) is published on `v11-evidence-20260921`.
   pinned to physical cores `1-15:2`, pgbench pinned to physical cores
   `17-31:2` (one NUMA node each); Rocky Linux 8; GCC 8.5.
 
-Matrix stage only (560 cells): a 16-block Latin square crossing five
-workloads (W1 microbenchmark, W3/W4/W5/W6c pgbench-driven) against seven
-configs per block (`master`, `master-aa`, `control`, `hook-null`,
-`module-off`, `stats`, `trace`).
+Two stages:
 
-**No crossover-stage archive for 2026-09-23 was available when this
-branch was built.** If the coordinator supplies
-`w6c-persistent-crossover-20260923T*.tar.gz` later, it will be added to
-this branch in a follow-up commit together with its analysis.
+1. **Matrix stage** (560 cells): a 16-block Latin square crossing five
+   workloads (W1 microbenchmark, W3/W4/W5/W6c pgbench-driven) against
+   seven configs per block (`master`, `master-aa`, `control`,
+   `hook-null`, `module-off`, `stats`, `trace`).
+2. **Crossover stage** (16 independent sessions): the W6c persistent-
+   backend bracketed crossover, patched installation only, alternating
+   `off`/`stats`/`trace` within each session to measure tool overhead
+   without build-to-build pairing. Run 2's crossover is present on this
+   branch (added in a follow-up commit after the matrix stage was
+   published; it was not available when the branch was first built).
 
 An early online A/A gate (paired master-vs-master-aa W4 half-width, no
 more than 1% to continue) passed twice during the matrix run: **0.82%**
@@ -36,7 +39,9 @@ after 6 repetitions and **0.81%** after 10 repetitions.
 ## Downloads and key files
 
 - [Sanitized matrix archive](artifacts/results-benchmark-host-20260923T201507Z-sanitized.tar.gz) / [sha256](artifacts/results-benchmark-host-20260923T201507Z-sanitized.tar.gz.sha256)
+- [Sanitized crossover archive](artifacts/w6c-persistent-crossover-20260923T201633Z-sanitized.tar.gz) / [sha256](artifacts/w6c-persistent-crossover-20260923T201633Z-sanitized.tar.gz.sha256)
 - [Matrix analysis](evidence-summary/matrix-analysis.md) ([JSON](evidence-summary/matrix-analysis.json))
+- [Crossover analysis](evidence-summary/crossover-analysis.md) ([JSON](evidence-summary/crossover-analysis.json))
 - [Sanitized host-check.txt](evidence-summary/host-check.txt)
 - [Plateau probe result](evidence-summary/plateau-probe-result.json)
 - [Early A/A gate log](evidence-summary/aa-early.jsonl)
@@ -148,6 +153,24 @@ Hodges-Lehmann half-width 0.002278.
 Maximum sampled pgbench thread-capacity fraction across the matrix:
 0.326. Cells at or above 90%: 0.
 
+## Headline results: crossover stage
+
+Evidence validation: **PASS**. Statistical suitability: **PASS** (off/off
+placebo and bracket-drift intervals are inside the predeclared margin).
+Run 2's crossover is present on this branch.
+
+| Contrast | Estimate | 95% CI | Classification |
+|---|---:|---:|---|
+| stats vs off | -0.537% | [-0.664%, -0.410%] | equivalent |
+| trace vs off | -1.030% | [-1.163%, -0.897%] | equivalent |
+| trace vs stats | -0.495% | [-0.685%, -0.305%] | equivalent |
+| off/off placebo | -0.142% | [-0.331%, +0.047%] | equivalent |
+| stats bracket drift | -0.390% | [-0.709%, -0.069%] | equivalent |
+| trace bracket drift | -0.267% | [-0.609%, +0.077%] | equivalent |
+
+16 sessions, independent-session analysis (no build pairing: every
+session runs the patched installation).
+
 ## Run 1 vs run 2 comparison
 
 Run 1 (2026-09-21, before deferral) is published on
@@ -176,9 +199,10 @@ run-1/run-2 pair from the coordinator's cover-letter appendix
 
 W3 lock-wait rate: 406k/s (run 2), 408k/s (run 1), ~5 per transaction.
 
-Run 1 crossover (W6c, 16 persistent sessions, no run-2 equivalent yet):
-stats vs off -0.49 [-0.64, -0.34], trace vs off -0.89 [-0.98, -0.79],
-placebo -0.09 [-0.26, +0.09].
+Crossover (W6c, 16 persistent sessions, run 2 (run 1)): stats vs off
+-0.54 [-0.66, -0.41] (-0.49 [-0.64, -0.34]), trace vs off -1.03 [-1.16,
+-0.90] (-0.89 [-0.98, -0.79]), placebo -0.14 [-0.33, +0.05] (-0.09
+[-0.26, +0.09]). Run 2's crossover is present.
 
 Deferral roughly halved the W3 overhead of `stats`/`trace` relative to
 `module-off` (run 1's worst case, about -6.5% median across estimators,
@@ -210,7 +234,7 @@ resolvable overhead at any stage, also consistent with run 1.
 
 ## Re-verifying this evidence
 
-1. Download the sanitized archive and its `.sha256` sidecar from
+1. Download the sanitized matrix archive and its `.sha256` sidecar from
    `artifacts/` and confirm the checksum.
 2. Extract it and run its own embedded kit copy against itself (this
    avoids depending on whatever state a local checkout of the kit
@@ -218,7 +242,14 @@ resolvable overhead at any stage, also consistent with run 1.
    out.json --output-markdown out.md` from the extraction root. It
    should print `verification: PASS (560 complete cells)` and `out.md`
    should match `evidence-summary/matrix-analysis.md`.
-3. See `SANITIZATION.md` for exactly what was changed and why the
+3. Download the sanitized crossover archive and its `.sha256` sidecar
+   the same way. Extract it, copy `evidence/worker`,
+   `evidence/provenance`, and `evidence/tools` into a scratch directory
+   (its `analyze.py` refuses to overwrite the `analysis.json`/`.md`
+   that are already in the archive), and run `python3
+   tools/analyze.py /path/to/scratch`. It should reproduce
+   `evidence-summary/crossover-analysis.md`.
+4. See `SANITIZATION.md` for exactly what was changed and why the
    analysis JSON's manifest/host-check hash fields differ from what a
    from-scratch run would print.
 

@@ -8,7 +8,11 @@
       "sanitized_sha256": "f69f67a74e439b4b59b6b3d31ac7fc88f27c607f8693a158fe38367669a69c5b"
     },
     "crossover": {
-      "status": "not present when this branch was built; the coordinator will add it in a follow-up commit if/when the 2026-09-23 crossover archive becomes available"
+      "filename": "w6c-persistent-crossover-20260923T201633Z.tar.gz",
+      "sha256": "ae5efdb541bbf9ca420b97a2bc3b81804e1946ccd5db4b7bbfc47d1faef00c18",
+      "sanitized_filename": "w6c-persistent-crossover-20260923T201633Z-sanitized.tar.gz",
+      "sanitized_sha256": "302acf9a8c918a8d2d454a18cd6a3f72ba34c165c9af41cca9384fc6f3d8f1f7",
+      "note": "added in a follow-up commit after the matrix stage was published on this branch; not present when the branch was first built"
     }
   },
   "transformations": {
@@ -62,5 +66,52 @@
     "staging_path_files": 1603,
     "process_list_rows_removed": 7,
     "protocol_or_manifest_hash_fields_rebound": 3
+  },
+  "crossover_sanitization": {
+    "transformations": {
+      "hostname": "full FQDN (host name plus employer domain) replaced with 'benchmark-host' everywhere it appeared (provenance host-check.txt/json, host-before.json, host-after.json, provenance/manifest.json, provenance/runtime.txt, provenance/smoke-pass.txt) -- same token as the matrix archive and v11-evidence-20260921",
+      "username": "OS account name replaced with 'benchmark-user' everywhere it appeared standalone (driver.log executor line, initdb 'owned by user' lines, provenance/runtime.txt, provenance/smoke-pass.txt) -- same token as the matrix archive",
+      "home_and_staging_path": "the matrix-stage home/staging directory (/home/<user>/wet-v11-baremetal-r2, embedded in this archive's own provenance/manifest.json and host-check.txt because the build/provenance snapshot is shared with the matrix stage) replaced with the same /home/benchmark-user/wet-v11-baremetal-r2.SANITIZED token used on the matrix archive",
+      "crossover_mktemp_staging_path": "the crossover run's own /var/tmp/w6c-persistent-crossover.<6-char suffix> staging directory replaced with /var/tmp/w6c-persistent-crossover.SANITIZED everywhere it appeared -- three distinct 6-character suffixes found: one real mktemp suffix used by this run (driver.log and all 48 per-session worker/logs/{init,server,server-setup}-*.log* files), one literal mktemp template-mask string ('XXXXXX') in tools/run.sh, and one hardcoded example path in tools/self-test.py",
+      "process_list": "same 7 unrelated process-list rows removed from this archive's copy of host-check.txt as from the matrix archive's (facter, osqueryd, bash, node_exporter, process-exporte, systemd, lldpad) -- both archives carry the same host-check snapshot",
+      "bytecode": "4 generated tools/__pycache__/*.pyc files removed (extract_blocks, host_state, protocol, rehearsal)"
+    },
+    "measurement_integrity": {
+      "worker_results_csv": "byte-identical to the source archive",
+      "worker_schedule_csv": "byte-identical",
+      "worker_seed_txt": "byte-identical",
+      "worker_events_jsonl": "byte-identical",
+      "worker_mode_proofs_csv": "byte-identical",
+      "session_estimates_csv": "byte-identical",
+      "analysis_outputs": "analysis.md and analysis.json were not modified by sanitization (they contain no hostname/path/hash fields); re-running the sanitized archive's own tools/analyze.py from a scratch copy of worker/provenance/tools reproduces analysis.md and analysis.json byte-identical to these unmodified files -- stats vs off -0.537% [-0.664%, -0.410%], trace vs off -1.030% [-1.163%, -0.897%], off/off placebo -0.142% [-0.331%, +0.047%], suitability PASS"
+    },
+    "protocol_json_rebinding": {
+      "detail": "worker/protocol.json embeds a sha256 of provenance/manifest.json (kit_build_manifest_sha256), checked by tools/analyze.py before it will trust the data. Sanitizing manifest.json changed its bytes, so this field was recomputed and updated in place; every other field (schedule seed, CPU affinity masks, bound_file_sha256 for the 9 analyzer-bound scripts) is unchanged. tools/run.sh and tools/self-test.py, where the mktemp-pattern strings were also sanitized, are not in the analyzer's bound-file set, so no other protocol field needed rebinding.",
+      "kit_build_manifest_sha256": {
+        "before": "f9c9bb4546c05002d1f9f45d73ab7a4a4e894422827a25770526476b54cdeae5",
+        "after": "2ae8a0e6c51a2e4c6a399e966572eed008af8fb89fd403bf907af70ce24d2a3e",
+        "note": "identical before/after values to the matrix archive's build_manifest_sha256 above: both archives embed the same underlying provenance/manifest.json (one build provenance snapshot shared by both stages of this run)"
+      }
+    },
+    "manifest_policy": {
+      "evidence/tools/CROSSOVER-MANIFEST.sha256": "regenerated (covers every file under tools/, including the two now-sanitized scripts run.sh and self-test.py)",
+      "evidence/provenance/CROSSOVER-MANIFEST.sha256": "left as the original acquisition-time record (not regenerated), matching the matrix stage's own MANIFEST.sha256 precedent on v11-evidence-20260921",
+      "evidence/provenance/PACKAGE-MANIFEST.sha256": "left as the original acquisition-time record (not regenerated)",
+      "evidence/EVIDENCE-MANIFEST.sha256": "regenerated (top-level manifest covering every file in the crossover archive)"
+    },
+    "not_sanitized": {
+      "backend_and_pgbench_process_ids": "left untouched (worker/backend-pids/*, aggregate-log filename suffixes); not personally identifying, pseudonymizing them was not requested",
+      "smoke_pass_kit_hash_fields": "provenance/smoke-pass.txt's crossover=/kit= hash fields (recorded at acquisition time from the kit's own CROSSOVER-MANIFEST.sha256/PACKAGE-MANIFEST.sha256) were left untouched as historical provenance, consistent with leaving those two manifest files themselves untouched; only the hostname=/executor= fields on the same line were sanitized"
+    },
+    "counts": {
+      "crossover_files_content_changed": 58,
+      "hostname_and_domain_files": 7,
+      "home_staging_path_files": 19,
+      "username_files": 21,
+      "mktemp_staging_path_files": 51,
+      "process_list_rows_removed": 7,
+      "pycache_files_removed": 4,
+      "protocol_hash_fields_rebound": 1
+    }
   }
 }
