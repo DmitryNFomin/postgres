@@ -2,7 +2,7 @@
 
 Git work only, plus one compile. No PostgreSQL server is started.
 
-## Inputs (all local branches in /Users/dmitryfomin/work/git/postgres)
+## Inputs (all local branches in <workspace>/work/git/postgres)
 
 | Branch | Content |
 |---|---|
@@ -15,7 +15,7 @@ before starting and paste it into the report.
 
 ## Target: rewrite `wet-v11` in place as five commits
 
-Work in the existing worktree `/Users/dmitryfomin/work/git/postgres_patch/wet-v11`
+Work in the existing worktree `<workspace>/work/git/postgres_patch/wet-v11`
 (branch `wet-v11`). First tag the current tip: `git tag wet-v11-pre-fold`.
 
 1. 0001 = current 0001 + the wpb commit folded in. Message: keep the
@@ -50,7 +50,7 @@ onto `origin/master` (re-fetch first; if origin/master moved since the
 base 311df1dc039, rebase onto the new tip and report the new base).
 Metadata on all five: author/committer `Dmitry Fomin <fomin.list@gmail.com>`,
 one `Discussion:` trailer, no other trailer; grep the five messages and
-the full diff for `adyen`, `Claude`, `WPA`, `WPB`, `fixup` and remove any
+the full diff for `the employer domain`, `Claude`, `WPA`, `WPB`, `fixup` and remove any
 internal work-package references from comments or messages (they must not
 reach pgsql-hackers). Keep test comments that mention "lazy" etc.; just
 drop the "(WPA fixup a1)" style tags.
@@ -66,7 +66,7 @@ drop the "(WPA fixup a1)" style tags.
   `ninja -C build install` and run
   `meson test -C build --suite setup --suite test_wait_hook --suite pg_wait_event_tracing`
   once (15 tests expected).
-- `git format-patch -v11 -5 -o /Users/dmitryfomin/work/git/postgres_patch/v11/patches-v11/`
+- `git format-patch -v11 -5 -o <workspace>/work/git/postgres_patch/v11/patches-v11/`
   after deleting the old v11-000* files there; `git am` round trip onto a
   throwaway branch from origin/master must apply cleanly and give the same
   tree hash as `wet-v11`.
@@ -81,7 +81,7 @@ URL (query `https://api.github.com/repos/DmitryNFomin/postgres/actions/runs?bran
 
 ## Deliverable
 
-`/Users/dmitryfomin/work/git/postgres_patch/v11/reports/wpe-report.md`:
+`<workspace>/work/git/postgres_patch/v11/reports/wpe-report.md`:
 five hashes and subjects, base commit, conflicts and resolutions, the
 empty-diff proof, patch-id of 0002, test summary, push output, CI run
 URL. Final chat message at most 8 lines.

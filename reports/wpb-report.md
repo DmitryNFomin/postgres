@@ -1,6 +1,6 @@
 # WPB core report: out-of-line hook slow path
 
-Branch: `wet-v11-wpb` (worktree `/Users/dmitryfomin/work/git/postgres_patch/wet-v11-wpb`),
+Branch: `wet-v11-wpb` (worktree `<workspace>/work/git/postgres_patch/wet-v11-wpb`),
 based on `wet-v11` @ `0cf1c2feaef`.
 
 Commit: `b8302eecbc7f94cb4745f53e1c58a8e226f3f0bf`
@@ -10,7 +10,7 @@ Trailer: `Discussion: https://postgr.es/m/CAPHG-0mAOn05ae6Kqx1wHXxzOk4E5W7ajjd=Q
 (no Co-Authored-By / Claude trailer)
 
 Patch exported to:
-`/Users/dmitryfomin/work/git/postgres_patch/v11/patches-wpb/0001-Move-timed-wait-event-hook-path-out-of-line-hint-the.patch`
+`<workspace>/work/git/postgres_patch/v11/patches-wpb/0001-Move-timed-wait-event-hook-path-out-of-line-hint-the.patch`
 
 `git diff wet-v11 wet-v11-wpb --stat` touches only:
 - `src/include/utils/wait_event.h`
@@ -70,7 +70,7 @@ in either run.
 
 ## Codegen sanity (arm64 clang, this machine only)
 
-"Before" = `wet-v11` build (`/Users/dmitryfomin/work/git/postgres_patch/wet-v11/build`,
+"Before" = `wet-v11` build (`<workspace>/work/git/postgres_patch/wet-v11/build`,
 same meson options, already built). "After" = this commit's build.
 Both are `debugoptimized` builds of `build/src/backend/postgres`
 (`objdump -d --disassemble-symbols=<sym>`, symbols carry a leading `_`
@@ -146,7 +146,7 @@ New commit: `f4a9d7d2ccdb1034e1b441195bd8c97d25d1e7bf`
 `src/backend/utils/activity/wait_event.c`.
 
 Patch regenerated (old file deleted first):
-`/Users/dmitryfomin/work/git/postgres_patch/v11/patches-wpb/0001-Move-timed-wait-event-hook-path-out-of-line-hint-the.patch`
+`<workspace>/work/git/postgres_patch/v11/patches-wpb/0001-Move-timed-wait-event-hook-path-out-of-line-hint-the.patch`
 
 Rebuilt with `ninja -C build` (clean) and re-ran `meson test -C build
 --suite setup --suite test_wait_hook --suite pg_wait_event_tracing

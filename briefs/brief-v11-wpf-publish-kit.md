@@ -5,15 +5,15 @@ remote `fork` (DmitryNFomin/postgres) are authorized for exactly the
 branches named here; use the SSH URL `git@github.com:DmitryNFomin/postgres.git`
 if HTTPS has no credential (that is how WPE pushed).
 
-Repo: `/Users/dmitryfomin/work/git/postgres` (main checkout on
+Repo: `<workspace>/work/git/postgres` (main checkout on
 REL_17_STABLE; never check it out or touch its tree). Existing
-worktrees under `/Users/dmitryfomin/work/git/postgres_patch/` must not be
+worktrees under `<workspace>/work/git/postgres_patch/` must not be
 touched. Never bare `git stash`.
 
 ## 1. Control commit and branch
 
-- New worktree: `git -C /Users/dmitryfomin/work/git/postgres worktree add -b bench-v11-control /Users/dmitryfomin/work/git/postgres_patch/bench-v11-control wet-v11`
-- Apply `/Users/dmitryfomin/work/git/postgres_patch/v11/patches-control/0001-*.patch`
+- New worktree: `git -C <workspace>/work/git/postgres worktree add -b bench-v11-control <workspace>/work/git/postgres_patch/bench-v11-control wet-v11`
+- Apply `<workspace>/work/git/postgres_patch/v11/patches-control/0001-*.patch`
   with `git am` (it applies on top of the series; report any fuzz). Then
   `git commit --amend` so the message reads:
   subject `control: compile the timed wait-event hook sites out (benchmark layout control)`,
@@ -28,20 +28,20 @@ touched. Never bare `git stash`.
 
 ## 2. Fill the hashes and package
 
-In `/Users/dmitryfomin/work/git/postgres_patch/v11/bench-kit/sources.conf`:
+In `<workspace>/work/git/postgres_patch/v11/bench-kit/sources.conf`:
 ```
 MASTER_SHA=311df1dc0392f06973cf98eac51d63cb007267ce
 V11_SHA=96c24a28006fb6ff66264998c698f5230d32ad26
 CONTROL_SHA=<full sha from step 1>
 ```
-Verify with `git -C /Users/dmitryfomin/work/git/postgres cat-file -t <sha>`
+Verify with `git -C <workspace>/work/git/postgres cat-file -t <sha>`
 for all three, and that `git ls-remote fork` shows wet-v11 at V11_SHA and
 bench-v11-control at CONTROL_SHA.
 
 Then run the real packaging:
 ```
-cd /Users/dmitryfomin/work/git/postgres_patch/v11/bench-kit
-POSTGRES_REPO_PATH=/Users/dmitryfomin/work/git/postgres ./make-baremetal-package.sh /Users/dmitryfomin/work/git/postgres_patch/v11/dist
+cd <workspace>/work/git/postgres_patch/v11/bench-kit
+POSTGRES_REPO_PATH=<workspace>/work/git/postgres ./make-baremetal-package.sh <workspace>/work/git/postgres_patch/v11/dist
 ```
 Confirm: the archive and `.sha256` exist; `tar tzf` lists the kit
 scripts, workloads, `crossover/`, the fixture, the three source
@@ -55,9 +55,9 @@ of step 3.
 ## 3. Publish the notes branch
 
 Create an ORPHAN branch `v11-notes` in a fresh worktree
-(`git -C /Users/dmitryfomin/work/git/postgres worktree add --detach /Users/dmitryfomin/work/git/postgres_patch/v11-notes-wt origin/master`
+(`git -C <workspace>/work/git/postgres worktree add --detach <workspace>/work/git/postgres_patch/v11-notes-wt origin/master`
 then `git checkout --orphan v11-notes` and `git rm -rfq .` inside it), and
-copy in from `/Users/dmitryfomin/work/git/postgres_patch/v11/`:
+copy in from `<workspace>/work/git/postgres_patch/v11/`:
 `bench-kit/` (without `__pycache__` and `.DS_Store`), `patches-v11/`,
 `patches-control/`, `reports/`, `briefs/`, `codegen/`, and a copy of
 `bench-kit/BAREMETAL-RUNBOOK-v11.md` at the top level. Do NOT include
@@ -94,6 +94,6 @@ must show the three branches at the expected SHAs. Query the CI status of
 `ci/wet-v11` run 35342207165 via the GitHub API and include the per-job
 conclusions.
 
-Report: `/Users/dmitryfomin/work/git/postgres_patch/v11/reports/wpf-report.md`
+Report: `<workspace>/work/git/postgres_patch/v11/reports/wpf-report.md`
 with SHAs, push output, package path/size/SHA-256, tar listing summary,
 CI job table, anything undone. Final chat message at most 8 lines.

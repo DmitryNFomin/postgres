@@ -7,11 +7,11 @@ byte-for-byte identical to the base. Performance only.
 
 ## Repository and rules
 
-- Main repo `/Users/dmitryfomin/work/git/postgres` (checkout on
+- Main repo `<workspace>/work/git/postgres` (checkout on
   REL_17_STABLE; never check it out or touch its tree). Base branch:
   `wet-v11` (local branch, five commits on origin/master).
 - Create worktree:
-  `git -C /Users/dmitryfomin/work/git/postgres worktree add -b wet-v11-wpa /Users/dmitryfomin/work/git/postgres_patch/wet-v11-wpa wet-v11`
+  `git -C <workspace>/work/git/postgres worktree add -b wet-v11-wpa <workspace>/work/git/postgres_patch/wet-v11-wpa wet-v11`
 - Never push. Never use bare `git stash`. Do not touch other worktrees.
 - Commit metadata: author/committer `Dmitry Fomin <fomin.list@gmail.com>`
   (set GIT_AUTHOR_* and GIT_COMMITTER_* env), a real explanatory body, and
@@ -29,7 +29,7 @@ byte-for-byte identical to the base. Performance only.
 ## Build and test commands
 
 ```
-cd /Users/dmitryfomin/work/git/postgres_patch/wet-v11-wpa
+cd <workspace>/work/git/postgres_patch/wet-v11-wpa
 export PKG_CONFIG_PATH=/opt/homebrew/opt/icu4c@78/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/readline/lib/pkgconfig
 meson setup build --buildtype=debugoptimized -Dcassert=true -Dwerror=true -Dinjection_points=true -Dtap_tests=enabled -Dssl=openssl -Dldap=disabled -Dprefix=$PWD/install
 ninja -C build && ninja -C build install     # install is REQUIRED on macOS: SIP strips DYLD_LIBRARY_PATH, tests need libpq at the prefix
@@ -148,9 +148,9 @@ held before), and list the invariant sites.
 
 ## Deliverable
 
-`/Users/dmitryfomin/work/git/postgres_patch/v11/reports/wpa-report.md`:
+`<workspace>/work/git/postgres_patch/v11/reports/wpa-report.md`:
 commit hashes and subjects; test results before/after each commit (the
 14-line summary from meson test); the list of invariant sites for A2; any
 comment you rewrote and why; anything left undone. Also
-`git format-patch -2 -o /Users/dmitryfomin/work/git/postgres_patch/v11/patches-wpa/`.
+`git format-patch -2 -o <workspace>/work/git/postgres_patch/v11/patches-wpa/`.
 Final chat message at most 8 lines.

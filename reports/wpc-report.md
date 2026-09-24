@@ -1,7 +1,7 @@
 # WPC: v11 bare-metal benchmark package — report
 
-Kit: `/Users/dmitryfomin/work/git/postgres_patch/v11/bench-kit/`
-Brief: `/Users/dmitryfomin/work/git/postgres_patch/v11/briefs/brief-v11-wpc-kit.md`
+Kit: `<workspace>/work/git/postgres_patch/v11/bench-kit/`
+Brief: `<workspace>/work/git/postgres_patch/v11/briefs/brief-v11-wpc-kit.md`
 
 ## Summary
 
@@ -15,7 +15,7 @@ CPU affinity, and a `sources.conf` gate for the three commit hashes the
 coordinator has not filled in yet. No PostgreSQL server was started at any
 point (`self-test.py` uses only generated data); no git worktree or
 checkout was modified (only read-only `git show`/`git ls-tree`/`git
-rev-parse` against `/Users/dmitryfomin/work/git/postgres`, never checked
+rev-parse` against `<workspace>/work/git/postgres`, never checked
 out).
 
 ## Reused from v10 unchanged (in substance)

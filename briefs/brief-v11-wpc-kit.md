@@ -7,15 +7,15 @@ configuration's mode before timing it, and produces an analysis that
 stays honest under the session-level plateaus seen in the v10 runs.
 
 You extend the existing v10 kit; do not start from scratch. Start point:
-`/Users/dmitryfomin/work/git/postgres_patch/v9_v10/notes-v10/bench-kit/`
+`<workspace>/work/git/postgres_patch/v9_v10/notes-v10/bench-kit/`
 (launcher `run-benchmark.sh`, `00-check-host.sh`, `01-build-all.sh`,
 `02-run-matrix.sh`, `03-collect.sh`, `benchmark_protocol.py`,
 `analyze-results.py`, `analyze-raw-archive.sh`, `self-test.py`,
 `w3_qualification.py`, `cpu_affinity.py`, `wait-for-idle.sh`,
 `workloads/`, `make-baremetal-package.sh`) and the crossover harness in
-`/Users/dmitryfomin/work/git/postgres_patch/v9_v10/notes-v10/benchmarks/w6c-persistent-crossover/`.
+`<workspace>/work/git/postgres_patch/v9_v10/notes-v10/benchmarks/w6c-persistent-crossover/`.
 Read both READMEs and the v10 runbook first. Copy them into
-`/Users/dmitryfomin/work/git/postgres_patch/v11/bench-kit/` and work there.
+`<workspace>/work/git/postgres_patch/v11/bench-kit/` and work there.
 Python 3.9+ stdlib only, bash, awk. No PostgreSQL server may be started
 on this Mac; the kit's `self-test.py` uses synthetic data.
 
@@ -142,7 +142,7 @@ No server, no real benchmark.
 
 ## Deliverable
 
-`/Users/dmitryfomin/work/git/postgres_patch/v11/reports/wpc-report.md`:
+`<workspace>/work/git/postgres_patch/v11/reports/wpc-report.md`:
 what was reused from v10 unchanged, what changed and why, the self-test
 output, the package path and SHA-256, and anything not done. Final chat
 message at most 8 lines.
@@ -157,12 +157,12 @@ self-test everything else now. Do NOT run `make-baremetal-package.sh` for
 real; instead make sure it works with a `--dry-run` that lists what it
 would snapshot. The coordinator fills the hashes and packages afterwards.
 The control patch to carry is
-`/Users/dmitryfomin/work/git/postgres_patch/v11/patches-control/0001-*.patch`;
+`<workspace>/work/git/postgres_patch/v11/patches-control/0001-*.patch`;
 the v11 series patches will be the five files in
-`/Users/dmitryfomin/work/git/postgres_patch/v11/patches-v11/` (they may be
+`<workspace>/work/git/postgres_patch/v11/patches-v11/` (they may be
 regenerated with the same names before packaging; reference them by glob).
 The module's diagnostic function is `pg_wait_event_tracing_hooks_installed()`
 (exists in the v11 series). The test_wait_primitive fixture source is in
-branch `fork/bench-v8-baseline` of /Users/dmitryfomin/work/git/postgres
+branch `fork/bench-v8-baseline` of <workspace>/work/git/postgres
 under `src/test/modules/test_wait_primitive/` (read with `git show`, do
 not check anything out there).

@@ -3,7 +3,7 @@
 ## Branch and worktree
 
 Created with:
-`git -C /Users/dmitryfomin/work/git/postgres worktree add -b wet-v11 /Users/dmitryfomin/work/git/postgres_patch/wet-v11 fork/wet-v8`
+`git -C <workspace>/work/git/postgres worktree add -b wet-v11 <workspace>/work/git/postgres_patch/wet-v11 fork/wet-v8`
 
 `origin/master` at time of assembly: `311df1dc0392f06973cf98eac51d63cb007267ce`.
 
@@ -174,20 +174,20 @@ Exit code 0, zero warnings, zero errors in that run (`grep -ci
 "warning:\|error:"` over the full log returns 0). No `meson test`, `ninja
 install`, `initdb`, or `pg_ctl` was run, and no server was started.
 
-## `adyen` / `Claude` grep
+## `the employer domain` / `Claude` grep
 
 `git log --format='%B' origin/master..wet-v11` and
 `git diff origin/master..wet-v11 -- src contrib doc`, both grepped
-case-insensitively for `adyen` and `claude`: no matches in either.
+case-insensitively for `the employer domain` and `claude`: no matches in either.
 Also grepped the five generated `.patch` files: no matches.
 
 ## Deliverables produced
 
-- Worktree: `/Users/dmitryfomin/work/git/postgres_patch/wet-v11` (branch
+- Worktree: `<workspace>/work/git/postgres_patch/wet-v11` (branch
   `wet-v11`).
-- Patches: `/Users/dmitryfomin/work/git/postgres_patch/v11/patches-v11/`
+- Patches: `<workspace>/work/git/postgres_patch/v11/patches-v11/`
   (`v11-0001` .. `v11-0005`).
-- Main checkout (`/Users/dmitryfomin/work/git/postgres`, `REL_17_STABLE`)
+- Main checkout (`<workspace>/work/git/postgres`, `REL_17_STABLE`)
   and the `wet-v8` worktree were not touched (verified via `git status`
   before and after; only pre-existing untracked build artifacts/`.DS_Store`
   files were present, none created by this work).

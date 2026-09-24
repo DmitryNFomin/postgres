@@ -13,6 +13,6 @@
   },
   "path": "src/test/modules/test_wait_primitive",
   "source_branch": "fork/bench-v8-baseline",
-  "source_repo": "/Users/dmitryfomin/work/git/postgres (local checkout; upstream https://github.com/DmitryNFomin/postgres.git)",
+  "source_repo": "<workspace>/work/git/postgres (local checkout; upstream https://github.com/DmitryNFomin/postgres.git)",
   "tree": "93dde50fc966a3ab01f4218010ec65548370d6d6"
 }

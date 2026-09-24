@@ -2,7 +2,7 @@
 
 ## Finding
 
-The v11 bare-metal run of 2026-09-21 (host ai211369, 2 sockets, server and
+The v11 bare-metal run of 2026-09-21 (host the benchmark host, 2 sockets, server and
 pgbench on 8 physical cores each of NUMA node 1, turbo off, 16 repetitions,
 A/A half-width 0.4% on W4) measured the enabled cost of the collector as:
 

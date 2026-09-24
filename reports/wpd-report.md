@@ -51,7 +51,7 @@ deterministic under this protocol.
 
 Raw disassembly tree, configure.log head, make.log tails (all empty),
 sha256 list, symbol/section dumps and `size` output are under
-`/Users/dmitryfomin/work/git/postgres_patch/v11/codegen/`.
+`<workspace>/work/git/postgres_patch/v11/codegen/`.
 
 ## 1. Instruction count
 

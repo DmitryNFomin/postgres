@@ -8,7 +8,7 @@ anywhere. Nothing is pushed to any git remote.
 - Remote build box: `ssh root@178.105.201.195` (hostname `pg-build`,
   Ubuntu 24.04, GCC 13.3, 4 vCPU, 7 GB RAM, 70 GB free). Key auth is set
   up; use `ssh -o BatchMode=yes`. Work under `/root/codegen/`.
-- Local: patches are under `/Users/dmitryfomin/work/git/postgres_patch/v11/`:
+- Local: patches are under `<workspace>/work/git/postgres_patch/v11/`:
   `patches-v11/v11-000{1..5}-*.patch` (the series) and
   `patches-wpb/*.patch` (one commit: cold slow path + unlikely hint).
   Copy them to the box with scp. Do not touch any local git worktree.
@@ -37,7 +37,7 @@ functions' bodies identical to the ordinary pair's bodies (start: the
 volatile store only; end: the volatile store of 0 only). Leave everything
 else, including the slow functions in `wait_event.c`, untouched. Commit it
 on branch `control` and save it with `git format-patch -1` to
-`/Users/dmitryfomin/work/git/postgres_patch/v11/patches-control/` (scp
+`<workspace>/work/git/postgres_patch/v11/patches-control/` (scp
 back). This is the "call sites compiled out" layout control used in the v7
 measurement package.
 
@@ -83,13 +83,13 @@ Also for every binary:
 6. `size <bin>` (text/data/bss).
 
 Save the raw disassembly directory tree and copy it back with
-`scp -r root@178.105.201.195:/root/codegen/dis /Users/dmitryfomin/work/git/postgres_patch/v11/codegen/`,
+`scp -r root@178.105.201.195:/root/codegen/dis <workspace>/work/git/postgres_patch/v11/codegen/`,
 together with `configure.log` head, the four `make.log` tails, and the
 SHA list.
 
 ## Deliverable
 
-`/Users/dmitryfomin/work/git/postgres_patch/v11/reports/wpd-report.md`:
+`<workspace>/work/git/postgres_patch/v11/reports/wpd-report.md`:
 one table per metric (rows = functions, columns = the four binaries),
 the branch-layout counts, the section placement of the slow functions,
 sizes, build provenance, and a plain-language reading of three

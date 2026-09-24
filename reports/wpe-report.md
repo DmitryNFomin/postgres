@@ -113,7 +113,7 @@ x3/`pwet_orphan_trace` x2) — these are exactly the sites A2's own commit
 message enumerates. All conflicts were mechanical unions/deferrals; none
 required a judgment call beyond "which side belongs at this history point."
 
-**Work-package tags removed** (grepped for `adyen`, `Claude`, `WPA`, `WPB`,
+**Work-package tags removed** (grepped for `the employer domain`, `Claude`, `WPA`, `WPB`,
 `fixup`, and by extension similar internal-only references found while
 resolving conflicts):
 - `sql/pg_wait_event_tracing.sql` + `expected/pg_wait_event_tracing.out`:
@@ -166,7 +166,7 @@ suites: 007_lazy_hooks, 001_memory, 002_ownership, 005_orphan_reuse, regress,
 ## format-patch / git am round trip
 
 Deleted old `v11-000*.patch` files, regenerated with:
-`git format-patch -v11 -5 -o /Users/dmitryfomin/work/git/postgres_patch/v11/patches-v11/`.
+`git format-patch -v11 -5 -o <workspace>/work/git/postgres_patch/v11/patches-v11/`.
 
 Applied with `git am` onto a throwaway branch (`am-roundtrip`) from
 `origin/master`:

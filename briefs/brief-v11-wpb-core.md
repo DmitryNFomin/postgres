@@ -7,11 +7,11 @@ are unchanged.
 
 ## Repository and rules
 
-- Main repo `/Users/dmitryfomin/work/git/postgres` (checkout on
+- Main repo `<workspace>/work/git/postgres` (checkout on
   REL_17_STABLE; never check it out or touch its tree). Base: local branch
   `wet-v11`.
 - Worktree:
-  `git -C /Users/dmitryfomin/work/git/postgres worktree add -b wet-v11-wpb /Users/dmitryfomin/work/git/postgres_patch/wet-v11-wpb wet-v11`
+  `git -C <workspace>/work/git/postgres worktree add -b wet-v11-wpb <workspace>/work/git/postgres_patch/wet-v11-wpb wet-v11`
 - Never push. Never bare `git stash`. Do not touch other worktrees.
 - Commit metadata: author/committer `Dmitry Fomin <fomin.list@gmail.com>`,
   explanatory body, single trailer
@@ -93,9 +93,9 @@ costs code size and forces spills into the enclosing function's prologue
 
 ## Deliverable
 
-`/Users/dmitryfomin/work/git/postgres_patch/v11/reports/wpb-report.md`
+`<workspace>/work/git/postgres_patch/v11/reports/wpb-report.md`
 with the commit hash, test summary, codegen counts before/after, and
-anything undone; plus `git format-patch -1 -o /Users/dmitryfomin/work/git/postgres_patch/v11/patches-wpb/`.
+anything undone; plus `git format-patch -1 -o <workspace>/work/git/postgres_patch/v11/patches-wpb/`.
 Final chat message at most 8 lines.
 
 Note: add `-Dldap=disabled` to the meson line (macOS SDK OpenLDAP deprecation warnings fail -Dwerror; unrelated to this series).

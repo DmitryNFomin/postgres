@@ -5,15 +5,15 @@ the cherry-picks and squashes described here. Do not push anything.
 
 ## Repository facts
 
-- Main repo: `/Users/dmitryfomin/work/git/postgres`. Its checkout is on
+- Main repo: `<workspace>/work/git/postgres`. Its checkout is on
   `REL_17_STABLE`; never check out anything there and never touch its
-  working tree. Use `git -C /Users/dmitryfomin/work/git/postgres` for all
+  working tree. Use `git -C <workspace>/work/git/postgres` for all
   ref operations and create a worktree for the actual work.
 - Remotes: `origin` = postgres/postgres (upstream), `fork` =
   DmitryNFomin/postgres. Fetch both first:
   `git fetch --no-tags origin master` and
   `git fetch --no-tags fork wet-v8 bench-v9-patched bench-v10-guard`.
-- Existing worktrees: `/Users/dmitryfomin/work/git/postgres_patch/wet-v8`
+- Existing worktrees: `<workspace>/work/git/postgres_patch/wet-v8`
   (branch `wet-v8`). Do not touch it.
 - Never use bare `git stash`. Prefer temporary commits.
 
@@ -30,8 +30,8 @@ wet-v8 and the v9 commit on those branches. It must NOT be included.
 
 ## Target
 
-Branch `wet-v11`, worktree `/Users/dmitryfomin/work/git/postgres_patch/wet-v11`,
-created with `git -C /Users/dmitryfomin/work/git/postgres worktree add -b wet-v11 /Users/dmitryfomin/work/git/postgres_patch/wet-v11 fork/wet-v8`.
+Branch `wet-v11`, worktree `<workspace>/work/git/postgres_patch/wet-v11`,
+created with `git -C <workspace>/work/git/postgres worktree add -b wet-v11 <workspace>/work/git/postgres_patch/wet-v11 fork/wet-v8`.
 
 Exactly five commits on top of current `origin/master`, in this order:
 
@@ -77,7 +77,7 @@ cherry-pick each wet-v8 commit in order, and after 1, 3, 4 do
   `Discussion: https://postgr.es/m/CAPHG-0mAOn05ae6Kqx1wHXxzOk4E5W7ajjd=QBhgkR7a0uyQmw@mail.gmail.com`
 - No `Co-Authored-By`, no `Claude-Session`, no other trailer of any kind.
   These commits are destined for pgsql-hackers.
-- Grep the final five messages and the diff for the string `adyen` and for
+- Grep the final five messages and the diff for the string `the employer domain` and for
   the word `Claude`; both must be absent.
 
 ## Verification (no server may be started; compile is allowed)
@@ -97,11 +97,11 @@ cherry-pick each wet-v8 commit in order, and after 1, 3, 4 do
    `meson setup build --buildtype=debugoptimized -Dcassert=true -Dwerror=true -Dinjection_points=true -Dtap_tests=enabled -Dssl=openssl -Dprefix=$PWD/install`
    `ninja -C build` must finish with zero warnings. Do NOT run `meson test`,
    `ninja install`, `initdb` or `pg_ctl` in this work package.
-4. `git format-patch -v11 -5 -o /Users/dmitryfomin/work/git/postgres_patch/v11/patches-v11/ origin/master..wet-v11`.
+4. `git format-patch -v11 -5 -o <workspace>/work/git/postgres_patch/v11/patches-v11/ origin/master..wet-v11`.
 
 ## Deliverable
 
-Write `/Users/dmitryfomin/work/git/postgres_patch/v11/reports/wp0-report.md`
+Write `<workspace>/work/git/postgres_patch/v11/reports/wp0-report.md`
 containing: the five commit hashes with subjects, the patch-id of commit 2
 before and after, the conflict list, the diff-comparison result from step 2
 verbatim (or "identical"), the last 3 lines of the ninja output, and

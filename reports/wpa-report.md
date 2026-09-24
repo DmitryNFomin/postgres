@@ -1,6 +1,6 @@
 # WPA report: `contrib/pg_wait_event_tracing` module-side overhead work
 
-Branch `wet-v11-wpa`, worktree `/Users/dmitryfomin/work/git/postgres_patch/wet-v11-wpa`,
+Branch `wet-v11-wpa`, worktree `<workspace>/work/git/postgres_patch/wet-v11-wpa`,
 based on local branch `wet-v11` (5 commits on `origin/master`, tip
 `0cf1c2feaef "pg_wait_event_tracing: trace level"`).
 
@@ -18,13 +18,13 @@ Both authored/committed as `Dmitry Fomin <fomin.list@gmail.com>`, each with
 a single `Discussion:` trailer, no other trailers. Verified with
 `git log --format='%an <%ae>%n%cn <%ce>'` on both commits.
 
-Patch files: `/Users/dmitryfomin/work/git/postgres_patch/v11/patches-wpa/0001-*.patch`,
+Patch files: `<workspace>/work/git/postgres_patch/v11/patches-wpa/0001-*.patch`,
 `.../0002-*.patch` (from `git format-patch -2`).
 
 ## Build/test environment
 
 ```
-cd /Users/dmitryfomin/work/git/postgres_patch/wet-v11-wpa
+cd <workspace>/work/git/postgres_patch/wet-v11-wpa
 export PKG_CONFIG_PATH=/opt/homebrew/opt/icu4c@78/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/readline/lib/pkgconfig
 meson setup build --buildtype=debugoptimized -Dcassert=true -Dwerror=true -Dinjection_points=true -Dtap_tests=enabled -Dssl=openssl -Dldap=disabled -Dprefix=$PWD/install
 ninja -C build && ninja -C build install
